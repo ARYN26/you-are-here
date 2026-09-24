@@ -73,7 +73,8 @@ class Base(unittest.TestCase):
         self.data = self.cfg / "you-are-here"
         self.env = dict(os.environ, CLAUDE_CONFIG_DIR=str(self.cfg), HOME=str(self.home), USERPROFILE=str(self.home),
                         GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.com",
-                        GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.com")
+                        GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.com",
+                        PYTHONDONTWRITEBYTECODE="1")  # Apple's python3 caches bytecode under $HOME/Library
 
     def py(self, script, *args, stdin="", cwd=None, scripts=SCRIPTS):
         p = subprocess.run([sys.executable, str(scripts / script), *args], input=stdin.encode("utf-8"),
