@@ -6,9 +6,9 @@ allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*)
 
 Run this with the Bash tool, exactly as written:
 
-python3 "${CLAUDE_SKILL_DIR}/../../scripts/where.py"
+PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py"
 
-If `python3` is not found or fails (as on Windows), run the same command with `python` instead.
+`PY` is `python` on Windows and `python3` elsewhere. If it is not found or fails, try the other, then `py -3`, and keep whichever works.
 
 Show the output verbatim in a code block.
 

@@ -8,7 +8,9 @@ argument-hint: "[plan file path]"
 
 Input: the plan file in `$ARGUMENTS`. Otherwise use the plan approved in this session, or else the newest file in `~/.claude/plans` that matches the current work. Read only its phase list and ground rules.
 
-Use **beads** when `.beads/` exists at the repo root and `bd --version` runs. Otherwise use **STATE.md**.
+`PY` is `python` on Windows and `python3` elsewhere. If it is not found or fails, try the other, then `py -3`, and keep whichever works.
+
+Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh` and read its `bd` field. Use **beads** when `.beads/` exists at the repo root and `bd` is a path; run beads commands as that path, quoted. If `.beads/` exists but `bd` is null, tell the user the bd CLI was not found before using **STATE.md**. Otherwise use **STATE.md**.
 
 ## Beads
 
@@ -42,6 +44,6 @@ Edit STATE.md at the repo root (create it if missing; keep any dated entries). R
 
 ## Check the result
 
-Run `python3 "${CLAUDE_SKILL_DIR}/../../scripts/where.py"` (if `python3` is not found or fails, as on Windows, use `python`) and show its output. The PLAN, PHASE and NEXT lines must be right. Fix the beads or STATE.md if they are not.
+Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py"` and show its output. The PLAN, PHASE and NEXT lines must be right. Fix the beads or STATE.md if they are not.
 
 Keep phase text short. The plan holds the detail; beads or STATE.md hold state and pointers.

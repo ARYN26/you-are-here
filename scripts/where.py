@@ -360,6 +360,43 @@ def age_days(iso):
 DEFAULT_TRUNKS = {"main", "master", "develop", "dev"}
 
 
+def landing(top, prs):
+    """Where work lands, for protection when config.json names no PROD: the bases at the bottom of the open
+    PR stacks (most PRs first), then the remote's default branch. Read from local refs and the PR list."""
+    heads = {p.get("headRefName") for p in prs or []}
+    count = {}
+    for p in prs or []:
+        b = p.get("baseRefName")
+        if b and b not in heads:
+            count[b] = count.get(b, 0) + 1
+    out = sorted(count, key=lambda b: (-count[b], b))
+    ref = (run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], top, timeout=3) or "").strip()
+    if ref.startswith("origin/") and ref[7:] not in out:
+        out.append(ref[7:])
+    return out
+
+
+def prod_branch(prod):
+    """The branch a PROD line names: a `backticked` word, else its first word."""
+    m = re.search(r"`([^`\s]+)`", prod or "") or re.match(r"\s*([\w./-]+)", prod or "")
+    return m.group(1) if m else ""
+
+
+def protected(s):
+    """Branches nothing may commit on or push: trunks, the PROD branch, and where open PRs land."""
+    trunks = [s["trunks"]] if isinstance(s["trunks"], str) else s["trunks"] or []
+    return sorted(DEFAULT_TRUNKS | set(trunks) | set(s.get("landing") or []) | ({prod_branch(s["prod"])} - {""}))
+
+
+def prod_line(s):
+    """The PROD text: config.json's, else the inferred landing branch when it is not an ordinary trunk."""
+    if s["prod"]:
+        return s["prod"]
+    trunks = DEFAULT_TRUNKS | set([s["trunks"]] if isinstance(s["trunks"], str) else s["trunks"] or [])
+    guess = next((b for b in s.get("landing") or [] if b not in trunks), "")
+    return f"`{guess}` inferred: open PRs land there. Never push or commit it; set prod in config.json" if guess else ""
+
+
 def pr_lines(prs, branch, bstate, limit=4, trunks=()):
     if not prs:
         return [], {}
@@ -440,9 +477,15 @@ def collect(cwd, use_bd=True, use_gh=True):
     if mdplan and not (bstate or {}).get("plan"):  # beads wins when it has a plan epic
         bstate = {**(bstate or {"human": [], "in_progress": [], "open_count": 0}), **mdplan}
     prs = finish_gh(proc)
-    return {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "beads": bstate,
+    land = landing(str(top), prs)
+    if prs is None:  # no gh this time: keep the PR bases the last gh run saw
+        land += [b for b in read_json(where_cache_path(main_root), {}).get("landing") or [] if b not in land]
+    s = {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "beads": bstate,
             "beads_source": source, "state_md": sm, "prs": prs, "gh_tried": proc is not None,
-            "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", [])}
+            "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
+            "bd": find_tool("bd") if use_bd else None}
+    s["protected"] = protected(s)
+    return s
 
 
 def render(s, brief=False):
@@ -486,8 +529,8 @@ def render(s, brief=False):
             tail.append(f"{len(b['human'])} waiting on you")
         if tail:
             lines.append(" | ".join(tail))
-        if s["prod"]:
-            lines.append(f"PROD {s['prod']}")
+        if prod_line(s):
+            lines.append(f"PROD {prod_line(s)}")
         lines.append(FOOTER)
         return lines
 
@@ -526,8 +569,8 @@ def render(s, brief=False):
         lines.append(("PRs     " if i == 0 else "        ") + ln)
     if s["prs"] is None and s.get("gh_tried"):
         lines.append("PRs     (gh unavailable or offline)")
-    if s["prod"]:
-        lines.append(f"PROD    {s['prod']}")
+    if prod_line(s):
+        lines.append(f"PROD    {prod_line(s)}")
     return lines[:15]
 
 
@@ -542,7 +585,7 @@ def write_cache(s):
         "plan": b.get("plan"), "phase": phase, "phase_running": bool(b.get("phase")),
         "human": len(b.get("human") or []),
         "prs": index if s["prs"] is not None else old.get("prs", {}),
-        "state_md": s["state_md"], "prod": s["prod"]})
+        "state_md": s["state_md"], "prod": prod_line(s), "landing": s["landing"]})
 
 
 # ---------------------------------------------------------------- projects (home view, --path)

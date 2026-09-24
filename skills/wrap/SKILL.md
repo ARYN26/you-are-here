@@ -12,11 +12,11 @@ Goal: after this, a fresh session (`/clear`) resumes from `/yah:where` alone. St
 
 Run with Bash, exactly:
 
-python3 "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh
+PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh
 
-If `python3` is not found or fails (as on Windows), run the same command with `python`.
+`PY` is `python` on Windows and `python3` elsewhere. If it is not found or fails, try the other, then `py -3`, and keep whichever works.
 
-Note `beads.plan` (its `source` is `beads`, `STATE.md` or `NOW.md`), `beads.phase` (label, branch, id), `git.branch`, `git.dirty`, `state_md` and `prod`.
+Note `beads.plan` (its `source` is `beads`, `STATE.md` or `NOW.md`), `beads.phase` (label, branch, id), `git.branch`, `git.dirty`, `state_md`, `protected` and `bd`. Run beads commands as the `bd` path, quoted; `bd` null means the CLI is missing: say so and use **2b**.
 - Plan from beads, or no plan but an in_progress bead: use **2a** (treat that bead as the phase).
 - Plan from STATE.md/NOW.md, or no beads at all: use **2b**.
 
@@ -44,7 +44,7 @@ The folder is `docs/brain` at the repo root, unless yah's config sets `brain_dir
 
 Ask: did this session establish a durable project fact or decision a future session would otherwise rediscover (a constraint, convention, gotcha, or decision with its reason)? Progress belongs in NEXT; personal preferences belong in memory. If no, skip. If yes, write at most one note.
 
-Run `python3 "${CLAUDE_SKILL_DIR}/../../scripts/brain.py" find <key words>` (same python fallback), then:
+Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/brain.py" find <key words>`, then:
 - A listed note already holds the fact: edit it in place only if a detail changed, then run `brain.py index`.
 - The fact replaces a listed note: `brain.py new ... --supersedes <old-slug>`. Never delete a note.
 - Otherwise: `brain.py new --title "<fact>" --tldr "<one line, 200 chars or fewer>" --tags a,b --paths "<globs>" --source "<evidence>"`.
@@ -56,7 +56,7 @@ Stage what brain.py wrote (the note and INDEX.md, or `_pending.md`) with the WIP
 ## 4. Commit work in progress
 
 Only if `git.dirty` > 0 or step 3 wrote a note.
-- Never commit on main, master, a trunk or the production branch (the PROD line of `/yah:where` names it). If you are on one, stop and tell the user.
+- Never commit on a branch in `protected` (trunks, the PROD branch, and where open PRs land). If you are on one, stop and tell the user.
 - Run `git status`, then stage files by name. Never stage `.env*`, credentials, or large generated files the repo does not already track. Stage STATE.md only if the repo already tracks it.
 - `git commit -m "wip(<phase label>): <what>"`. Do not push unless step 6 applies.
 
@@ -70,7 +70,7 @@ If this project's auto-memory index (`MEMORY.md` in its memory folder under `$CL
 
 The phase's done-when is met and the tests pass.
 1. Review the branch diff: run `/code-review --fix`, then `/simplify`, if available. Re-run the tests.
-2. Push the feature branch. Never push a trunk or the production branch.
+2. Push the feature branch. Never push a branch in `protected`.
 3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body.
 4. Record it. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open, checks <state>"`. STATE.md: mark the phase `[x]` and add `| PR #<N>`.
 5. Claim the next phase and give it a NEXT line. Beads: `bd update <next-id> --claim`. STATE.md: mark it `[~]`.

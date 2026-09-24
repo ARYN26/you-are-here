@@ -54,15 +54,28 @@ Durable project facts, one per note, kept by yah (you are here). The folder open
 
 # ---------------------------------------------------------------- notes
 
+SHORT = frozenset("pr ui ux ci cd db qa io ai ml os js ts".split())  # 2-letter words that carry meaning
+
+
+def stem(t):
+    """A light stemmer, the same on both sides: pushes, pushed, pushing -> push; caches, cached -> cach."""
+    if len(t) > 4 and t.endswith("ies"):
+        return t[:-3] + "y"
+    if t.endswith(("ches", "shes", "xes", "zes")) and len(t) > 4 or t.endswith("sses"):
+        t = t[:-2]
+    elif len(t) > 5 and t.endswith(("ing", "ed")):
+        t = t[:-3] if t.endswith("ing") else t[:-2]
+    elif len(t) > 3 and t.endswith("s") and not t.endswith(("ss", "us", "is")):
+        t = t[:-1]
+    return t[:-1] if len(t) > 4 and t.endswith("e") else t
+
+
 def tokens(text):
     out = set()
     for t in re.split(r"[^a-z0-9]+", (text or "").lower()):
-        if len(t) < 3 or t in STOP:
+        if (len(t) < 3 and t not in SHORT) or t in STOP:
             continue
-        if len(t) > 4 and t.endswith("s"):
-            t = t[:-1]
-        if t not in STOP:
-            out.add(t)
+        out.add(stem(t))
     return out
 
 
@@ -230,7 +243,7 @@ def rank(notes, text, phase="", changed=()):
         title, tags, tldr = n["words"]
         s = 3 * len(q & title) + 2 * len(q & tags) + len(q & tldr) + 1.5 * len(ph & (title | tags))
         if changed and any(glob_hit(g, changed) for g in n["paths"]):
-            s += 4
+            s += 4 if s else 2  # a changed file alone ranks below any word match
         score[n["slug"]] = s
 
     def order(n):

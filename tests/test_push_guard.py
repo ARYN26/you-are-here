@@ -156,6 +156,12 @@ class PushGuardTests(unittest.TestCase):
         self.assertEqual(self.hook(payload("git push -u origin feat/x")), "")
         self.assertEqual(self.hook(payload("git push --force"), protected=""), "")  # not inside `yah run`
         self.assertEqual(self.hook(payload("git push --force", tool="Read")), "")
+        # The PowerShell tool is guarded too: `;` and `& git` split like Bash, so the same rules apply.
+        for cmd in ("git push origin main", "cd x; git push --force", "& git push -u origin main", "gh pr merge 12"):
+            with self.subTest(powershell=cmd):
+                out = json.loads(self.hook(payload(cmd, tool="PowerShell")))
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(self.hook(payload("git push -u origin feat/x", tool="PowerShell")), "")
         self.assertEqual(self.hook("not json"), "")
 
 

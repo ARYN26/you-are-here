@@ -151,6 +151,15 @@ class RecallTests(Base):
                                    "from PR branches. (PR #41, 2026-09-20)")
         self.assertEqual(self.recall_json(repo, "stripe", "signature")["matches"][0]["slug"], "stripe-webhooks")
 
+    def test_stems_and_short_words(self):
+        b = self.brain
+        for a, c in (("pushes", "push"), ("pushed", "pushing"), ("caches", "cache"), ("queries", "query"),
+                     ("boxes", "box"), ("phases", "phase"), ("notes", "note"), ("deploys", "deployed")):
+            with self.subTest(a=a, c=c):
+                self.assertEqual(b.tokens(a), b.tokens(c))
+        self.assertEqual(b.tokens("the PR and UI"), {"pr", "ui"})
+        self.assertEqual(b.tokens("status process"), {"status", "process"})
+
     def test_superseded_notes_are_excluded(self):
         repo = self.repo(VAULT)
         r = self.recall_json(repo, "deploys run from the release branch")
@@ -165,8 +174,8 @@ class RecallTests(Base):
 
     def test_paths_globs_match_diff_and_status(self):
         repo = self.repo(VAULT)
-        # nothing in the text matches: only the +4 for globs over the changed files scores
-        self.assertEqual(self.scores(repo, "zzz"), {"api-rate-limit": 4, "stripe-webhooks": 4})
+        # nothing in the text matches: only the +2 for globs over the changed files scores
+        self.assertEqual(self.scores(repo, "zzz"), {"api-rate-limit": 2, "stripe-webhooks": 2})
         (repo / ".github" / "workflows").mkdir(parents=True)
         (repo / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")  # untracked
         self.assertEqual(set(self.scores(repo, "zzz")), {"api-rate-limit", "stripe-webhooks", "vercel-deploys-main"})
@@ -192,7 +201,7 @@ class RecallTests(Base):
             encoding="utf-8")
         # 1.5 x {stripe, webhook, payment} + 4 for src/payments/charge.ts
         self.assertEqual(self.scores(repo, "zzz")["stripe-webhooks"], 8.5)
-        self.assertEqual(self.scores(repo, "zzz", "--phase", "")["stripe-webhooks"], 4)
+        self.assertEqual(self.scores(repo, "zzz", "--phase", "")["stripe-webhooks"], 2)
 
     def test_one_hop_link_bonus(self):
         repo = self.repo(VAULT)

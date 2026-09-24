@@ -51,7 +51,7 @@ NO_WINDOW = where.NO_WINDOW
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
 KEEP_RUNS = 20
 TAG = re.compile(r"^\s*YAH-RESULT:\s*(.+?)\s*$", re.M)
-DENY_BASE = ["Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push *--force*)", "Bash(git push * -f*)",
+DENY_BASE = ["PowerShell", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push *--force*)", "Bash(git push * -f*)",
              "Bash(git push *+*)", "Bash(gh pr merge*)", "Bash(gh api *merge*)", "Bash(gh repo delete*)",
              "Bash(git push *--delete*)", "Bash(git push *--mirror*)", "Bash(git push *--all*)",
              "Bash(git push *--prune*)", "Bash(git push -d*)", "Bash(git push * -d *)"]
@@ -77,10 +77,7 @@ def brief(value, n=60):
 
 # ---------------------------------------------------------------- setup
 
-def prod_branch(prod):
-    """The branch a PROD line names: a `backticked` word, else its first word."""
-    m = re.search(r"`([^`\s]+)`", prod or "") or re.match(r"\s*([\w./-]+)", prod or "")
-    return m.group(1) if m else ""
+prod_branch = where.prod_branch
 
 
 def protected(trunks, prod):
@@ -122,13 +119,15 @@ def claude_argv(r):
 def guard_settings():
     """Hooks for run iterations only; interactive sessions never pay for them. Headless sessions get one
     prompt, so the UserPromptSubmit guard fires once: the context guard also runs as PostToolUse. The push
-    guard (PreToolUse on Bash) denies pushes the DENY patterns can miss; YAH_PROTECTED names the branches."""
+    guard (PreToolUse on Bash and PowerShell) denies pushes the DENY patterns can miss; YAH_PROTECTED names the
+    branches. DENY_BASE also turns the PowerShell tool off in runs: its commands would bypass the Bash patterns."""
     here, py = Path(__file__).resolve().parent, Path(sys.executable).as_posix()
 
     def hook(name):
         return {"type": "command", "command": f'"{py}" "{(here / name).as_posix()}"', "timeout": 10}
     return json.dumps({"hooks": {"PostToolUse": [{"hooks": [hook("context_guard.py")]}],
-                                 "PreToolUse": [{"matcher": "Bash", "hooks": [hook("push_guard.py")]}]}})
+                                 "PreToolUse": [{"matcher": t, "hooks": [hook("push_guard.py")]}
+                                                for t in ("Bash", "PowerShell")]}})  # no "|": cmd /c reads it as a pipe
 
 
 # ---------------------------------------------------------------- PR and phase
@@ -531,13 +530,16 @@ def main():
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
     prod = prod_branch(str(pcfg.get("prod") or ""))
     branch = read_branch(git_dir) if git_dir else None
+    gh_path = where.find_tool("gh")
+    # Where open PRs land and the remote's default branch are protected too, so a repo with no config.json
+    # still has its PROD branch covered.
+    trunks |= set(where.landing(str(top), where.finish_gh(where.start_gh(str(top))) if gh_path else None))
     if not target and (branch in trunks or (prod and branch == prod)):
         return refuse(f"you are on {branch}, a trunk or the PROD branch. Check out the phase branch first, "
                       "or pass P<n> and resume creates it from base.")
     claude = shutil.which("claude")
     if not claude:
         return refuse("claude not found on PATH.")
-    gh_path = where.find_tool("gh")
     if not gh_path:
         return refuse("gh (the GitHub CLI) not found. yah run needs it to open the PR and follow its checks.")
     r = SimpleNamespace(

@@ -252,6 +252,17 @@ class GuardTests(Base):
         self.state("g5", week=60, pace=30, tokens=1000)
         self.assertIsNone(self.guard(sid="g5"))  # once a day, across sessions
 
+    def test_ultracode_rules_once_per_session(self):
+        self.config(ultracode=True)
+        r = self.guard(sid="u1")
+        self.assertIn("Ultracode is on", r["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("systemMessage", r)  # model-only: nothing shown to the user
+        self.assertIsNone(self.guard(sid="u1"))
+        self.state("u2", week=60, pace=30, tokens=1000)
+        ctx = self.guard(sid="u2")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("under 5 agents", ctx)
+        self.assertNotIn("high over xhigh", ctx)
+
 
 # ---------------------------------------------------------------- where.py
 
@@ -402,6 +413,19 @@ class PrLinesTests(unittest.TestCase):
         lines, _ = w.pr_lines(prs, "main", None, limit=2)
         self.assertEqual(lines[-1], "+2 more (gh pr list)")
 
+    def test_prod_is_inferred_from_where_prs_land(self):
+        w = load_where()
+        prs = [{"headRefName": "feat/a", "baseRefName": "live"}, {"headRefName": "feat/b", "baseRefName": "feat/a"},
+               {"headRefName": "feat/c", "baseRefName": "live"}, {"headRefName": "fix", "baseRefName": "main"}]
+        with tempfile.TemporaryDirectory() as d:  # no remote: no origin/HEAD
+            subprocess.run(["git", "init", "-q", d], check=True)
+            self.assertEqual(w.landing(d, prs), ["live", "main"])
+            self.assertEqual(w.landing(d, None), [])
+        s = {"prod": "", "trunks": "release", "landing": ["main", "live"]}
+        self.assertTrue(w.prod_line(s).startswith("`live` inferred"))
+        self.assertEqual(w.prod_line({**s, "landing": ["main", "release"]}), "")  # ordinary trunks say nothing
+        self.assertEqual(w.prod_line({**s, "prod": "main deploys"}), "main deploys")
+
 
 # ---------------------------------------------------------------- setup.py
 
@@ -492,6 +516,20 @@ class SetupTests(Base):
         self.assertIn("statusLine", self.settings())
         self.setup_py("--uninstall")
         self.assertEqual(self.settings(), {})
+
+    def test_ultracode_opt_in_and_uninstall(self):
+        self.settings({**self.SETTINGS, "workflowSizeGuideline": "small"})
+        out, err, rc = self.setup_py("--tier", "max20", "--ultracode", "--yes")
+        self.assertEqual(rc, 0, err)
+        s = self.settings()
+        self.assertEqual((s["ultracode"], s["workflowSizeGuideline"]), (True, "medium"))
+        self.assertEqual({k: s[k] for k in self.SETTINGS}, self.SETTINGS)  # model, effort, env untouched
+        self.assertTrue(json.loads((self.data / "config.json").read_text("utf-8"))["ultracode"])
+        self.assertIn("ultracode  unchanged", self.setup_py("--ultracode", "--yes")[0])
+        self.setup_py("--uninstall")
+        s = self.settings()
+        self.assertNotIn("ultracode", s)
+        self.assertEqual(s["workflowSizeGuideline"], "small")
 
     def test_launcher_block(self):
         rc_file = self.home / ".bashrc"

@@ -25,7 +25,7 @@ NOTIFIER = "osascript" if sys.platform == "darwin" else "powershell" if IS_WIN e
 URL = "https://example.com/pr/12"
 GREEN = "PR #12 is open and green. The merge is yours."
 # The SPEC's DENY patterns, spelled out here so the test does not trust run.py's own list.
-DENY = ["Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push *--force*)", "Bash(git push * -f*)",
+DENY = ["PowerShell", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push *--force*)", "Bash(git push * -f*)",
         "Bash(git push *+*)", "Bash(gh pr merge*)", "Bash(gh api *merge*)", "Bash(gh repo delete*)",
         "Bash(git push *--delete*)", "Bash(git push *--mirror*)", "Bash(git push *--all*)", "Bash(git push *--prune*)"]
 PER_BRANCH = ["Bash(git push * {0})", "Bash(git push * {0} *)", "Bash(git push * HEAD:{0}*)", "Bash(git push * *:{0}*)",
@@ -379,10 +379,21 @@ class RunTests(unittest.TestCase):
         self.assertIn("Bash(git push -d*)", argv)
         hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]
         self.assertIn("context_guard.py", hooks["PostToolUse"][0]["hooks"][0]["command"])
-        self.assertEqual(hooks["PreToolUse"][0]["matcher"], "Bash")
+        self.assertEqual([h["matcher"] for h in hooks["PreToolUse"]], ["Bash", "PowerShell"])
         self.assertIn("push_guard.py", hooks["PreToolUse"][0]["hooks"][0]["command"])
         self.assertEqual((self.fake / "claude.env").read_text("utf-8"), "dev,develop,main,master,release,stable")
         self.git(repo, "symbolic-ref", "HEAD", "refs/heads/release")
+        self.assertIn("PROD branch", self.run_yah(repo, code=5))
+
+    def test_no_config_still_protects_where_open_prs_land(self):
+        repo = self.repo()
+        self.script(claude=[{"tag": "needs-human"}],
+                    list=[{"number": 7, "headRefName": "feat/a", "baseRefName": "live"},
+                          {"number": 8, "headRefName": "feat/b", "baseRefName": "feat/a"}])
+        self.run_yah(repo, "P2", code=2)
+        self.assert_safe(self.calls("claude")[0], ("main", "master", "live"))
+        self.assertNotIn("feat/a", (self.fake / "claude.env").read_text("utf-8").split(","))
+        self.git(repo, "symbolic-ref", "HEAD", "refs/heads/live")
         self.assertIn("PROD branch", self.run_yah(repo, code=5))
 
     def test_project_name_shared_by_two_repos_is_refused(self):

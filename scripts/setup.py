@@ -4,10 +4,11 @@
     setup.py --launcher bash|zsh|fish|powershell   print the launcher snippet
     setup.py --install-launcher RCFILE             append it to RCFILE as a marked block
     setup.py --install-rules [FILE]                append RULES.md to FILE (default: CLAUDE.md)
+    setup.py --ultracode                           opt-in: ultracode on by default, workflows medium
     setup.py --uninstall                           undo all of the above
 
 Merge-only: settings.json is backed up first and only its statusLine key changes (never model,
-effort, permissions, hooks or env). What it changed goes into setup-state.json in the data dir,
+effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode. What it changed goes into setup-state.json in the data dir,
 so --uninstall can put things back. --dry-run writes nothing. Re-running is safe.
 """
 import argparse
@@ -240,6 +241,9 @@ def install(a, py, sdir, state, state_file, say):
             save_json(state_file, state, dry)
             say(f"statusLine {ours['command']}  ({sp})")
 
+    if a.ultracode:
+        ultracode(settings, sp, cfg, state, state_file, dry, say)
+
     tier = a.tier or cfg.get("tier") or "max5"
     if cfg.get("tier") == tier:
         say(f"config     unchanged (tier {tier})")
@@ -259,9 +263,39 @@ def install(a, py, sdir, state, state_file, say):
     return 0
 
 
+ULTRA = {"ultracode": True, "workflowSizeGuideline": "medium"}
+
+
+def ultracode(settings, sp, cfg, state, state_file, dry, say):
+    """Opt-in for Max 20x: ultracode on in every session, workflows sized medium (<10 agents). The old values
+    go into setup-state.json so --uninstall can put them back; config.json's ultracode turns on the guard's rules."""
+    if all(settings.get(k) == v for k, v in ULTRA.items()):
+        say("ultracode  unchanged (on, workflows medium)")
+    else:
+        backup(sp, dry, say)
+        state.setdefault("ultracode", {k: settings.get(k) for k in ULTRA})
+        settings.update(ULTRA)
+        save_json(sp, settings, dry)
+        save_json(state_file, state, dry)
+        say(f"ultracode  on, workflowSizeGuideline medium  ({sp})")
+    if cfg.get("ultracode") is not True:
+        cfg["ultracode"] = True
+        save_json(data_dir() / "config.json", cfg, dry)
+
+
 def uninstall(sdir, state, state_file, dry, say):
     sp = claude_dir() / "settings.json"
     settings = load_obj(sp)
+    prev = state.get("ultracode")
+    if isinstance(prev, dict):
+        backup(sp, dry, say)
+        for k, v in prev.items():
+            if v is None:
+                settings.pop(k, None)
+            else:
+                settings[k] = v
+        save_json(sp, settings, dry)
+        say("ultracode  restored: " + ", ".join(f"{k}={v}" for k, v in prev.items()))
     cur, mine = settings.get("statusLine"), state.get("statusLine")
     ours_now = isinstance(cur, dict) and f'{sdir}/statusline.py"' in str(cur.get("command", ""))
     if cur is not None and (cur == (mine or {}).get("ours") or (not mine and ours_now)):
@@ -295,6 +329,8 @@ def main():
     ap.add_argument("--install-launcher", metavar="RCFILE", help="append the launcher to RCFILE as a marked block")
     ap.add_argument("--install-rules", nargs="?", const="", metavar="FILE",
                     help="append RULES.md to FILE as a marked block (default: CLAUDE.md in the Claude config dir)")
+    ap.add_argument("--ultracode", action="store_true",
+                    help="opt-in (for max20): ultracode on by default, workflowSizeGuideline medium")
     ap.add_argument("--yes", action="store_true", help="no prompts")
     a = ap.parse_args()
     say = (lambda s: print("[dry-run] " + s)) if a.dry_run else print
