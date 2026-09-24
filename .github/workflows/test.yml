@@ -1,0 +1,57 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.13"]
+        exclude:
+          # setup-python has no 3.9 build for the Apple-silicon macOS runners. macOS 3.9 is covered
+          # by the "system" entry instead: /usr/bin/python3 (3.9.6 from the Xcode Command Line Tools),
+          # the Python most macOS users actually have.
+          - os: macos-latest
+            python: "3.9"
+        include:
+          - os: macos-latest
+            python: system
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: matrix.python != 'system'
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Git identity
+        run: |
+          git config --global user.name "yah ci"
+          git config --global user.email "ci@example.com"
+
+      - name: Unit tests
+        if: matrix.python != 'system'
+        run: |
+          python --version
+          python -m unittest discover -s tests -v
+
+      - name: Unit tests (macOS system python3)
+        if: matrix.python == 'system'
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -m unittest discover -s tests -v
+
+      - name: Hook command strings under Git Bash
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          command -v sh python
+          python -m unittest discover -s tests -k Hook -v

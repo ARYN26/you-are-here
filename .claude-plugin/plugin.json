@@ -1,0 +1,13 @@
+{
+  "name": "yah",
+  "version": "0.1.0",
+  "description": "You are here: your plan, phase, next step and PRs at session start and in the statusline; nudges to wrap and /clear before limits bite; a small per-repo brain of one-fact notes; and `yah run`, which chains fresh sessions until a PR is open and green. It never merges.",
+  "author": {
+    "name": "ARYN26",
+    "url": "https://github.com/ARYN26"
+  },
+  "homepage": "https://github.com/ARYN26/you-are-here",
+  "repository": "https://github.com/ARYN26/you-are-here",
+  "license": "MIT",
+  "keywords": ["statusline", "context", "usage-limits", "session-state", "beads", "handoff", "workflow", "cost", "memory", "autonomous"]
+}

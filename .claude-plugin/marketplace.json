@@ -1,0 +1,27 @@
+{
+  "name": "you-are-here",
+  "owner": {
+    "name": "ARYN26",
+    "url": "https://github.com/ARYN26"
+  },
+  "metadata": {
+    "description": "yah: project state at session start and in the statusline, plus a wrap-then-/clear loop for Claude Code.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "yah",
+      "source": "./",
+      "description": "You are here: your plan, phase, next step and PRs at session start and in the statusline; nudges to wrap and /clear before limits bite; a small per-repo brain of one-fact notes; and `yah run`, which chains fresh sessions until a PR is open and green. It never merges.",
+      "version": "0.1.0",
+      "author": {
+        "name": "ARYN26"
+      },
+      "homepage": "https://github.com/ARYN26/you-are-here",
+      "repository": "https://github.com/ARYN26/you-are-here",
+      "license": "MIT",
+      "keywords": ["statusline", "context", "usage-limits", "session-state", "beads", "handoff"],
+      "category": "productivity"
+    }
+  ]
+}

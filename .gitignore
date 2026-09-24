@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.tmp
+.yah/
+# local build tracking, never committed
+STATE.md

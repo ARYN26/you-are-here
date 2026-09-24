@@ -1,0 +1,438 @@
+# you are here
+
+```
+Opus 5.5 high | 142k | 5h 31% | wk 48% (pace 52%) | checkout/payment | PR#12 | CHECKOUT P2/4
+```
+
+`yah` is a Claude Code plugin that shows which plan, phase, PR and next step you're on and tells you when to wrap (write the next step down, commit, then `/clear`), because short sessions that start from written-down state cost far less than long ones that rediscover it.
+
+![The yah statusline and /yah:where output for a fictional project](docs/demo.svg)
+
+## Why
+
+- **You lose your place.** A new session does not know your plan, phase, PR or next step, so it re-reads long docs to find out.
+- **Sessions run long with no signal to stop.** Opus 5.5, Sonnet 5 and Fable have a native 1M context window on every plan, and auto-compact fired at about 967k (observed in Claude Code 2.1.x). Nothing stops a session at 400k.
+- **Idle resumes cost a full cache rewrite.** Resuming after more than an hour idle rewrites the whole prompt cache.
+- **Project facts get rediscovered.** Plan state holds open work, not durable facts like "production deploys only from main". Each new session finds them again, in tokens and turns.
+
+The author measured one week of their own usage (2026-09-14 to 09-23, one Max 20x account, about $2,600 at API prices):
+
+| Where it went | Share |
+|---|---|
+| Main thread | 59% |
+| Workflow (ultracode) agents | 30% |
+| Subagents | 11% |
+
+**The expensive part was one long session, not parallelism.** 95% of Fable spend was a single main-thread session that ran at 400k to 970k context on xhigh and max effort, and auto-compacted 6 times. Other findings:
+
+- 23 resumes after more than an hour idle, each rewriting the whole cache.
+- Sessions started from the home folder, so project memory never loaded. Agents re-read big docs to orient, about 41k tokens in one start.
+- Finding "which PR and phase am I on" took 14 lookups.
+- Review workflows ran 23 to 30 agents over a handful of files.
+
+This is one person's week, not a benchmark. yah makes the habits that avoid it visible: one task per session, state written down, and a clear signal to wrap.
+
+## What you get
+
+A statusline, three hooks, seven skills, two agents and an optional run driver with two hooks of its own. Stdlib Python, MIT licensed.
+
+| Piece | What it does | What it costs you |
+|---|---|---|
+| Statusline | One line: model and effort, context (green, amber, then red with "wrap"), 5-hour and weekly use with pace, branch, PR, plan phase, items waiting on you, and "cache cold" after an hour idle. | About 35 ms per refresh on Windows and 55 ms in WSL (median of 25 runs), run locally. It never runs git, gh or bd. The model does not see it. |
+| SessionStart hook | Injects up to 6 lines of state (branch, plan, phase, NEXT, top PR, PROD) at startup, `/clear`, compact and resume. | About 100–120 tokens per session start (the block measured 370–450 characters over 4–5 lines on two real repos). It also runs `git`, plus `gh pr list` (over the network) and `bd list` when installed, before the session starts; a slow `gh` or `bd` can add up to about 8–10 s. |
+| Context guard | A UserPromptSubmit hook. It nudges once at the wrap mark, once at wrap now, once per session on a premium model, and once a day when weekly use runs ahead of pace. It never blocks. | One local Python run per prompt. A short message only when a nudge fires. |
+| Brain recall | A UserPromptSubmit hook. On a session's first prompt it injects the [brain](#the-brain) notes that match the prompt, the phase and your changed files. | 0 when the repo has no brain folder. Otherwise once per session, capped at about 2.5k tokens, usually a few hundred. Recall over 100 notes took about 80–130 ms. |
+| `/yah:where` | The full view in up to 15 lines: branch, plan, phase, NEXT, what waits on you, the PR stack and the PROD warning. | Runs git, plus `gh` and `bd` if installed. The output enters your context. |
+| `/yah:start` | Starts a task: recalls the notes that apply, restates the phase and NEXT, names the first step, then begins. Offers to create a brain folder if there is none. | One turn plus the recall output. |
+| `/yah:wrap` | Ends a task. Rewrites NEXT, closes finished beads, writes at most one brain note, commits WIP on the feature branch and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear". | One turn in your session. Writes in your repo. |
+| `/yah:phases` | Turns an approved plan into phases, in beads or in STATE.md. | One turn. Writes in your repo. |
+| `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). | Fable usage. See the plan table. |
+| `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
+| `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops. The merge is yours. See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
+| PostToolUse guard | The context guard again after each tool call, so wrap nudges reach a headless session, which has only one prompt. | Only inside `yah run` iterations: one local Python run per tool call. Interactive sessions never run it. |
+| Push guard | A PreToolUse hook on Bash that denies force pushes, pushes to protected branches and merges. See [Rails](#hands-free-runs-yah-run). | Only inside `yah run` iterations: one local Python run per Bash call. Interactive sessions never run it. |
+| Skill and agent listing | The short descriptions Claude Code lists so the model knows these exist. Each is 2 lines or fewer. | About 340 tokens per turn: 7 listed descriptions, 1,357 characters. `/yah:resume` and `/yah:setup` are hidden from the model. |
+| `/yah:setup` and the `yah` launcher | Sets the statusline and your tier. Optionally adds a `yah <project>` shell function that cds into a project and runs `claude`; `yah run` goes to the run driver. | Changes `statusLine` in settings.json, after a backup. Each step asks first. |
+
+## Install
+
+```
+/plugin marketplace add ARYN26/you-are-here
+/plugin install yah@you-are-here
+/yah:setup
+```
+
+A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers the `yah` launcher and offers to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md`. Each step needs your yes.
+
+You can also run setup from a terminal (use `python` on Windows):
+
+```
+python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --tier max5 --dry-run
+```
+
+Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell` (prints the snippet), `--install-launcher RCFILE`, `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder) and `--yes` (no prompts).
+
+**Requirements**
+
+- **Claude Code:** tested with 2.1.280. `yah run` needs a version that supports `--permission-prompts`.
+- **macOS:** needs `python3` 3.9+, from the Xcode Command Line Tools or Homebrew. Without the Command Line Tools, `/usr/bin/python3` opens an install dialog, so setup times out its probe and tells you to run `xcode-select --install` or `brew install python`. zsh gets the launcher.
+- **Linux:** needs `python3` 3.9+. bash gets the launcher.
+- **Windows:** needs Python 3.9+ from python.org or winget, plus Git for Windows. Claude Code runs hooks in Git Bash there. Setup tries `python`, then `py -3`, then `python3`, because `python3` on Windows is often the Microsoft Store stub. PowerShell gets the launcher. Without Git Bash, Claude Code falls back to PowerShell for hooks, and yah's hooks cannot run there (the statusline still works). Setup warns when it cannot find Git Bash.
+- **Optional:** `gh` adds the PR lines, and `yah run` needs it to follow the PR. `bd` (beads) adds richer phase tracking. Without it, yah reads a `STATE.md` file (see below).
+
+## The daily loop
+
+1. **Start in the project.** Run the launcher:
+   ```
+   yah shop
+   ```
+   It cds into the repo and runs `claude`. Run `yah` alone to list projects. If two repos share a folder name, `yah NAME` lists both and refuses; give one a key under `projects` in config.json. Starting from the home folder means project memory does not load. The SessionStart hook tells the model where you are.
+2. **Start the task:**
+   ```
+   /yah:start "add Apple Pay to the payment form"
+   ```
+   It recalls the brain notes that apply, restates the phase and NEXT, and begins. Typing the task plainly works too: the first prompt gets brain recall either way.
+3. **Work one task.**
+4. **Wrap when the statusline says wrap, then clear:**
+   ```
+   /yah:wrap
+   /clear
+   ```
+5. **Resume.** The fresh session gets PLAN, PHASE and NEXT injected, so it starts on the next step without reading docs. If the statusline says "cache cold", `/clear` beats resuming the old session.
+
+A new multi-phase plan was just approved? Run `/yah:phases` before its first phase. Want steps 2 to 5 repeated without you? See [`yah run`](#hands-free-runs-yah-run).
+
+## The brain
+
+Plan state (beads or STATE.md) holds open work and is rewritten every session. Durable facts, such as "Vercel builds production only from main" or "the API rate-limits at 10 rps, batch writes", live nowhere, so each session rediscovers them. The brain is a folder of one-fact notes in your repo, `docs/brain` by default (`brain_dir` in config). It is plain markdown: no database, no embeddings, no MCP server. The folder opens as an Obsidian vault.
+
+**Start one** with `/yah:start "<task>"`. If the repo has no brain folder, it says so once and offers `brain.py init`, which creates the folder with `README.md`, `_pending.md` and `INDEX.md`. It never creates one unasked. Every brain feature stays silent in a repo without the folder.
+
+**A note** is `<brain_dir>/<slug>.md`:
+
+```markdown
+---
+title: Vercel deploys only from main
+tags: [deploy, vercel]
+paths: ["vercel.json", ".github/**"]
+status: active
+source: PR #41, 2026-09-20
+---
+Vercel builds production only from main; previews come from PR branches.
+Optional detail. Links: [[preview-env-vars]].
+```
+
+- The slug is lowercase `a-z`, `0-9` and dashes, 60 characters or fewer.
+- Frontmatter is flat `key: value`, with lists as `[a, b]`. No nesting and no multi-line values.
+- The first body line is the TL;DR, 200 characters or fewer. `[[slug]]` links another note.
+- `paths` are globs (`**` means any depth). A note whose glob matches a file changed on your branch ranks higher.
+
+**Rot rules**
+
+| Rule | How it works |
+|---|---|
+| At most one note per wrap | `/yah:wrap` asks whether the session established a durable fact or decision a future session would otherwise rediscover. Progress goes in NEXT and preferences go in memory. It runs `brain.py find` first, then updates, supersedes or adds, and commits the note with the WIP commit. |
+| A source is required | A PR, commit sha, issue, URL, `path/to/file:line`, or `user, YYYY-MM-DD`. Without one, `brain.py new` appends the note to `_pending.md` instead, for you to accept or drop (`brain.py pending` lists them). |
+| Supersede, never delete | `brain.py new --supersedes <old-slug>` marks the old note `status: superseded` with `superseded_by`. |
+| INDEX.md is generated | Rewritten after every write, sorted by slug, never hand-edited. Each rewrite warns about missing sources, broken links and a `superseded_by` that points nowhere. |
+
+**What gets injected, and when.** On the first prompt of a session, a UserPromptSubmit hook ranks the active notes and injects the top 5 TL;DRs with their sources, up to 10 more slugs and the pending count. Later prompts in that session get nothing. Slash commands are skipped, and the first plain prompt after them still gets recall; `/yah:start` and `/yah:resume` run their own. The block is capped at `recall_max_chars` (10,000 characters, about 2.5k tokens) and is usually a few hundred tokens:
+
+```
+[yah] brain: 3 of 18 notes match "add Apple Pay to the payment form" (docs/brain, full list in INDEX.md)
+- stripe-webhooks-idempotent: Stripe retries webhooks; handlers dedupe on event.id. (PR #31, 2026-09-02)
+- payment-form-tests-use-test-clock: E2E tests pin time with a Stripe test clock. (tests/e2e/pay.spec.ts:14)
+- no-client-secret-in-logs: Never log a PaymentIntent client_secret. (user, 2026-09-10)
+1 unreviewed note in docs/brain/_pending.md
+```
+
+Ranking is word overlap, not semantic search. The title counts 3, tags 2, the TL;DR 1, and the current phase and NEXT 1.5 against the title and tags. A `paths` glob matching a changed file (`git diff <base>...HEAD` plus `git status`, 3 s timeout each) adds 4, and a link to or from a top-5 note adds 1 to a note that already matches. A note whose words never come up will not surface; INDEX.md is the full list. Claude runs `brain.py` for you: `recall`, `find`, `new`, `index`, `init` and `pending`, each with `--cwd DIR`. brain.py writes only inside the brain folder.
+
+## Hands-free runs: `yah run`
+
+Claude Code cannot `/clear` itself or start a new session from inside one. No hook, skill or tool can. So the wrap, clear, continue loop needs an outside driver, and `yah run` is that driver. Run it in a terminal, not inside Claude Code:
+
+```
+yah run [TARGET] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--model M] [--plugin-dir DIR] [--dry-run]
+```
+
+Without the launcher, run `python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/run.py"` with the same arguments (`python` on Windows). Try `--dry-run` first.
+
+| Argument | Meaning |
+|---|---|
+| `TARGET` | `P<n>` (a plan phase), `#<pr>`, or empty for the current phase. Shells treat `#` as a comment, so pass `12` or `'#12'`. A `P<n>` with no such phase is refused (exit 5). An empty TARGET is pinned to the current phase at start, so a wrap that claims the next phase cannot move the run. |
+| `--cwd DIR`, `--project NAME` | The repo to run in. Default: the current folder. `--project` refuses (exit 5) when two known repos share the name; use `--cwd` then. |
+| `--iterations N` | Max sessions. Default `run_iterations`, 8. |
+| `--budget USD` | `--max-budget-usd` per session. Default `run_budget_usd`, by tier (below). |
+| `--model M`, `--plugin-dir DIR` | Passed to `claude`. `--plugin-dir` tests an uninstalled checkout. |
+| `--dry-run` | Prints the resolved argv, the DENY list, the caps and what it would do now. Spawns nothing, but still calls `gh`. |
+
+**The loop.** Each iteration runs one headless session in the repo:
+
+```
+claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts none --disallowedTools <DENY...> \
+  --max-budget-usd 10 --output-format stream-json --verbose \
+  --settings '{"hooks":{"PreToolUse":[...push_guard.py],"PostToolUse":[...context_guard.py]}}'
+```
+
+`/yah:resume` orients with where.py and brain recall, gets on the phase branch (its instructions rule out trunks and PROD), does one bounded slice toward NEXT, runs the tests, follows `/yah:wrap` and ends with a `YAH-RESULT:` line. A decision that needs you becomes NEXT = `NEEDS-HUMAN: <question>`. Before and after each iteration, run.py reads the PR (`gh pr view`, then `gh pr checks`, required checks first) and the phase (where.py). Pending checks are polled every 30 s for up to `run_checks_wait_minutes`. Failing checks make the next slice `fix-checks`, which reads the failing CI logs. A CHANGES_REQUESTED review newer than the head commit makes it `address-review`.
+
+**Stop rules.** Checked before and after each iteration. The first match wins:
+
+| Exit | When |
+|---|---|
+| 6 | The PR was merged or closed. |
+| 0 | The PR is open, its checks pass (or it has none), no CHANGES_REQUESTED review is newer than the head commit, and the phase is closed (or TARGET was a PR). "The merge is yours." |
+| 2 | The last session needs you: it ended in an error (a timeout included), a permission was denied during it, or it ended `needs-human` or `blocked`. The denial or question is printed. |
+| 3 | Stalled: HEAD and NEXT unchanged for 2 iterations in a row. |
+| 4 | The iteration cap, or `run_total_hours` of wall clock. |
+| 7 | Weekly usage at or over `run_week_stop_pct`, or more than `pace_slack` points ahead of pace. |
+| 5 | Refused to start: not a git repo, on a trunk or the PROD branch with no TARGET, `claude` not on PATH, `gh` missing, an invalid TARGET, a `P<n>` with no such phase, or an unknown or ambiguous project. |
+| 1, 130 | run.py itself failed, or you pressed Ctrl-C. |
+
+**Rails.** Every iteration gets two layers. Neither is a sandbox (see Limits). run.py never passes `--bare`, `bypassPermissions` or `--dangerously-skip-permissions`. Protected branches are `main`, `master`, your `trunks` (default also `develop` and `dev`) and the branch your `prod` text names.
+
+- **Push guard.** `scripts/push_guard.py`, a PreToolUse hook on Bash, added through `--settings` for run iterations only. It parses each command, including `git -C path push`, `git -c key=value push`, `cd x && git push` and combined short flags like `-uf`, and denies:
+  - force pushes, `+` refspecs, `--mirror`, `--all`, `--delete`/`-d`, `:branch` deletes, wildcard refspecs and `--prune`;
+  - any push whose destination is a protected branch;
+  - a bare `git push` or `git push origin HEAD` while the current branch is protected;
+  - `gh pr merge`, merges through `gh api`, and `gh repo delete`.
+
+  It also checks commands inside `bash -c` and `eval`. A `git push` it cannot parse is denied. When a push is denied, the session ends with `YAH-RESULT: blocked push denied` and the run stops (exit 2).
+- **DENY list.** The second layer: glob patterns passed as `--disallowedTools`, which `--dry-run` prints in full. They cover force pushes (`git push --force*`, `-f*`, `*--force*`, `* -f*`, any `+`), `gh pr merge*`, `gh api *merge*`, `gh repo delete*`, the delete, mirror, all and prune flags, and for each protected branch B: `git push * B`, `* B *`, `* HEAD:B*`, `* *:B*` and `*refs/heads/B*`.
+
+**Caps.** All are `config.json` keys:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `run_iterations` | 8 | Max sessions per run. |
+| `run_budget_usd` | pro 5, max5 10, max20 15, api 5 | `--max-budget-usd` per iteration, from your tier. |
+| `run_iteration_minutes` | 45 | Wall clock per iteration, or the time left in the run if that is less. At the cap the whole process tree is killed. |
+| `run_total_hours` | 6 | Wall clock for the whole run. |
+| `run_checks_wait_minutes` | 30 | How long to wait for pending PR checks. |
+| `run_week_stop_pct` | 80 | The weekly usage % that stops a run. |
+
+**Logs and notifications.** The console shows one line per tool call and a summary per iteration: cost, turns, result, HEAD and NEXT. The data folder keeps `runs/<project>-<YYYYmmdd-HHMMSS>.log` (those summaries and the stop reason) and `runs/<project>-<YYYYmmdd-HHMMSS>-<n>.jsonl` (iteration n's raw stream), for the 20 newest runs. The `.jsonl` files hold every tool input and output of the session, including any secret it read, such as a `.env` file. On stop it prints the reason, the PR URL, the total cost, the iteration count and the log path, rings the terminal bell, and sends a desktop notification: `osascript` on macOS, `notify-send` on Linux, a PowerShell balloon tip on Windows. Notification failures are ignored.
+
+**Limits, plainly**
+
+- **It spends your normal plan usage.** Each iteration is a full Claude Code session that counts against your 5-hour and weekly limits. On an API key it is billed per token.
+- **`--max-budget-usd`** is Claude Code's own per-session cap on the cost it computes. yah passes it through, and the costs yah prints are that same figure. A run's ceiling is about iterations × budget, for example 8 × $10 with the `max5` preset.
+- **It feeds other people's text to an unattended session.** fix-checks and address-review read PR comments, review text and CI logs. `/yah:resume` is told to treat them as data, but that is an instruction, not a guarantee. Run `yah run` only on repos where you trust everyone who can comment or push.
+- **The rails are not a sandbox.** The push guard parses Bash commands and the DENY list matches patterns. A push run from inside a script or another program is a command neither one sees, so it gets past both. Turn on branch protection for your trunk and prod branches: no force pushes, no direct pushes, PRs required.
+- **A denial ends the run after that session.** Runs use auto permission mode, where a classifier reviews actions, with prompts denied. A denied action, a push-guard or DENY hit included, is refused but does not stop the session; when the session finishes, the run stops with exit 2. Auto mode must be available for your account and model; a session that starts in another mode is killed at once and the run stops with exit 2, rather than burn a session on denials.
+- **The weekly-pace stop needs a reading.** It uses the rate-limit event in the session's stream, else the statusline's last reading (`limits.json`, if under 6 h old). With neither, it logs "pace unknown" and does not stop on pace.
+
+## Recommended settings per plan
+
+| Plan | Claude Code included? | Main model | Effort | Fable | Parallel agents / ultracode | yah tier preset (amber / wrap / wrap now) |
+|---|---|---|---|---|---|---|
+| Free | No | n/a | n/a | n/a | n/a | n/a |
+| Pro ($20/mo, $17 yearly) | Yes | Sonnet 5 for most work; Opus 5.5 for hard steps* | Medium or lower | Needs extra-usage credits | Avoid* | `pro` 100k / 120k / 160k |
+| Max 5x ($100/mo) | Yes | Opus 5.5 or Sonnet 5* | Medium* | Up to 50% of the weekly cap, own usage bar. Only via `/yah:deep`* | Only for genuinely parallel work* | `max5` 120k / 150k / 200k (default) |
+| Max 20x ($200/mo) | Yes | Opus 5.5* | High* | Up to 50% of the weekly cap, own usage bar. Only via `/yah:deep`* | For genuinely parallel work, sized to it* | `max20` 150k / 200k / 260k |
+| Team standard ($25/mo, $20 yearly) | Yes | Sonnet 5 for most work | Medium or lower | Via credits | Avoid* | `max5`* |
+| Team premium ($125/mo, $100 yearly) | Yes | Sonnet 5 for most work; Opus 5.5 for hard steps* | Medium* | Up to 50% | Only for genuinely parallel work* | `max5`* |
+| Enterprise | Yes | Sonnet 5 for most work; Opus 5.5 for hard steps* | Medium* | Premium seats up to 50%; standard seats use credits | Only for genuinely parallel work* | `max5`* |
+| API key | Pay per token (Opus 5.5 is $4/$20 per MTok) | Sonnet 5 for most work | Medium or lower | Pay per token | Agent teams use about 7x the tokens | `api` 80k / 100k / 150k |
+
+Cells marked * are the author's judgement calls. Prices are as of September 2026: plans from [claude.com/pricing](https://claude.com/pricing), API from [the API pricing page](https://docs.claude.com/en/docs/about-claude/pricing). Everything else comes from the sources below.
+
+- **Official cost advice:** `/clear` between tasks (`/compact` is itself a large request), Sonnet for most work, lower effort, subagents for long output, and trim MCP servers and CLAUDE.md. Agent teams use about 7x the tokens.
+- **Effort** levels are low, medium, high, xhigh and max. Opus 5.5 defaults to medium.
+- **Limits:** all subscription plans have a rolling 5-hour window plus a weekly cap, shared with claude.ai.
+- **Statusline usage numbers** (5h and wk) come from Claude Code's `rate_limits`. Observed in Claude Code 2.1.x: it appears only for Pro and Max subscribers, after the first response, and never for API keys.
+- **Tier presets** are starting points, not official numbers. There is no official mapping for Team or Enterprise, so start at the default and adjust.
+
+Sources, as of September 2026: [claude.com/pricing](https://claude.com/pricing), support articles [15424964](https://support.claude.com/en/articles/15424964), [11049741](https://support.claude.com/en/articles/11049741) and [17007452](https://support.claude.com/en/articles/17007452), and the Claude Code docs on [model config](https://code.claude.com/docs/en/model-config), [statusline](https://code.claude.com/docs/en/statusline) and [costs](https://code.claude.com/docs/en/costs).
+
+## What it reads, writes and never does
+
+**Reads**
+
+- Claude Code's statusline JSON on stdin, `.git/HEAD`, the where cache and the session transcript (the statusline's idle time, the guard's context size).
+- `git`, plus `gh` and `bd` when installed, in the current repo (`where.py`).
+- `STATE.md` or `NOW.md` at the repo root.
+- The brain folder, plus `git diff --name-only` and `git status` when a note has `paths` (recall).
+- `config.json` in the data folder, and `settings.json` during setup.
+
+**Writes on its own: only the data folder.** That is `~/.claude/you-are-here/`, or `$CLAUDE_CONFIG_DIR/you-are-here/` when that variable is set.
+
+| File | What it is |
+|---|---|
+| `config.json` | Optional config, see below |
+| `where-<project>.json` | The last where.py result for a project, read by the statusline and the home view. A repo not registered in `projects` gets `where-<name>-<8-hex path hash>.json`, so two repos with the same folder name don't collide |
+| `state-<session>.json` | The statusline's latest numbers, read by the context guard |
+| `guard-<session>.json`, `guard-daily.json` | Flags so each nudge fires once |
+| `limits.json` | The latest 5-hour and weekly numbers, written by the statusline when they change, read by `yah run` |
+| `recall-<session>.flag` | Marks that first-prompt recall already ran |
+| `runs/` | `yah run` logs, the 20 newest runs |
+| `usage-log.csv` | One row per day: date, time, five_hour_pct, week_pct, week_pace_pct, model |
+| `setup-state.json` | What setup changed, so `--uninstall` can undo it |
+
+`state-*`, `guard-*` and `recall-*` files older than 3 days are deleted.
+
+**Writes in your repo only when you ask.** That means `/yah:wrap`, `/yah:phases`, a yes to a brain folder in `/yah:start`, and `yah run`, whose sessions follow `/yah:wrap`. The run driver itself writes nothing in the repo. The wrap skill tells Claude to commit only on the feature branch and never to commit `.env*` files.
+
+**Network.** yah's scripts make no network calls of their own and send no telemetry. The only network traffic is `gh` (if installed) reading PRs and checks, and the push and PR that `/yah:wrap` makes when a phase is complete, in your session or in a `yah run` session.
+
+**Pushes and merges.** In an interactive session, "push only the feature branch, never a trunk or PROD, never merge" is an instruction in the `/yah:wrap` skill, not a block. The hard blocks, the push guard and the DENY list, exist only inside `yah run`. Either way, turn on branch protection.
+
+**Never**
+
+- blocks a prompt
+- changes your model, effort, permissions, hooks or env settings. `yah run` passes its permission mode, DENY list, push guard and PostToolUse guard as flags to its own child sessions only.
+
+**Setup touches only:**
+
+- `statusLine` in `settings.json`, after saving `settings.json.bak-yah-YYYYmmdd-HHMMSS`. The old value goes into `setup-state.json`.
+- `config.json` in the data folder (the tier).
+- Optionally, your shell rc (a block between `# >>> you-are-here >>>` and `# <<< you-are-here <<<`) and `~/.claude/CLAUDE.md` (RULES.md appended in a marked block). Each happens only after your yes. Setup never rewrites an rc file that isn't valid UTF-8; it prints the snippet for you to paste instead.
+
+**Hooks.** Claude Code runs hooks in `sh` on macOS and Linux and in Git Bash on Windows, so one POSIX command covers all three:
+
+```
+python "${CLAUDE_PLUGIN_ROOT}/scripts/where.py" --brief 2>/dev/null || python3 "${CLAUDE_PLUGIN_ROOT}/scripts/where.py" --brief 2>/dev/null || py -3 "${CLAUDE_PLUGIN_ROOT}/scripts/where.py" --brief
+```
+
+Windows has `python`. macOS and Linux fail on it instantly and fall through to `python3`. Every script catches all errors and exits 0, so a fallback never runs twice. SessionStart has a 20 s timeout, and the two UserPromptSubmit hooks (guard and recall) have 10 s each.
+
+**Files.** Stdlib Python 3.9+, under 3,000 lines in `scripts/`.
+
+| File | Role |
+|---|---|
+| `scripts/yahlib.py` | Shared helpers: data folder, config and tier presets, git lookup, JSON io |
+| `scripts/where.py` | Builds the where view from git, beads or STATE.md, and gh |
+| `scripts/statusline.py` | The statusline. Never runs git, gh or bd |
+| `scripts/context_guard.py` | The nudges: UserPromptSubmit, and PostToolUse inside `yah run` |
+| `scripts/brain.py`, `scripts/recall_hook.py` | The brain (recall, find, new, index, init, pending) and first-prompt recall |
+| `scripts/run.py` | `yah run` |
+| `scripts/push_guard.py` | The PreToolUse push guard inside `yah run` |
+| `scripts/setup.py` | Setup and `--uninstall` |
+| `hooks/hooks.json` | SessionStart and UserPromptSubmit wiring |
+| `skills/*/SKILL.md` | `/yah:where`, `/yah:start`, `/yah:wrap`, `/yah:phases`, `/yah:deep`, `/yah:resume`, `/yah:setup` |
+| `agents/scout.md`, `agents/deep.md` | The two agents |
+| `RULES.md` | Optional CLAUDE.md snippet |
+
+## Without beads
+
+where.py reads `STATE.md` or `NOW.md` at the repo root. If the repo has a beads plan epic, beads wins.
+
+```markdown
+## Plan: Checkout rewrite (docs/plans/checkout.md)
+- [x] P1 Cart API | branch checkout/cart | PR #11
+- [~] P2 Payment form | branch checkout/payment | base checkout/cart | PR #12
+- [ ] P3 Emails
+
+## 2026-09-23
+- Next: Wire the Stripe element into PaymentForm.tsx, then run the e2e test.
+```
+
+- `[x]` is closed, `[~]` or `[>]` is in progress, and `[ ]` is open.
+- Fields are `branch X`, `base X` and `PR #N`, separated by `|` or `·`. The label is `P<n>`.
+- The current phase's NEXT is the `- Next:` line of the newest dated entry.
+- Dated entries without a plan section still show as STATE and NEXT.
+- `/yah:wrap` keeps only the 5 newest dated entries.
+
+## Config
+
+`config.json` in the data folder. Every key is optional.
+
+```json
+{
+  "tier": "max5",
+  "amber": 120000, "wrap_soon": 150000, "wrap_now": 200000,
+  "pace_slack": 15,
+  "premium_models": ["fable", "mythos"],
+  "recent_days": 14,
+  "brain_dir": "docs/brain", "recall_max_chars": 10000,
+  "projects": {"shop": {"path": "/Users/me/code/shop", "prod": "main deploys on push. PRs only.", "trunks": ["main", "release"], "you": ["Sam"]}}
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `tier` | `pro`, `max5` (default), `max20` or `api`. Sets the three context marks from the presets in the plan table, and the `yah run` budget. |
+| `amber`, `wrap_soon`, `wrap_now` | Override the preset. Context turns amber at `amber`, red with "wrap" at `wrap_soon`, and the guard nudges again at `wrap_now`. The guard re-arms below `amber`. |
+| `pace_slack` | How many points the weekly % may run ahead of pace before the once-a-day nudge, or before `yah run` stops. |
+| `premium_models` | Model ids or names that get a red tag in the statusline and a once-per-session nudge. |
+| `recent_days` | How far back the home view looks for repos yah has seen. |
+| `brain_dir` | The brain folder, relative to the repo root. Default `docs/brain`. |
+| `recall_max_chars` | Cap on the recall block. Default 10,000 characters, about 2.5k tokens. |
+| `run_*` | The `yah run` caps. See [Caps](#hands-free-runs-yah-run). |
+| `projects` | Optional. The home view lists these plus any repo yah saw in the last `recent_days`. No registration is needed. |
+| `path` | Where `yah <project>` goes. |
+| `prod` | The warning shown as the PROD line. `yah run` also denies pushes to the branch it names (the first `backticked` word, else the first word). |
+| `trunks` | Long-lived branches, never treated as stacking targets. Defaults: main, master, develop, dev. |
+| `you` | Names whose assigned beads count as "waiting on you". Defaults to `git config user.name`. |
+
+## FAQ
+
+**Common objections, one line each**
+
+- **"Why not ccusage, claude-hud or ccstatusline?"** They show your session; yah shows your project (phase, NEXT, PR) and drives wrap then `/clear`. Run ccusage alongside; Claude Code has one statusline slot, so with another statusline yah's hooks and skills still work but the context guard has no numbers.
+- **"Unattended auto mode is YOLO."** It stops when a PR is open and green, has no merge step, hard-blocks merges, trunk pushes and force pushes inside runs, stops after any denial, and assumes branch protection. Not for repos with untrusted commenters.
+- **"Bloat?"** Per prompt, two local script runs of about 35–55 ms that add nothing to context unless a nudge fires (recall adds its block once, on the first prompt), plus about 340 tokens of skill listings. The brain and `yah run` cost nothing until you use them.
+- **"Auto-memory or `/compact` already does this."** Memory holds your preferences; the brain holds repo facts, in the repo, reviewable in PRs, and loads only the few that match, once per session.
+- **"$2,600 in a week is a you problem."** Yes. The fix it argues for is free: write NEXT down, `/clear`, one task per session.
+
+**Why not just `/compact`?**
+The official cost advice is `/clear` between tasks, because `/compact` is itself a large request. The author's costliest session auto-compacted 6 times and kept going. `/yah:wrap` writes what the next session needs (NEXT, the PR, the phase) into beads or STATE.md, and the SessionStart hook injects it after `/clear`.
+
+**Why plain markdown for the brain, not a vector store or a memory server?**
+The notes live in your repo, so they are reviewed in PRs, diffed and grepped, and they open in Obsidian. Recall is local keyword overlap plus changed-file globs, once per session, with no extra process. The trade-off is that it misses notes whose words never come up; INDEX.md is the full list.
+
+**Does it change my settings?**
+Only `statusLine`, after a timestamped backup, with the old value recorded. If you already have a statusline, setup shows it and replaces it only after your yes. It never touches model, effort, permissions, hooks or env. `--uninstall` puts the old statusline back.
+
+**Why Python?**
+Stdlib only, so there is nothing to install beyond Python itself. macOS ships `python3` 3.9 with the Xcode Command Line Tools, so the code avoids 3.10+ syntax. The same files run on macOS, Linux and Windows, and you can read all of them in one sitting.
+
+**Does it work in the Desktop app or on the web?**
+The statusline is a CLI feature. Hooks and skills load wherever plugins load, but that is untested.
+
+**Is Fable worth it?**
+The author's view: for one hard, self-contained question, yes, which is what `/yah:deep` is for. As the main model on a long session, the author's data says no: that one session was 95% of their Fable spend. On Max plans Fable can use up to half of the weekly cap (it has its own usage bar). On Pro it needs extra-usage credits.
+
+**Will this help on Pro?**
+It cannot raise your limits. It shows your 5-hour and weekly use against pace, and the `pro` preset says wrap at 120k. The official advice matters most on Pro: Sonnet 5 for most work, lower effort and `/clear` between tasks. yah makes the last one a habit.
+
+## Uninstall
+
+Undo setup first, while the script is still on disk. On Windows, use `python` instead of `python3`:
+
+```
+python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --uninstall
+```
+
+This restores your previous statusline (or removes yah's if there was none), and removes the launcher and RULES.md blocks if setup added them. Then remove the plugin and the marketplace:
+
+```
+/plugin uninstall yah@you-are-here
+/plugin marketplace remove you-are-here
+```
+
+Uninstall leaves the data folder, including `yah run` logs (which can hold secrets a session read), and prints its path. Delete it if you want. On macOS and Linux:
+
+```
+rm -rf ~/.claude/you-are-here
+```
+
+On Windows (PowerShell):
+
+```
+Remove-Item -Recurse -Force "$HOME\.claude\you-are-here"
+```
+
+If you pasted RULES.md into a CLAUDE.md by hand, remove it by hand. Brain folders in your repos are yours, and uninstall leaves them. If you set `$CLAUDE_CONFIG_DIR`, use it in place of `~/.claude` above.
+
+## Credits and license
+
+The ideas came from comments on r/ClaudeAI and r/ClaudeCode:
+
+- [u/AncileBanish](https://www.reddit.com/comments/1wl4c13/_/pavxi1a/): "1 session = 1 task", write state down, start fresh.
+- [u/Schadz](https://www.reddit.com/comments/1wj4gs0/_/papf56h/): one coordinator, narrow workers with model and effort pinned in agent files, short reports. "Parallelism doesn't save tokens."
+- [u/No-Needleworker5295](https://www.reddit.com/comments/1wlalc7/_/pb16tct/): a handoff at each pass boundary, and a context guard around 250k.
+- [u/torvalds75](https://www.reddit.com/comments/1wg8zgk/_/pa4gyd0/): state in a queryable per-task record, and the current ticket in the statusline.
+
+MIT. See [LICENSE](LICENSE).
