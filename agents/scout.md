@@ -1,6 +1,6 @@
 ---
 name: scout
-description: Use proactively for rote read-only lookups - where X is defined, which files mention Y, what a config, log, CI run or PR says. Cheap (Sonnet, low effort). Not for design, review, debugging or edits.
+description: Use proactively for rote read-only lookups - where X is, what a file, log or PR says.
 model: sonnet
 effort: low
 tools: Read, Grep, Glob, Bash, WebFetch, WebSearch

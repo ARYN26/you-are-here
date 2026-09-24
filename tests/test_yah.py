@@ -365,6 +365,69 @@ class WhereTests(Base):
         self.config(recent_days=0)  # the cache is now too old to count
         self.assertEqual(self.py("where.py", "--brief")[0], "")
 
+    def test_protects_the_phase_base_and_the_branch_head_was_cut_from(self):
+        repo = self.repo(branch="main")  # no plan, no remote, no gh
+        self.git(repo, "checkout", "-q", "-b", "aryan_dev")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "dev")
+        self.git(repo, "checkout", "-q", "-b", "feat/x")  # tip is HEAD: 0 commits away, main is 1
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["ancestors"], s["bases"]), (["aryan_dev"], []))
+        self.assertIn("aryan_dev", s["protected"])
+        self.assertIn("PROD    `aryan_dev` inferred: this branch was cut from it. Never push or commit it; "
+                      "set prod in config.json", self.where(repo))
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        self.assertEqual(json.loads(self.where(repo, "--json"))["ancestors"], ["aryan_dev"])
+        (repo / "STATE.md").write_text("## Plan: X\n- [~] P1 Fix | branch feat/x | base staging\n", encoding="utf-8")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["bases"], ["staging"])
+        self.assertTrue({"aryan_dev", "staging"} <= set(s["protected"]), s["protected"])
+        self.assertIn("PROD    `staging` inferred: phase PRs target it.", self.where(repo))
+        cache = next(self.data.glob("where-*.json"))  # where open PRs landed when gh last saw any
+        cache.write_text(json.dumps(dict(json.loads(cache.read_text("utf-8")), landing=["feat/x", "live"])), "utf-8")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertTrue({"live", "aryan_dev"} <= set(s["protected"]), s["protected"])
+        self.assertNotIn("feat/x", s["protected"])  # the phase's own branch never is
+        (repo / "STATE.md").unlink()
+        cache.unlink()
+        self.git(repo, "checkout", "-q", "main")  # nothing main descends from: only trunks, so no PROD line
+        self.assertNotIn("PROD", self.where(repo))
+        self.git(repo, "checkout", "-q", "-b", "feat/old")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "old")
+        self.git(repo, "checkout", "-q", "main")
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge feat/old", "feat/old")  # an ancestor of main now
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["ancestors"], [])  # on a trunk, "cut from" means nothing
+        self.assertNotIn("feat/old", s["protected"])
+        self.assertNotIn("PROD", self.where(repo))
+
+    def test_bd_is_null_without_beads_and_pinned_to_this_repos_beads(self):
+        bin_dir, fake = self.tmp / "bin", self.tmp / "fake_bd.py"
+        bin_dir.mkdir()
+        fake.write_text("import json, os\nprint(json.dumps([{'id': 'x-1', 'issue_type': 'task', 'status': "
+                        "'in_progress', 'title': os.environ.get('BEADS_DIR', '-')}]))\n", encoding="utf-8")
+        if os.name == "nt":
+            (bin_dir / "bd.cmd").write_text(f'@"{sys.executable}" "{fake}" %*\r\n', encoding="utf-8")
+        else:
+            (bin_dir / "bd").write_text(f"#!{sys.executable}\n" + fake.read_text("utf-8"), encoding="utf-8")
+            (bin_dir / "bd").chmod(0o755)
+        self.env.update(PATH=str(bin_dir) + os.pathsep + self.env.get("PATH", ""),
+                        BEADS_DIR=str(self.tmp / "other" / ".beads"))  # another repo's database
+        plain = self.repo(name="plain")
+        out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=plain)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((json.loads(out)["bd"], json.loads(out)["beads_dir"]), (None, None))
+        repo = self.beads_repo()
+        out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=repo)
+        s = json.loads(out)
+        self.assertEqual(s["beads_source"], "bd", err)
+        self.assertEqual(Path(s["beads"]["in_progress"][0]["title"]), repo / ".beads")
+        self.assertIsNone(s["bd"])  # the model's own bd calls would inherit the foreign BEADS_DIR
+        self.assertIn("BEADS_DIR", s["bd_note"])
+        del self.env["BEADS_DIR"]
+        s = json.loads(self.py("where.py", "--no-gh", "--json", cwd=repo)[0])
+        self.assertTrue(Path(s["bd"]).name.startswith("bd"))
+        self.assertIsNone(s["bd_note"])
+
     def test_same_named_repos_keep_separate_caches(self):
         (self.tmp / "a").mkdir()
         (self.tmp / "b").mkdir()
@@ -425,6 +488,15 @@ class PrLinesTests(unittest.TestCase):
         self.assertTrue(w.prod_line(s).startswith("`live` inferred"))
         self.assertEqual(w.prod_line({**s, "landing": ["main", "release"]}), "")  # ordinary trunks say nothing
         self.assertEqual(w.prod_line({**s, "prod": "main deploys"}), "main deploys")
+        phases = [{"branch": "p/1", "base": "aryan_dev"}, {"branch": "p/2", "base": "p/1"},  # p/2 is stacked
+                  {"branch": "p/3", "base": "aryan_dev"}, {"branch": "p/4", "base": "main"}, {"branch": "", "base": ""}]
+        self.assertEqual(w.phase_bases(phases), ["aryan_dev", "main"])
+        s2 = {**s, "bases": ["main", "aryan_dev"], "ancestors": ["feat/q"]}
+        self.assertTrue(w.prod_line(s2).startswith("`aryan_dev` inferred: phase PRs target it."))  # bases first
+        self.assertEqual(w.protected(s2), sorted(w.DEFAULT_TRUNKS | {"release", "live", "aryan_dev", "feat/q"}))
+        near = {**s, "landing": ["main"], "ancestors": ["feat/q"]}
+        self.assertTrue(w.prod_line(near).startswith("`feat/q` inferred: this branch was cut from it."))
+        self.assertEqual(w.prod_line({**near, "ancestors": ["feat/q", "main"]}), "")  # as near a trunk: say nothing
 
 
 # ---------------------------------------------------------------- setup.py

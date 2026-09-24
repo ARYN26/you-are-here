@@ -34,7 +34,7 @@ STATE = """# Shop
 
 ## Plan: Checkout rewrite (docs/plans/checkout.md)
 - [x] P1 Cart API | branch checkout/cart | PR #11
-- [~] P2 Payment form | branch checkout/payment
+- [~] P2 Payment form | branch checkout/payment | base main
 - [ ] P3 Emails
 
 ## 2026-09-23
@@ -120,7 +120,8 @@ elif role == "claude":
 
 def view(state="OPEN", commit="2026-09-20T10:00:00Z", reviews=()):
     return {"state": state, "url": URL, "reviewDecision": "", "reviews": list(reviews),
-            "commits": [{"oid": "abc", "committedDate": commit}], "headRefName": "checkout/payment"}
+            "commits": [{"oid": "abc", "committedDate": commit}], "headRefName": "checkout/payment",
+            "baseRefName": "main"}
 
 
 def review(login, state, at):
@@ -165,14 +166,15 @@ class RunTests(unittest.TestCase):
     def git(self, repo, *args):
         subprocess.run(["git", *args], cwd=str(repo), env=self.env, check=True, capture_output=True)
 
-    def repo(self, branch="checkout/payment", name="shop"):
+    def repo(self, branch="checkout/payment", name="shop", state=STATE):
         r = self.tmp / name
         r.mkdir()
-        (r / "STATE.md").write_text(STATE, encoding="utf-8")
+        if state:
+            (r / "STATE.md").write_text(state, encoding="utf-8")
         self.git(r, "init", "-q")
         self.git(r, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
         self.git(r, "add", "-A")
-        self.git(r, "commit", "-q", "-m", "init")
+        self.git(r, "commit", "-q", "--allow-empty", "-m", "init")
         return r
 
     def script(self, **data):
@@ -306,7 +308,9 @@ class RunTests(unittest.TestCase):
                  ("blocked", {"tag": "blocked tests need a database"}, "blocked: tests need a database"),
                  ("denial", {"result": {"permission_denials": [denial]}},
                   "permission denied: Bash git push origin main"),
-                 ("error", {"result": {"is_error": True, "subtype": "error_max_budget_usd"}}, "error_max_budget_usd")]
+                 ("error", {"result": {"is_error": True, "subtype": "error_max_budget_usd"}}, "error_max_budget_usd"),
+                 ("no YAH-RESULT", {"result": {"result": "Done."}},  # the plugin was not loaded, say
+                  "session ended without a YAH-RESULT line; is the yah plugin loaded? (--plugin-dir)")]
         for name, step, text in cases:
             with self.subTest(name):
                 self.script(claude=[dict(step, commit=True)])
@@ -376,6 +380,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-p") + 1], "/yah:resume P2 build")
         self.assertEqual(argv[argv.index("--model") + 1], "haiku")
         self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "3")
+        self.assertEqual(argv[argv.index("--plugin-dir") + 1], str(ROOT))  # a checkout, not an installed plugin
         self.assertIn("Bash(git push -d*)", argv)
         hooks = json.loads(argv[argv.index("--settings") + 1])["hooks"]
         self.assertIn("context_guard.py", hooks["PostToolUse"][0]["hooks"][0]["command"])
@@ -395,6 +400,55 @@ class RunTests(unittest.TestCase):
         self.assertNotIn("feat/a", (self.fake / "claude.env").read_text("utf-8").split(","))
         self.git(repo, "symbolic-ref", "HEAD", "refs/heads/live")
         self.assertIn("PROD branch", self.run_yah(repo, code=5))
+
+    def test_phase_base_is_protected_when_gh_sees_no_prs(self):
+        state = STATE.replace("branch checkout/payment | base main", "branch feat/x | base aryan_dev")
+        repo = self.repo("aryan_dev", state=state)
+        self.git(repo, "checkout", "-q", "-b", "feat/x")
+        self.script(list=[], claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, "P2", code=2)
+        self.assert_safe(self.calls("claude")[0], ("main", "master", "aryan_dev"))
+        self.assertIn("aryan_dev", (self.fake / "claude.env").read_text("utf-8").split(","))
+        out = self.run_yah(repo, "--dry-run", code=0)
+        self.assertIn("base    aryan_dev (the plan's base for P2)", out)
+        self.git(repo, "checkout", "-q", "aryan_dev")
+        self.assertIn("a trunk or the PROD branch", self.run_yah(repo, code=5))
+
+    def test_cached_landing_survives_an_empty_pr_list(self):
+        repo = self.repo()
+        self.script(list=[{"number": 7, "headRefName": "feat/a", "baseRefName": "live"}])
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "where.py")], cwd=str(repo), env=self.env,
+                       check=True, capture_output=True)
+        self.script(list=[], claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, "P2", code=2)
+        self.assert_safe(self.calls("claude")[0], ("main", "master", "live"))
+
+    def test_refuses_without_a_pr_base_and_protects_the_branch_head_was_cut_from(self):
+        repo = self.repo("main", state=None)  # no plan, no remote, no config.json
+        self.git(repo, "checkout", "-q", "-b", "aryan_dev")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "dev")
+        self.git(repo, "checkout", "-q", "-b", "feat/x")
+        self.script()
+        out = self.run_yah(repo, code=5)
+        self.assertIn("run refused: cannot tell which branch this run's PR targets", out)
+        self.assertIn("Set base in the plan", out)
+        self.assertIn("or prod in config.json", out)
+        self.assertEqual(self.calls("claude"), [])
+        self.git(repo, "update-ref", "refs/remotes/origin/main", "main")
+        self.git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        out = self.run_yah(repo, "--dry-run", code=0)
+        self.assertIn("base    main (origin/HEAD)", out)
+        self.assertIn("protect aryan_dev, dev, develop, main, master", out)
+        self.assertIn("Bash(git push * aryan_dev)", out)
+        self.script(view=[dict(view(), baseRefName="staging")])
+        out = self.run_yah(repo, "#12", "--dry-run", code=0)  # the PR's own base beats origin/HEAD
+        self.assertIn("base    staging (the base of PR #12)", out)
+        self.assertIn("Bash(git push * staging)", out)
+        self.script(view=[dict(view(), baseRefName="")], required=[{"rc": 1, "out": "ci\tfail\n"}])
+        self.git(repo, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+        out = self.run_yah(repo, "#12", code=5)  # gh names no base for the PR either
+        self.assertIn("run refused: cannot tell which branch PR #12 targets", out)
+        self.assertEqual(self.calls("claude"), [])
 
     def test_project_name_shared_by_two_repos_is_refused(self):
         self.script()
@@ -428,6 +482,8 @@ class RunTests(unittest.TestCase):
         self.assertIn("Bash(gh pr merge*)", out)
         self.assertIn("caps    8 iterations, $10 per iteration, 45 min per iteration, 6 h total", out)
         self.assertIn("would run iteration 1 in MODE fix-checks", out)
+        self.assertIn("base    main (the base of PR #12)", out)
+        self.assertIn(f"plugin  --plugin-dir {ROOT} (this checkout", out)
         self.assertIn("week    pace unknown", out)
         self.assertEqual(self.calls("claude"), [])
         self.assertTrue(self.calls("gh"))
@@ -447,6 +503,14 @@ class HelperTests(unittest.TestCase):
         pb = self.mod.prod_branch
         self.assertEqual([pb("main deploys on push."), pb("Vercel builds `release` only"), pb("")],
                          ["main", "release", ""])
+
+    def test_plugin_source(self):
+        ps = self.mod.plugin_source
+        cache = Path("/c/claude/plugins/cache/mkt/yah/0.1.0/scripts/run.py")
+        self.assertIsNone(ps(None, cache)[0])
+        self.assertIsNone(ps(None, Path("/c/claude/plugins/marketplaces/mkt/scripts/run.py"))[0])
+        self.assertEqual(ps(None, RUN)[0], str(ROOT))
+        self.assertEqual(ps(str(ROOT / "scripts"), cache)[0], str(ROOT / "scripts"))
 
     def test_changes_requested_uses_each_reviewers_latest_verdict(self):
         cr = self.mod.changes_requested

@@ -40,9 +40,9 @@ FOOTER = "This is the current state. Do not read docs to orient; /yah:where show
 
 # ---------------------------------------------------------------- subprocess
 
-def run(cmd, cwd, timeout=10):
+def run(cmd, cwd, timeout=10, env=None):
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout,
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout, env=env,
                            creationflags=NO_WINDOW)
         if p.returncode != 0:
             return None
@@ -125,15 +125,23 @@ def as_dict(v):
     return {}
 
 
+def find_beads(top, main_root):
+    """This repo's .beads dir (the worktree's, else the main checkout's), or None."""
+    return next((d / ".beads" for d in (Path(top), Path(main_root)) if (d / ".beads").is_dir()), None)
+
+
 def load_issues(top, main_root, use_bd):
-    """All issues (closed included). bd first, then the committed JSONL export."""
-    beads_dir = next((d / ".beads" for d in (Path(top), Path(main_root)) if (d / ".beads").is_dir()), None)
+    """All issues (closed included). bd first, then the committed JSONL export. bd runs with BEADS_DIR
+    pinned to this repo's .beads, so an inherited BEADS_DIR or a walk up to a parent dir never reads
+    another repo's database."""
+    beads_dir = find_beads(top, main_root)
     if beads_dir is None:
         return None, None
     if use_bd:
         bd = find_tool("bd")
         if bd:
-            out = run([bd, "list", "--all", "--json", "--limit", "0"], str(top), timeout=10)
+            out = run([bd, "list", "--all", "--json", "--limit", "0"], str(top), timeout=10,
+                      env=dict(os.environ, BEADS_DIR=str(beads_dir)))
             if out:
                 try:
                     data = json.loads(out)
@@ -376,25 +384,88 @@ def landing(top, prs):
     return out
 
 
+def phase_bases(phases):
+    """The branches the plan's phase PRs target that are not themselves a phase's branch (a stacked phase
+    targets the phase below it), most used first. Read from beads metadata or the STATE.md lines."""
+    branches = {v.get("branch") for v in phases or []}
+    count = {}
+    for v in phases or []:
+        b = v.get("base")
+        if b and b not in branches:
+            count[b] = count.get(b, 0) + 1
+    return sorted(count, key=lambda b: (-count[b], b))
+
+
+def nearest_bases(top, branch, skip=()):
+    """The branches HEAD was cut from, from git alone: of the local and origin branches that are ancestors of
+    HEAD (not HEAD's own branch or a phase branch), those with the fewest commits B..HEAD. A branch whose tip
+    is HEAD counts 0, like a phase branch just cut from its base. At the same distance a branch on origin
+    beats a local-only one. [] on any failure; a few seconds at most."""
+    skip = set(skip) | {branch, "HEAD", "", None}
+    refs, fmt = ["refs/heads", "refs/remotes/origin"], "%(refname)%09%(objectname)"
+    out = run(["git", "for-each-ref", "--merged", "HEAD", "--format", fmt + "%09%(ahead-behind:HEAD)", *refs],
+              top, timeout=3)
+    if out is None:  # git before 2.41 has no ahead-behind atom: count each tip with rev-list below
+        out = run(["git", "for-each-ref", "--merged", "HEAD", "--format", fmt, *refs], top, timeout=3)
+    found, shared = [], set()  # (name, tip, B..HEAD or None)
+    for ln in (out or "").splitlines():
+        f = ln.split("\t")
+        ref = f[0]
+        name = ref[11:] if ref.startswith("refs/heads/") else \
+            ref[20:] if ref.startswith("refs/remotes/origin/") else None
+        if len(f) < 2 or name in skip or len(found) >= 60:
+            continue
+        if ref.startswith("refs/remotes/"):
+            shared.add(name)
+        ab = f[2].split() if len(f) > 2 else []  # "ahead behind"; behind is B..HEAD
+        found.append((name, f[1], int(ab[1]) if len(ab) == 2 and ab[1].isdigit() else None))
+    counts, dist, head, deadline = {}, {}, None, time.monotonic() + 3
+    for name, tip, n in found:
+        if n is None:
+            if head is None:
+                head = (run(["git", "rev-parse", "HEAD"], top, timeout=3) or "").strip()
+            if tip not in counts and time.monotonic() < deadline:
+                c = "0" if tip == head else (run(["git", "rev-list", "--count", f"{tip}..HEAD"], top, timeout=2) or "")
+                counts[tip] = int(c) if c.strip().isdigit() else None
+            n = counts.get(tip)
+        if n is not None:
+            dist[name] = min(dist.get(name, n), n)
+    if not dist:
+        return []
+    best = [k for k, v in dist.items() if v == min(dist.values())]
+    return sorted([k for k in best if k in shared] or best)
+
+
 def prod_branch(prod):
     """The branch a PROD line names: a `backticked` word, else its first word."""
     m = re.search(r"`([^`\s]+)`", prod or "") or re.match(r"\s*([\w./-]+)", prod or "")
     return m.group(1) if m else ""
 
 
+def trunk_set(s):
+    return DEFAULT_TRUNKS | set([s["trunks"]] if isinstance(s["trunks"], str) else s["trunks"] or [])
+
+
 def protected(s):
-    """Branches nothing may commit on or push: trunks, the PROD branch, and where open PRs land."""
-    trunks = [s["trunks"]] if isinstance(s["trunks"], str) else s["trunks"] or []
-    return sorted(DEFAULT_TRUNKS | set(trunks) | set(s.get("landing") or []) | ({prod_branch(s["prod"])} - {""}))
+    """Branches nothing may commit on or push: trunks, the PROD branch, the plan's phase bases, where open PRs
+    land (the last gh run's too when gh sees none), origin/HEAD and the branch HEAD was cut from. Fails closed:
+    each source only adds."""
+    return sorted(trunk_set(s) | set(s.get("landing") or []) | set(s.get("bases") or [])
+                  | set(s.get("ancestors") or []) | ({prod_branch(s["prod"])} - {""}))
 
 
 def prod_line(s):
-    """The PROD text: config.json's, else the inferred landing branch when it is not an ordinary trunk."""
+    """The PROD text: config.json's, else the first inferred branch that is not an ordinary trunk, from the
+    plan's phase bases, then where open PRs land, then the branch HEAD was cut from, saying which."""
     if s["prod"]:
         return s["prod"]
-    trunks = DEFAULT_TRUNKS | set([s["trunks"]] if isinstance(s["trunks"], str) else s["trunks"] or [])
-    guess = next((b for b in s.get("landing") or [] if b not in trunks), "")
-    return f"`{guess}` inferred: open PRs land there. Never push or commit it; set prod in config.json" if guess else ""
+    trunks, near = trunk_set(s), s.get("ancestors") or []
+    for why, cands in (("phase PRs target it", s.get("bases")), ("open PRs land there", s.get("landing")),
+                       ("this branch was cut from it", [] if set(near) & trunks else near)):
+        guess = next((b for b in cands or [] if b not in trunks), "")
+        if guess:
+            return f"`{guess}` inferred: {why}. Never push or commit it; set prod in config.json"
+    return ""
 
 
 def pr_lines(prs, branch, bstate, limit=4, trunks=()):
@@ -455,7 +526,8 @@ def pr_lines(prs, branch, bstate, limit=4, trunks=()):
 
 # ---------------------------------------------------------------- collect + render
 
-def collect(cwd, use_bd=True, use_gh=True):
+def collect(cwd, use_bd=True, use_gh=True, infer=True):
+    """The project's state. infer=False skips the git walk for the branch HEAD was cut from (the home view)."""
     top, main_root, git_dir = find_git(cwd)
     if top is None:
         return None
@@ -476,14 +548,33 @@ def collect(cwd, use_bd=True, use_gh=True):
     mdplan = sm.pop("plan", None) if sm else None
     if mdplan and not (bstate or {}).get("plan"):  # beads wins when it has a plan epic
         bstate = {**(bstate or {"human": [], "in_progress": [], "open_count": 0}), **mdplan}
+    phases = (bstate or {}).get("phases") or []
+    mine = {v.get("branch") for v in phases} - {"", None}
+    # A phase's own branch (a merged lower phase's, say) is never a landing, even when a PR still targets it.
+    bases = phase_bases(phases)
+    cached = [b for b in (read_json(where_cache_path(main_root), {}) or {}).get("landing") or [] if b not in mine]
+    # "Cut from" only means something on a work branch: on main, a branch merged with --no-ff is an ancestor too.
+    # Checked against the cached landing here so the git walk overlaps gh, and against the live one below.
+    trunkish = trunk_set({"trunks": cfg.get("trunks")}) | set(bases) | set(cached) | {prod_branch(cfg.get("prod"))}
+    near = nearest_bases(str(top), g["branch"], mine) if infer and g["branch"] and g["branch"] not in trunkish else []
     prs = finish_gh(proc)
-    land = landing(str(top), prs)
-    if prs is None:  # no gh this time: keep the PR bases the last gh run saw
-        land += [b for b in read_json(where_cache_path(main_root), {}).get("landing") or [] if b not in land]
+    land = [b for b in landing(str(top), prs) if b not in mine]
+    if not prs:  # no gh, or gh sees no open PR: keep the PR bases the last gh run saw (fail closed)
+        land += [b for b in cached if b not in land]
+    if g["branch"] in land:
+        near = []
+    beads_dir = find_beads(top, main_root)
+    env_dir = os.environ.get("BEADS_DIR")
+    # An inherited BEADS_DIR would send the model's own bd calls to another repo's DB.
+    bd_note = ("BEADS_DIR points outside this repo; unset it to use beads here" if beads_dir and env_dir
+               and os.path.normcase(os.path.abspath(env_dir)) != os.path.normcase(str(beads_dir)) else None)
     s = {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "beads": bstate,
             "beads_source": source, "state_md": sm, "prs": prs, "gh_tried": proc is not None,
             "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
-            "bd": find_tool("bd") if use_bd else None}
+            "bases": bases, "ancestors": near,
+            "beads_dir": str(beads_dir) if beads_dir else None,
+            "bd": find_tool("bd") if use_bd and beads_dir and not bd_note else None,  # null: no CLI, no .beads here, or bd_note
+            "bd_note": bd_note}
     s["protected"] = protected(s)
     return s
 
@@ -616,7 +707,7 @@ def home_view(brief):
             ["[yah] Session is in the home dir, so project hooks, memory and state are not loaded. "
              "For project work, exit and run: yah <name>"]
     for key, path in projects:
-        s = collect(path, use_bd=False, use_gh=False) if Path(path).is_dir() else None
+        s = collect(path, use_bd=False, use_gh=False, infer=False) if Path(path).is_dir() else None
         if s is None:
             continue
         cache = read_json(where_cache_path(s["main_root"]), {}) or {}

@@ -184,6 +184,42 @@ class RecallTests(Base):
         self.yahlib.where_cache_path(repo).write_text(json.dumps({"phase": {"base": "feature"}}), encoding="utf-8")
         self.assertEqual(set(self.scores(repo, "zzz")), {"api-rate-limit", "vercel-deploys-main"})
 
+    def test_brain_folder_files_are_not_changed_files(self):
+        vault = dict(VAULT, **{"pr-titles": note("PR titles are imperative", "Write PR titles in the imperative.",
+                                                 ("pr",), ("README.md",))})
+        repo = self.repo(vault)
+        # the brain's own README.md, a new note and an edited note: none may path-match README.md
+        (repo / "docs" / "brain" / "README.md").write_text("# Brain\n", encoding="utf-8")
+        (repo / "docs" / "brain" / "new-note.md").write_text(note("New", "New."), encoding="utf-8")
+        self.note_file(repo, "log-format").write_text(VAULT["log-format"] + "More.\n", encoding="utf-8")
+        self.assertEqual(self.brain.changed_files(repo), {"src/payments/charge.ts", "src/api/client.py"})
+        self.assertEqual(self.scores(repo, "zzz"), {"api-rate-limit": 2, "stripe-webhooks": 2})
+        (repo / "README.md").write_text("shop 2\n", encoding="utf-8")  # the repo's README still counts
+        self.assertEqual(self.scores(repo, "zzz")["pr-titles"], 2)
+        # brain_dir comes from config
+        self.data.mkdir(exist_ok=True)
+        (self.data / "config.json").write_text(json.dumps({"brain_dir": "src/api"}), encoding="utf-8")
+        self.yahlib._config = None
+        self.assertNotIn("src/api/client.py", self.brain.changed_files(repo))
+
+    def test_no_commits_gives_no_path_signal(self):
+        r = self.tmp / "fresh"
+        for slug, text in VAULT.items():
+            (r / "docs" / "brain").mkdir(parents=True, exist_ok=True)
+            (r / "docs" / "brain" / (slug + ".md")).write_bytes(text.encode("utf-8"))
+        for rel in ("README.md", "src/api/client.py", "src/payments/charge.ts", "vercel.json"):
+            (r / rel).parent.mkdir(parents=True, exist_ok=True)
+            (r / rel).write_text("x\n", encoding="utf-8")
+        self.git(r, "init", "-q")
+        self.git(r, "symbolic-ref", "HEAD", "refs/heads/main")
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                if staged:
+                    self.git(r, "add", "-A")
+                self.assertEqual(self.brain.changed_files(r, "main"), set())
+                self.assertEqual(self.scores(r, "zzz"), {})
+                self.assertEqual(self.scores(r, "stripe")["stripe-webhooks"], 6)  # words still match
+
     def test_glob_rules(self):
         hit = self.brain.glob_hit
         self.assertTrue(hit(".github/**", {".github/workflows/ci.yml"}))

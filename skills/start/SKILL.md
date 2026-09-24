@@ -1,7 +1,7 @@
 ---
 name: start
-description: Start a task with its context - recall the project brain notes that apply, restate the phase and NEXT, then begin. Use as /yah:start <task> at the start of a task.
-argument-hint: "<the task>"
+description: Start a task - restate phase and NEXT, recall notes, begin. Use as /yah:start <task>.
+argument-hint: "<task>"
 allowed-tools: Bash(python3 *scripts/brain.py* recall *), Bash(python *scripts/brain.py* recall *), Bash(py -3 *scripts/brain.py* recall *), Bash(python3 *scripts/brain.py* find *), Bash(python *scripts/brain.py* find *), Bash(py -3 *scripts/brain.py* find *), Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*), Bash(py -3 *scripts/where.py*)
 ---
 
@@ -9,34 +9,35 @@ allowed-tools: Bash(python3 *scripts/brain.py* recall *), Bash(python *scripts/b
 
 The task: $ARGUMENTS
 
-Budget: at most 2 tool calls before the restate block (recall, and where.py only if needed). The restate block is your first output. Before it, do not read `docs/`, `documents/`, plans, or any file over 200 lines, and do not search the codebase.
+`PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
-## 1. Recall
+## 1. Restate first
 
-`PY` is `python` on Windows and `python3` elsewhere. If it is not found or fails, try the other, then `py -3`, and keep whichever works.
-
-Run with Bash, with the task in place of `<task>` (drop any double quotes from it):
-
-PY "${CLAUDE_SKILL_DIR}/../../scripts/brain.py" recall --json "<task>"
-
-- **JSON printed:** the brain exists. `matches` are the notes that fit, best first; `also` lists related slugs. Open a note (`<brain_dir>/<slug>.md`) only when its TL;DR is not enough for the task, and only after the restate block.
-- **Nothing printed:** this repo has no brain folder. Remember that for step 3.
-
-## 2. Orient
-
-Take the current phase and NEXT from the `[yah]` SessionStart block already in context. If it is missing, run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --brief`. Do not read docs to orient.
-
-## 3. Restate, then start
+Your first output is this block, with zero tool calls before it. Take Phase and NEXT from the `[yah]` SessionStart block already in context.
 
 ```
 Task   <the task in one line>
 Phase  <label and title, or "no plan">   NEXT <the NEXT line, or none>
-Notes  <slug>: <why it matters here>, one per line, or "none apply"
-First  <the first concrete step: a few tool calls, not a survey>
+First  <at most one targeted search, then the edit>
 ```
 
-If recall printed nothing, add this line after the block, once per session: "This repo has no brain folder for durable project facts. Create one (`docs/brain` unless config.json sets `brain_dir`)?" Run `brain.py init` only if the user says yes. Never create it unasked.
+No `[yah]` block in context: write `Phase  unknown`, then run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --brief` right after the block.
 
-Then do the first step without waiting.
+Bead or task text already in the prompt or context is enough: never run `bd show` or `which bd` for it. If bd is truly needed, run the `bd` path from `where.py --json`, quoted. Do not read `docs/`, `documents/`, plans or files over 200 lines to orient.
+
+## 2. Recall
+
+Query with the task's key nouns, 12 words or fewer, no double quotes:
+
+PY "${CLAUDE_SKILL_DIR}/../../scripts/brain.py" recall --json "<key nouns>"
+
+- **JSON printed:** `matches` are the notes that fit, best first. Add `Notes  <slug>: <why it matters here>` per note that applies. Open `<brain_dir>/<slug>.md` only when its TL;DR is not enough.
+- **Nothing printed:** add this line once per session: "This repo has no brain folder for durable project facts. Create one (`docs/brain` unless config.json sets `brain_dir`)?" Run `brain.py init` only if the user says yes. Never create it unasked.
+
+## 3. Begin
+
+Do the First step without waiting: the one search, then the edit.
+
+A bug fix adds a negative regression guard in every test suite that covers the changed code: assert the bad output cannot appear (e.g. `assertNotIn("**", out)`), not only that the good output does.
 
 If the task clearly takes several steps or sessions and there is no plan, suggest `/yah:phases` once, in one line.

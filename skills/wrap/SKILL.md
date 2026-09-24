@@ -1,7 +1,7 @@
 ---
 name: wrap
-description: End-of-task routine - save the phase's NEXT (beads or STATE.md), close finished work, commit WIP, open the PR when a phase is done. Use when a task ends, when yah says wrap, or the user says wrap.
-argument-hint: "[optional: what just got done]"
+description: End a task - save NEXT, commit WIP, open the PR when a phase is done. Use on "wrap".
+argument-hint: "[what got done]"
 ---
 
 # Wrap
@@ -14,11 +14,13 @@ Run with Bash, exactly:
 
 PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh
 
-`PY` is `python` on Windows and `python3` elsewhere. If it is not found or fails, try the other, then `py -3`, and keep whichever works.
+`PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
-Note `beads.plan` (its `source` is `beads`, `STATE.md` or `NOW.md`), `beads.phase` (label, branch, id), `git.branch`, `git.dirty`, `state_md`, `protected` and `bd`. Run beads commands as the `bd` path, quoted; `bd` null means the CLI is missing: say so and use **2b**.
+Note `beads.plan` (its `source` is `beads`, `STATE.md` or `NOW.md`), `beads.phase` (label, branch, id), `beads_source`, `git.branch`, `git.dirty`, `state_md`, `protected` and `bd`.
+
+Use beads only when `beads` is non-null, `beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path; run beads commands as that path, quoted. Otherwise say "no beads DB here" (or print `bd_note` when set; with `.beads/`, `bd` null and no note, the bd CLI is missing) and use **2b**. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
 - Plan from beads, or no plan but an in_progress bead: use **2a** (treat that bead as the phase).
-- Plan from STATE.md/NOW.md, or no beads at all: use **2b**.
+- Plan from STATE.md/NOW.md, or no beads DB here: use **2b**.
 
 ## 2a. Beads: rewrite the phase bead's notes
 

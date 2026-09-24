@@ -199,18 +199,25 @@ def git(top, *args):
 
 
 def changed_files(top, base=""):
-    """`git diff --name-only <base>...HEAD` plus `git status` paths. A failed call adds nothing."""
+    """`git diff --name-only <base>...HEAD` plus `git status` paths, minus the brain folder's own files
+    (its README.md would suffix-match every `paths: [README.md]` note). A repo with no commits yet
+    gives no path signal: every file is new there. A failed call adds nothing."""
+    status = (git(top, "status", "--porcelain=v1", "-b", "--untracked-files=all") or "").splitlines()
+    if status and status[0].startswith(("## No commits yet on ", "## Initial commit on ")):
+        return set()
     out = set()
     for ref in [r for r in (base, "origin/HEAD", "main", "master") if r]:
         txt = git(top, "diff", "--name-only", ref + "...HEAD")
         if txt is not None:
             out.update(ln.strip() for ln in txt.splitlines() if ln.strip())
             break
-    for ln in (git(top, "status", "--porcelain", "--untracked-files=all") or "").splitlines():
-        path = ln[3:].split(" -> ")[-1].strip().strip('"')
+    for ln in status:
+        path = "" if ln.startswith("## ") else ln[3:].split(" -> ")[-1].strip().strip('"')
         if path:
             out.add(path)
-    return out
+    skip = rel_dir()
+    skip = os.path.normcase((skip[2:] if skip.startswith("./") else skip) + "/")
+    return {p for p in out if not os.path.normcase(p).startswith(skip)}  # normcase: Docs/Brain == docs/brain on Windows
 
 
 _GLOBS = {}

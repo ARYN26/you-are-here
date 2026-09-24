@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up yah - the statusline, the plan tier, the optional `yah` launcher and the optional working rules. Run once after installing, or to change the tier.
+description: Set up yah - statusline, plan tier, optional launcher and rules. Run once after install.
 disable-model-invocation: true
 ---
 
@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 Every step changes a file outside this repo, so each one needs the user's explicit yes. If they say no, skip that step and go on.
 
-Run setup with Bash as `PY "${CLAUDE_SKILL_DIR}/../../scripts/setup.py" <flags>`. `PY` is `python` on Windows and `python3` elsewhere. If it is not found or fails, try the other, then `py -3`, and keep whichever works.
+Run setup with Bash as `PY "${CLAUDE_SKILL_DIR}/../../scripts/setup.py" <flags>`. `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
 ## 1. Tier
 

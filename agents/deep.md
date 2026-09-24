@@ -1,6 +1,6 @@
 ---
 name: deep
-description: Fable at high effort for one hard question - an architecture decision, a bug that resisted two attempts, a plan critique. Reached through /yah:deep. Never for routine work.
+description: Fable for one hard question via /yah:deep, e.g. a bug that resisted two attempts.
 model: fable
 effort: high
 tools: Read, Grep, Glob, Bash, WebFetch, WebSearch
