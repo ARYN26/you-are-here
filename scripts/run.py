@@ -65,8 +65,8 @@ DENY_BRANCH = ["Bash(git push * {})", "Bash(git push * {} *)", "Bash(git push * 
 PR_JSON = "state,url,reviewDecision,reviews,commits,headRefName,baseRefName"
 NO_TAG = "session ended without a YAH-RESULT line; is the yah plugin loaded? (--plugin-dir)"
 NO_BASE = ("cannot tell which branch {} targets: no base in the plan, no open PR for {}, no origin/HEAD and no "
-           "prod in config.json, so it cannot be protected. Set base in the plan (beads metadata, or "
-           "`| base <branch>` on the STATE.md phase line) or prod in config.json.")
+           "prod in config.json, so it cannot be protected. Set base in the plan (`| base <branch>` on the STATE.md "
+           "phase line, or beads metadata if you already use beads) or prod in config.json.")
 
 
 def say(text=""):
@@ -238,7 +238,7 @@ def refresh(r, s=None):
     """Re-read the target phase, NEXT and HEAD, the protected branches, and the PR while none is known."""
     s = s or where.collect(r.top, use_gh=bool(r.gh) and not r.pr) or {}
     guard(r, s.get("protected") or [])
-    b = s.get("beads") or {}
+    b = s.get("state") or {}
     r.labels = [p.get("label") for p in b.get("phases") or []]
     if r.label is None and not r.target:  # empty TARGET: pin the phase that is current now
         r.label = (b.get("phase") or b.get("next_phase") or {}).get("label")
@@ -616,7 +616,8 @@ def main():
     refresh(r, s)
     if target[:1] == "P" and r.phase is None:
         return refuse(f"no phase {target} in this repo's plan. "
-                      + (f"Phases: {', '.join(r.labels)}." if r.labels else "There is no plan (beads or STATE.md)."))
+                      + (f"Phases: {', '.join(r.labels)}." if r.labels
+                         else "There is no plan in STATE.md (or beads, if you already use it)."))
     r.base, r.base_from = pr_base(r, s)
     if not r.base and not r.pr:  # a known PR names its base once evaluate reads it
         return refuse(no_base(r))

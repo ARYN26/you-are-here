@@ -30,17 +30,16 @@ PREMIUM = ("On Max plans Fable can use up to half of the weekly cap (it has its 
 
 BEADS = [
     {"id": "yah-1", "title": "Checkout rewrite", "issue_type": "epic", "status": "open", "labels": ["plan"],
-     "spec_id": "docs/plans/checkout.md", "metadata": {"short": "CHECKOUT"}},
+     "spec_id": "docs/plans/checkout.md", "metadata": {"short": "CO"}},  # ignored: the tag is the title's first word
     {"id": "yah-2", "title": "P1 Cart API", "issue_type": "task", "status": "closed", "labels": ["phase"],
      "parent": "yah-1", "metadata": {"phase": 1, "branch": "checkout/cart", "base": "main"}, "external_ref": "gh-12"},
     {"id": "yah-3", "title": "P2 Payment form", "issue_type": "task", "status": "in_progress", "labels": ["phase"],
-     "assignee": "Sam",  # a claimed phase is the work itself, never "waiting on you"
-     "parent": "yah-1", "metadata": {"phase": 2, "branch": "checkout/payment", "base": "checkout/cart"},
+     "assignee": "Sam", "parent": "yah-1", "metadata": {"phase": 2, "branch": "checkout/payment", "base": "checkout/cart"},
      "notes": "Wire the Stripe element into PaymentForm.tsx, then run the e2e test.\nCart API is merged."},
     {"id": "yah-4", "title": "P3 Emails", "issue_type": "task", "status": "open", "labels": ["phase"],
-     "parent": "yah-1", "metadata": {"phase": 3}},
+     "parent": "yah-1", "metadata": {"phase": 3}, "notes": "Send the receipt email."},  # not shown: not current
     {"id": "yah-5", "title": "Approve the payment copy", "issue_type": "task", "status": "open", "labels": ["human"]},
-    {"id": "yah-6", "title": "Rotate the Stripe test keys", "issue_type": "task", "status": "open", "assignee": "Sam"},
+    {"id": "yah-6", "title": "Rotate the Stripe test keys", "issue_type": "task", "status": "open", "labels": ["human"]},
 ]
 STATE_PLAN = """# Shop
 
@@ -55,6 +54,8 @@ STATE_PLAN = """# Shop
 ## 2026-09-23
 - Next: Wire the Stripe element into PaymentForm.tsx, then run the e2e test.
 """
+STATE_YOU = STATE_PLAN.replace("- [ ] P3 Emails", "- [ ] P3 Emails\n\n## Follow-ups\n"  # the same plan as BEADS
+                               "- [ ] Approve the payment copy (you)\n- [ ] Rotate the Stripe test keys (you)")
 STATE_DATED = "# Notes\n\n## 2026-09-20\n- Next: Old.\n\n## 2026-09-23\n- Next: Ship the login fix,\n  then tag v1.2.\n"
 
 
@@ -109,6 +110,9 @@ class Base(unittest.TestCase):
 
     def beads_repo(self, branch="checkout/payment"):
         return self.repo({".beads/issues.jsonl": "\n".join(json.dumps(b) for b in BEADS) + "\n"}, branch)
+
+    def state_repo(self, text=STATE_YOU, branch="checkout/payment", name="shop"):
+        return self.repo({"STATE.md": text}, branch, name)
 
     def where(self, repo, *args):
         out, err, rc = self.py("where.py", "--no-gh", "--no-bd", *args, cwd=repo)
@@ -185,14 +189,15 @@ class StatuslineTests(Base):
         self.assertIn(f"{AMBER}60k{RST}", self.line(60_000))
 
     def test_where_cache_shows_plan_phase_and_for_you(self):
-        repo = self.beads_repo()
-        self.where(repo)
-        out = self.line(cwd=repo, pr={"number": 8})
-        for want in ("checkout/payment", "PR#8", "CHECKOUT P2/3", "2 for you"):
-            self.assertIn(want, out)
+        for repo in (self.state_repo(name="md"), self.beads_repo()):
+            with self.subTest(repo=repo.name):
+                self.where(repo)
+                out = self.line(cwd=repo, pr={"number": 8})
+                for want in ("checkout/payment", "PR#8", "CHECKOUT P2/3", "2 for you"):
+                    self.assertIn(want, out)
 
     def test_timing(self):
-        repo = self.beads_repo()
+        repo = self.state_repo()
         self.where(repo)
         best = 99.0
         for _ in range(3):
@@ -292,8 +297,12 @@ class WhereTests(Base):
             self.assertTrue(any(ln.startswith(want) for ln in full), want)
         self.assertFalse(any("yah-3" in ln for ln in full if not ln.startswith("PHASE")), full)  # not in YOU
         s = json.loads(self.where(repo, "--json"))
-        self.assertEqual((s["beads"]["plan"]["source"], s["beads"]["phase"]["base"]), ("beads", "checkout/cart"))
-        self.assertEqual([h["id"] for h in s["beads"]["human"]], ["yah-5", "yah-6"])
+        self.assertNotIn("beads", s)
+        self.assertEqual((s["state"]["plan"]["source"], s["state"]["phase"]["base"]), ("beads", "checkout/cart"))
+        self.assertEqual([h["id"] for h in s["state"]["human"]], ["yah-5", "yah-6"])
+        self.assertEqual([p["next"] for p in s["state"]["phases"]],  # only the shown phase carries NEXT
+                         ["", "Wire the Stripe element into PaymentForm.tsx, then run the e2e test.", ""])
+        self.assertEqual((s["beads_source"], s["ignored_plan"]), ("jsonl", None))
         self.assertIsNone(s["next_stale"])  # no stamp, no flag
         self.assertNotIn("predates", "\n".join(brief + full))
 
@@ -329,6 +338,28 @@ class WhereTests(Base):
         for bad in ("--output=x", "HEAD", "zzzzzzz", ""):  # never passed to git as an option or a ref
             self.stamp_beads(repo, bad)
             self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"], bad)
+
+    def test_stale_next_from_state_md_counts_only_the_phase_branch(self):
+        repo = self.state_repo(STATE_PLAN, branch="checkout/cart")  # tracked: its last commit is the stamp
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "base work")  # base commits after the stamp never count
+        self.git(repo, "checkout", "-q", "-b", "checkout/payment")
+        brief = self.where(repo, "--brief")
+        self.assertNotIn("predates", brief)
+        self.assertIn("branch checkout/payment (clean, 0 ahead of checkout/cart, no upstream)", brief)
+        for i in (1, 2):
+            self.git(repo, "commit", "-q", "--allow-empty", "-m", f"work {i}")
+        warn = "NEXT predates 2 commits on checkout/payment: /yah:wrap first"
+        brief = self.where(repo, "--brief").splitlines()
+        self.assertEqual(brief[2], f"NEXT Wire the Stripe element into PaymentForm.tsx, then run the e2e test.  ! {warn}")
+        full = self.where(repo).splitlines()
+        self.assertEqual(full[full.index("NEXT    Wire the Stripe element into PaymentForm.tsx, then run the e2e test.") + 1],
+                         f"!       {warn}")
+        self.git(repo, "checkout", "-q", "checkout/cart")  # off the phase branch: still counts the phase branch
+        self.assertIn(warn, self.where(repo, "--brief"))
+        self.git(repo, "checkout", "-q", "checkout/payment")
+        (repo / "STATE.md").write_text(STATE_PLAN.replace("An older", "An old"), encoding="utf-8")
+        self.git(repo, "commit", "-qam", "wrap")  # wrap commits the new NEXT
+        self.assertNotIn("predates", self.where(repo, "--brief"))
 
     def test_stale_next_from_state_md(self):
         repo = self.repo({"STATE.md": STATE_DATED})  # tracked: its own last commit is the stamp
@@ -381,6 +412,18 @@ class WhereTests(Base):
         self.git(repo, "commit", "-q", "--allow-empty", "-m", "pay work")
         self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["commits"], 1)
 
+    def test_stale_next_from_state_md_when_the_phase_base_is_gone(self):
+        repo = self.state_repo(STATE_PLAN, branch="checkout/cart")
+        init = self.head(repo)  # STATE.md's last commit: the stamp
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "cart work")
+        self.git(repo, "checkout", "-q", "-b", "main", init)
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge P1", "checkout/cart")
+        self.git(repo, "checkout", "-q", "-b", "checkout/payment", "checkout/cart")
+        self.git(repo, "branch", "-q", "-D", "checkout/cart")  # merged and deleted: its work is main's now
+        self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"])
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "pay work")
+        self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["commits"], 1)
+
     def test_base_ahead_counts_past_a_stale_local_base(self):
         repo = self.repo(branch="main")
         old = self.head(repo)
@@ -417,14 +460,27 @@ class WhereTests(Base):
         self.assertIn("aryan_dev", s["protected"])
         self.assertNotIn("PROD", self.where(repo))  # protected, but never inferred as PROD
 
-    def test_a_claimed_bead_is_not_waiting_on_you(self):
+    def test_only_the_human_label_waits_on_you_in_beads(self):
         w = load_where()
         issues = [{"id": "x-1", "title": "Fix the flaky test", "issue_type": "task", "status": "in_progress",
-                   "assignee": "Sam"},  # `bd update --claim` assigns git user.name
+                   "assignee": "Sam"},
                   {"id": "x-2", "title": "Rotate the keys", "issue_type": "task", "status": "open", "assignee": "Sam"},
                   {"id": "x-3", "title": "Approve the copy", "issue_type": "task", "status": "in_progress",
                    "labels": ["human"]}]
-        self.assertEqual([i["id"] for i in w.beads_state(issues, ["Sam"])["human"]], ["x-2", "x-3"])
+        self.assertEqual([i["id"] for i in w.beads_state(issues)["human"]], ["x-3"])
+
+    def test_only_the_shown_phase_carries_next(self):
+        w = load_where()
+        epic = {"id": "x-0", "title": "Plan", "issue_type": "epic", "status": "open", "labels": ["plan"]}
+        kids = [{"id": f"x-{n}", "title": f"P{n} Step", "issue_type": "task", "status": st, "labels": ["phase"],
+                 "parent": "x-0", "metadata": {"phase": n}, "notes": f"Do step {n}."}
+                for n, st in ((1, "closed"), (2, "open"), (3, "open"))]
+        s = w.beads_state([epic] + kids)  # none running: the next phase is shown
+        self.assertEqual((s["next_phase"]["id"], [p["next"] for p in s["phases"]]), ("x-2", ["", "Do step 2.", ""]))
+        text = "## Plan: Plan\n- [x] P1 Step\n- [ ] P2 Step\n- [ ] P3 Step\n\n## 2026-09-23\n- Next: Do step 2.\n"
+        s = json.loads(self.where(self.state_repo(text), "--json"))["state"]
+        self.assertEqual((s["next_phase"]["id"], [p["next"] for p in s["phases"]]),
+                         ("STATE.md:3", ["", "Do step 2.", ""]))
 
     def test_footer_maps_other_plugins_skill_names(self):
         repo = self.repo({"CLAUDE.md": "End each step with /acme:wrap; start with `/acme:where`.\n"
@@ -442,40 +498,109 @@ class WhereTests(Base):
                          FOOTER + " The plan or CLAUDE.md says /zed:deep; unless those skills are listed, "
                                   "use /yah:deep.")
 
-    def test_you_from_config_beats_git_user_name(self):
-        self.config(projects={"shop": {"you": ["Nobody"]}})
-        self.assertIn("1 waiting on you", self.where(self.beads_repo(), "--brief"))
-
     def test_brief_worst_case_is_six_lines(self):
-        self.config(projects={"shop": {"prod": "main deploys on push. PRs only."}})
-        repo = self.beads_repo(branch="main")
-        brief = self.where(repo, "--brief").splitlines()
-        self.assertEqual(len(brief), 6)
-        self.assertTrue(brief[0].endswith("! phase branch is checkout/payment"))
-        self.assertEqual(brief[4], "PROD main deploys on push. PRs only.")
-        full = self.where(repo)
-        self.assertIn("!       phase branch is checkout/payment, you are on main", full)
-        self.assertIn("PROD    main deploys on push. PRs only.", full)
+        prod = {"prod": "main deploys on push. PRs only."}
+        self.config(projects={"md": prod, "shop": prod})
+        for repo in (self.state_repo(branch="main", name="md"), self.beads_repo(branch="main")):
+            with self.subTest(repo=repo.name):
+                brief = self.where(repo, "--brief").splitlines()
+                self.assertEqual(len(brief), 6)
+                self.assertTrue(brief[0].endswith("! phase branch is checkout/payment"))
+                self.assertEqual(brief[3], "2 waiting on you")
+                self.assertEqual(brief[4], "PROD main deploys on push. PRs only.")
+                full = self.where(repo)
+                self.assertIn("!       phase branch is checkout/payment, you are on main", full)
+                self.assertIn("PROD    main deploys on push. PRs only.", full)
 
     def test_state_md_plan(self):
-        repo = self.repo({"STATE.md": STATE_PLAN}, branch="checkout/payment")
+        repo = self.state_repo()
         brief = self.where(repo, "--brief")
         self.assertLessEqual(len(brief.splitlines()), 6)
-        self.assertIn("PLAN CHECKOUT 1/3 done  PHASE P2 Payment form (STATE.md)", brief)
+        self.assertIn("PLAN CHECKOUT 1/3 done  PHASE P2 Payment form (STATE.md:5)", brief)
         self.assertIn("NEXT Wire the Stripe element into PaymentForm.tsx, then run the e2e test.", brief)
         self.assertNotIn("older", brief)
-        self.assertIn("PLAN    Checkout rewrite  [1/3 done]  STATE.md  checkout.md", self.where(repo))
-        b = json.loads(self.where(repo, "--json"))["beads"]
-        self.assertEqual([(p["label"], p["status"]) for p in b["phases"]],
-                         [("P1", "closed"), ("P2", "in_progress"), ("P3", "open")])
+        full = self.where(repo).splitlines()
+        self.assertEqual(full[1:6], [
+            "PLAN    Checkout rewrite  [1/3 done]  STATE.md  checkout.md",
+            "PHASE   P2 Payment form  in_progress  STATE.md:5  branch checkout/payment",
+            "NEXT    Wire the Stripe element into PaymentForm.tsx, then run the e2e test.",
+            "YOU     STATE.md:9  Approve the payment copy",
+            "        STATE.md:10  Rotate the Stripe test keys"])
+        b = json.loads(self.where(repo, "--json"))["state"]
+        self.assertEqual([(p["id"], p["label"], p["status"]) for p in b["phases"]],  # a phase's id is its line
+                         [("STATE.md:4", "P1", "closed"), ("STATE.md:5", "P2", "in_progress"), ("STATE.md:6", "P3", "open")])
         self.assertEqual((b["phases"][0]["pr"], b["phase"]["branch"], b["phase"]["base"], b["plan"]["source"]),
                          ("#12", "checkout/payment", "checkout/cart", "STATE.md"))
+        self.assertEqual((b["plan"]["id"], b["in_progress"], b["open_count"]), ("STATE.md", [], 0))
 
     def test_state_md_plan_without_running_phase(self):
         text = "## Plan: Emails\n- [x] P1 Templates\n- [ ] P2 Sending\n\n## 2026-09-23\n- Next: Pick a mail provider.\n"
         out = self.where(self.repo({"STATE.md": text}))
         self.assertIn("PHASE   none in progress. Next: P2 Sending  (mark it [~] in STATE.md)", out)
         self.assertIn("NEXT    Pick a mail provider.", out)
+
+    def test_state_md_sub_tasks_are_not_phases(self):
+        text = ("## Plan: Launch\n- [x] P1 Build\n  - [x] Write the build script\n- [~] P2 Ship | branch launch/ship\n"
+                "  - [ ] Tag the release\n  - [~] Upload the assets\n- [ ] P3 Announce\n\n"
+                "## Follow-ups\n- [~] Fix the flaky e2e test\n- [ ] Rotate the keys (you)\n- [ ] Update the README\n"
+                "- [x] Old thing\n")
+        s = json.loads(self.where(self.state_repo(text, branch="launch/ship"), "--json"))["state"]
+        self.assertEqual([(p["id"], p["label"], p["title"]) for p in s["phases"]],
+                         [("STATE.md:2", "P1", "Build"), ("STATE.md:4", "P2", "Ship"), ("STATE.md:7", "P3", "Announce")])
+        self.assertEqual((s["plan"]["done"], s["plan"]["total"], s["phase"]["id"]), (1, 3, "STATE.md:4"))
+        self.assertEqual(s["in_progress"], [{"id": "STATE.md:6", "title": "Upload the assets"},
+                                            {"id": "STATE.md:10", "title": "Fix the flaky e2e test"}])
+        self.assertEqual((s["open_count"], s["human"]), (2, [{"id": "STATE.md:11", "title": "Rotate the keys"}]))
+
+    def test_state_md_follow_up_in_progress_shows_as_doing(self):
+        repo = self.state_repo(STATE_DATED + "\n## Follow-ups\n- [~] Fix the flaky e2e test\n- [ ] Update the README\n"
+                               "- [ ] Bump the deps\n- [ ] Rotate the keys (you)\n", branch="main")
+        full = self.where(repo).splitlines()
+        self.assertEqual(full[1:], [
+            "STATE   STATE.md: 2026-09-23",
+            "NEXT    Ship the login fix, then tag v1.2.",
+            "DOING   STATE.md:11  Fix the flaky e2e test",
+            "TASKS   2 open, no plan (/yah:phases after a plan is approved)",
+            "YOU     STATE.md:14  Rotate the keys"])
+        brief = self.where(repo, "--brief").splitlines()
+        self.assertLessEqual(len(brief), 6)
+        self.assertEqual(brief[1:4], ["STATE.md 2026-09-23  NEXT Ship the login fix, then tag v1.2.",
+                                      "IN PROGRESS STATE.md:11 Fix the flaky e2e test", "1 waiting on you"])
+        full = self.py("where.py")[0].splitlines()  # the home view
+        self.assertTrue(any(ln.startswith("shop") and "doing Fix the flaky e2e test" in ln for ln in full), full)
+
+    def test_tasks_row_for_open_work_without_a_plan(self):
+        issues = [{"id": "x-1", "title": "Fix the flaky test", "issue_type": "task", "status": "in_progress"},
+                  {"id": "x-2", "title": "Bump the deps", "issue_type": "task", "status": "open"}]
+        repo = self.repo({".beads/issues.jsonl": "\n".join(json.dumps(i) for i in issues) + "\n"})
+        full = self.where(repo)
+        self.assertIn("DOING   x-1  Fix the flaky test", full)
+        self.assertIn("TASKS   1 open, no plan (/yah:phases after a plan is approved)", full)
+        self.assertNotIn("BEADS", full)
+        (repo / "STATE.md").write_text("## Follow-ups\n- [ ] Update the README\n", encoding="utf-8")
+        self.assertIn("TASKS   2 open, no plan", self.where(repo))  # both sources count
+        (repo / ".beads" / "issues.jsonl").write_text(json.dumps(issues[0]) + "\n", encoding="utf-8")
+        (repo / "STATE.md").write_text("## Follow-ups\n- [x] Update the README\n", encoding="utf-8")
+        self.assertNotIn("TASKS", self.where(repo))  # nothing open: no row
+        planned = self.state_repo(STATE_PLAN + "\n## Follow-ups\n- [ ] Update the README\n", name="md")
+        self.assertEqual(json.loads(self.where(planned, "--json"))["state"]["open_count"], 1)
+        self.assertNotIn("TASKS", self.where(planned))  # a plan: no row
+
+    def test_a_state_md_plan_wins_over_a_beads_epic(self):
+        repo = self.beads_repo()
+        (repo / "STATE.md").write_text("## Plan: Emails (docs/plans/emails.md)\n- [~] P1 Templates | branch "
+                                       "checkout/payment\n\n## Follow-ups\n- [ ] Rotate the prod keys (you)\n",
+                                       encoding="utf-8")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["state"]["plan"]["title"], s["state"]["plan"]["source"], s["state"]["phase"]["id"]),
+                         ("Emails", "STATE.md", "STATE.md:2"))
+        self.assertEqual(s["ignored_plan"], {"id": "yah-1", "title": "Checkout rewrite", "source": "beads"})
+        self.assertEqual([h["id"] for h in s["state"]["human"]], ["yah-5", "yah-6", "STATE.md:5"])  # both still count
+        full = self.where(repo).splitlines()
+        self.assertEqual(full[1:4], ["PLAN    Emails  [0/1 done]  STATE.md  emails.md",
+                                     "!       beads epic yah-1 ignored: STATE.md has a plan",
+                                     "PHASE   P1 Templates  in_progress  STATE.md:2  branch checkout/payment"])
+        self.assertIn("PLAN EMAILS 0/1 done  PHASE P1 Templates (STATE.md:2)", self.where(repo, "--brief"))
 
     def test_state_md_dated_only(self):
         repo = self.repo({"STATE.md": STATE_DATED})
@@ -487,15 +612,13 @@ class WhereTests(Base):
 
     def test_state_md_matches_beads(self):
         """The same plan in STATE.md and in beads gives the same plan, phase, NEXT and waiting-on-you."""
-        text = STATE_PLAN.replace("- [ ] P3 Emails", "- [ ] P3 Emails\n\n## Follow-ups\n"
-                                  "- [ ] Approve the payment copy (you)\n- [ ] Rotate the Stripe test keys (you)")
-        md = json.loads(self.where(self.repo({"STATE.md": text}, branch="checkout/payment", name="md"), "--json"))
+        md = json.loads(self.where(self.state_repo(name="md"), "--json"))
         bd = json.loads(self.where(self.beads_repo(), "--json"))
 
         def view(s):
-            b = s["beads"]
+            b = s["state"]
             return ({k: b["plan"][k] for k in ("title", "short", "spec", "done", "total")},
-                    [(p["label"], p["title"], p["status"], p["branch"]) for p in b["phases"]],
+                    [(p["label"], p["title"], p["status"], p["branch"], p["next"]) for p in b["phases"]],
                     {k: b["phase"][k] for k in ("label", "branch", "base", "next")},
                     [h["title"] for h in b["human"]], s["protected"])
         self.assertEqual(view(md)[:4], view(bd)[:4])
@@ -508,10 +631,11 @@ class WhereTests(Base):
                 "## 2026-09-23\n- Next: Wait for review.\n")
         repo = self.repo({"STATE.md": text})
         s = json.loads(self.where(repo, "--json"))
-        self.assertEqual(s["beads"]["human"], [{"id": "STATE.md:3", "title": "P2 Merge PR #12"},
+        self.assertEqual(s["state"]["human"], [{"id": "STATE.md:3", "title": "P2 Merge PR #12"},
                                                {"id": "STATE.md:6", "title": "Rotate the test keys"}])
-        self.assertEqual((s["beads"]["plan"]["total"], s["beads"]["next_phase"]["label"]), (2, "P2"))
-        self.assertNotIn("human", s["state_md"])
+        self.assertEqual((s["state"]["plan"]["total"], s["state"]["next_phase"]["label"]), (2, "P2"))
+        for key in ("human", "in_progress", "open_count", "plan"):
+            self.assertNotIn(key, s["state_md"])
         full = self.where(repo)
         self.assertIn("YOU     STATE.md:3  P2 Merge PR #12", full)
         self.assertIn("        STATE.md:6  Rotate the test keys", full)
@@ -523,23 +647,23 @@ class WhereTests(Base):
         text = ("## Plan: Launch\n- [ ] P1 Ship | branch launch/ship | PR #13 (you)\n\n"
                 "```markdown\n- [ ] An example line (you)\n```\n")
         s = json.loads(self.where(self.repo({"STATE.md": text}), "--json"))
-        self.assertEqual(s["beads"]["human"], [{"id": "STATE.md:2", "title": "P1 Ship"}])
-        p = s["beads"]["phases"][0]
+        self.assertEqual(s["state"]["human"], [{"id": "STATE.md:2", "title": "P1 Ship"}])
+        p = s["state"]["phases"][0]
         self.assertEqual((p["title"], p["branch"], p["pr"]), ("Ship", "launch/ship", "#13"))
 
     def test_state_md_you_with_a_beads_plan(self):
         repo = self.beads_repo()
         (repo / "STATE.md").write_text("## Follow-ups\n- [ ] Rotate the prod keys (you)\n", encoding="utf-8")
         s = json.loads(self.where(repo, "--json"))
-        self.assertEqual(s["beads"]["plan"]["source"], "beads")
-        self.assertEqual([h["id"] for h in s["beads"]["human"]], ["yah-5", "yah-6", "STATE.md:2"])
+        self.assertEqual((s["state"]["plan"]["source"], s["ignored_plan"]), ("beads", None))  # no STATE.md plan
+        self.assertEqual([h["id"] for h in s["state"]["human"]], ["yah-5", "yah-6", "STATE.md:2"])
 
     def test_state_md_you_without_plan(self):
         repo = self.repo({"STATE.md": STATE_DATED + "\n## Follow-ups\n- [ ] Rotate the test keys (you)\n"})
         full = self.where(repo)
         self.assertIn("NEXT    Ship the login fix, then tag v1.2.", full)
         self.assertIn("YOU     STATE.md:11  Rotate the test keys", full)
-        self.assertNotIn("BEADS", full)
+        self.assertNotIn("TASKS", full)  # a (you) line is not an open task
         self.assertNotIn("PLAN", full)
 
     def test_state_md_picks_the_running_plan(self):
@@ -550,12 +674,12 @@ class WhereTests(Base):
         for i, (case, text) in enumerate(cases.items()):
             with self.subTest(case=case):
                 s = json.loads(self.where(self.repo({"STATE.md": text}, name=f"r{i}"), "--json"))
-                self.assertEqual(s["beads"]["plan"]["title"], "New")
+                self.assertEqual(s["state"]["plan"]["title"], "New")
         s = json.loads(self.where(self.repo({"STATE.md": done}, name="all-done"), "--json"))
-        self.assertEqual((s["beads"]["plan"]["title"], s["beads"]["phase"], s["beads"]["next_phase"]), ("Old", None, None))
+        self.assertEqual((s["state"]["plan"]["title"], s["state"]["phase"], s["state"]["next_phase"]), ("Old", None, None))
 
     def test_path(self):
-        repo = self.beads_repo()
+        repo = self.state_repo()
         self.where(repo)
         for name in ("shop", "SHOP"):
             out, err, rc = self.py("where.py", "--path", name)
@@ -578,10 +702,13 @@ class WhereTests(Base):
         elsewhere.mkdir()
         self.assertEqual(self.py("where.py", "--brief")[0], "")  # home, no projects yet
         self.assertEqual(self.py("where.py", "--brief", cwd=elsewhere)[0], "")  # not a repo, not home
-        self.where(self.beads_repo())
+        self.where(self.state_repo())
+        self.where(self.state_repo(STATE_PLAN.replace("- [~] P2", "- [ ] P2"), name="blog"))
         full = self.py("where.py")[0].splitlines()
         self.assertTrue(full[0].startswith("PROJECTS  (start one with: yah <name>)"))
         self.assertTrue(any(ln.startswith("shop") and "CHECKOUT P2/3 Payment form" in ln for ln in full), full)
+        self.assertTrue(any(ln.startswith("blog") and "CHECKOUT P2/3 Payment form (not started)" in ln
+                            for ln in full), full)
         brief = self.py("where.py", "--brief")[0].splitlines()
         self.assertLessEqual(len(brief), 6)
         self.assertTrue(brief[0].startswith("[yah] Session is in the home dir"))
@@ -654,7 +781,7 @@ class WhereTests(Base):
         out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=repo)
         s = json.loads(out)
         self.assertEqual(s["beads_source"], "bd", err)
-        self.assertEqual(Path(s["beads"]["in_progress"][0]["title"]), repo / ".beads")
+        self.assertEqual(Path(s["state"]["in_progress"][0]["title"]), repo / ".beads")
         self.assertIsNone(s["bd"])  # the model's own bd calls would inherit the foreign BEADS_DIR
         self.assertIn("BEADS_DIR", s["bd_note"])
         del self.env["BEADS_DIR"]
@@ -880,7 +1007,7 @@ class SetupTests(Base):
 
     def launcher_fixture(self, rc_name):
         """A repo where.py has seen, and a plugin copy whose run.py just echoes its args."""
-        repo = self.beads_repo()
+        repo = self.state_repo()
         self.where(repo)
         scripts = self.plugin_copy(self.tmp / "plugin")
         (scripts / "run.py").write_text("import sys\nprint('RUN', sys.argv[1:])\n", encoding="utf-8")
@@ -973,11 +1100,12 @@ class HookShellTests(Base):
 
     def check(self, path=None):
         start, prompt = (e["hooks"][0]["command"] for e in hook_commands())
-        repo = self.beads_repo()
-        out, rc = self.sh(start, json.dumps({"hook_event_name": "SessionStart", "source": "startup", "cwd": str(repo)}),
-                          repo, path)
-        self.assertEqual(rc, 0)
-        self.assertTrue(out.startswith("[yah] shop  branch checkout/payment"), out)
+        for repo in (self.state_repo(name="md"), self.beads_repo()):
+            out, rc = self.sh(start, json.dumps({"hook_event_name": "SessionStart", "source": "startup",
+                                                 "cwd": str(repo)}), repo, path)
+            self.assertEqual(rc, 0)
+            self.assertTrue(out.startswith(f"[yah] {repo.name}  branch checkout/payment"), out)
+            self.assertIn("PLAN CHECKOUT 1/3 done  PHASE P2 Payment form", out)
         out, rc = self.sh(prompt, json.dumps({"session_id": "h1", "prompt": "hi",
                                               "transcript_path": self.transcript(210_000)}), repo, path)
         self.assertEqual(rc, 0)
