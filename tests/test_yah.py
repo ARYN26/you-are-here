@@ -300,8 +300,9 @@ class WhereTests(Base):
         self.assertNotIn("beads", s)
         self.assertEqual((s["state"]["plan"]["source"], s["state"]["phase"]["base"]), ("beads", "checkout/cart"))
         self.assertEqual([h["id"] for h in s["state"]["human"]], ["yah-5", "yah-6"])
-        self.assertEqual([p["next"] for p in s["state"]["phases"]],  # only the shown phase carries NEXT
-                         ["", "Wire the Stripe element into PaymentForm.tsx, then run the e2e test.", ""])
+        self.assertEqual([p["next"] for p in s["state"]["phases"]],  # each bead keeps its own notes
+                         ["", "Wire the Stripe element into PaymentForm.tsx, then run the e2e test.",
+                          "Send the receipt email."])
         self.assertEqual((s["beads_source"], s["ignored_plan"]), ("jsonl", None))
         self.assertIsNone(s["next_stale"])  # no stamp, no flag
         self.assertNotIn("predates", "\n".join(brief + full))
@@ -469,14 +470,15 @@ class WhereTests(Base):
                    "labels": ["human"]}]
         self.assertEqual([i["id"] for i in w.beads_state(issues)["human"]], ["x-3"])
 
-    def test_only_the_shown_phase_carries_next(self):
+    def test_next_per_source(self):
         w = load_where()
         epic = {"id": "x-0", "title": "Plan", "issue_type": "epic", "status": "open", "labels": ["plan"]}
         kids = [{"id": f"x-{n}", "title": f"P{n} Step", "issue_type": "task", "status": st, "labels": ["phase"],
                  "parent": "x-0", "metadata": {"phase": n}, "notes": f"Do step {n}."}
                 for n, st in ((1, "closed"), (2, "open"), (3, "open"))]
-        s = w.beads_state([epic] + kids)  # none running: the next phase is shown
-        self.assertEqual((s["next_phase"]["id"], [p["next"] for p in s["phases"]]), ("x-2", ["", "Do step 2.", ""]))
+        s = w.beads_state([epic] + kids)  # each bead keeps the notes wrap wrote, so `yah run P3` resumes from its own
+        self.assertEqual((s["next_phase"]["id"], [p["next"] for p in s["phases"]]),
+                         ("x-2", ["Do step 1.", "Do step 2.", "Do step 3."]))
         text = "## Plan: Plan\n- [x] P1 Step\n- [ ] P2 Step\n- [ ] P3 Step\n\n## 2026-09-23\n- Next: Do step 2.\n"
         s = json.loads(self.where(self.state_repo(text), "--json"))["state"]
         self.assertEqual((s["next_phase"]["id"], [p["next"] for p in s["phases"]]),
@@ -577,8 +579,12 @@ class WhereTests(Base):
         self.assertLessEqual(len(brief), 6)
         self.assertEqual(brief[1:4], ["STATE.md 2026-09-23  NEXT Ship the login fix, then tag v1.2.",
                                       "IN PROGRESS STATE.md:11 Fix the flaky e2e test", "1 waiting on you"])
-        full = self.py("where.py")[0].splitlines()  # the home view
-        self.assertTrue(any(ln.startswith("shop") and "doing Fix the flaky e2e test" in ln for ln in full), full)
+        home = self.py("where.py")[0].splitlines()  # the last wrap's NEXT beats the [~] follow-up
+        self.assertTrue(any(ln.startswith("shop") and "Ship the login fix" in ln for ln in home), home)
+        (repo / "STATE.md").write_text("## Follow-ups\n- [~] Fix the flaky e2e test\n", encoding="utf-8")
+        self.where(repo)
+        home = self.py("where.py")[0].splitlines()  # no NEXT: the [~] follow-up shows
+        self.assertTrue(any(ln.startswith("shop") and "doing Fix the flaky e2e test" in ln for ln in home), home)
 
     def test_tasks_row_for_open_work_without_a_plan(self):
         issues = [{"id": "x-1", "title": "Fix the flaky test", "issue_type": "task", "status": "in_progress"},
@@ -623,16 +629,31 @@ class WhereTests(Base):
         self.assertIn("NEXT    Ship the login fix, then tag v1.2.", full)
         self.assertNotIn("PLAN", full)
 
+    def test_a_worktree_reads_the_main_checkouts_state_md(self):
+        """STATE.md is gitignored, so a linked worktree has none: it reads the main checkout's, as beads does."""
+        repo = self.repo({".gitignore": "STATE.md\n"}, branch="checkout/cart")
+        (repo / "STATE.md").write_text(STATE_YOU, encoding="utf-8")
+        wt = self.tmp / "shop-wt"
+        self.git(repo, "worktree", "add", "-q", "-b", "checkout/payment", str(wt))
+        s = json.loads(self.where(wt, "--json"))
+        self.assertTrue(os.path.samefile(s["state_md"]["path"], repo / "STATE.md"), s["state_md"])
+        self.assertEqual((s["state"]["phase"]["label"], s["state"]["phase"]["id"]), ("P2", "STATE.md:5"))
+        self.assertIn("PHASE   P2 Payment form  in_progress  STATE.md:5  branch checkout/payment", self.where(wt))
+        (wt / "STATE.md").write_text("## 2026-09-24\n- Next: Only here.\n", encoding="utf-8")  # its own wins
+        s = json.loads(self.where(wt, "--json"))
+        self.assertEqual((s["state_md"]["next"], s["state"]["plan"]), ("Only here.", None))
+
     def test_state_md_matches_beads(self):
         """The same plan in STATE.md and in beads gives the same plan, phase, NEXT, waiting-on-you, work in
-        progress and open tasks: phases are none of the last two, in either source."""
+        progress and open tasks: phases are none of the last two, in either source. Only the phases' own NEXT
+        differs: beads keeps each bead's notes, STATE.md has one NEXT."""
         md = json.loads(self.where(self.state_repo(name="md"), "--json"))
         bd = json.loads(self.where(self.beads_repo(), "--json"))
 
         def view(s):
             b = s["state"]
             return ({k: b["plan"][k] for k in ("title", "short", "spec", "done", "total")},
-                    [(p["label"], p["title"], p["status"], p["branch"], p["next"]) for p in b["phases"]],
+                    [(p["label"], p["title"], p["status"], p["branch"]) for p in b["phases"]],
                     {k: b["phase"][k] for k in ("label", "branch", "base", "next")},
                     [h["title"] for h in b["human"]], [i["title"] for i in b["in_progress"]], b["open_count"],
                     s["protected"])

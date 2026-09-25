@@ -26,11 +26,12 @@ STATE.md is the default. Use beads only if the repo already uses it: `beads_sour
 
 ## 2a. STATE.md: write today's entry
 
-Edit STATE.md (or NOW.md) at the repo root; create STATE.md if neither exists.
+Edit the file at `state_md.path`. In a linked worktree that is the main checkout's, which outlives the worktree. With no `state_md`, create STATE.md at `main_root`.
 - Add a `## YYYY-MM-DD` entry for today (or rewrite today's), with `- Next: <NEXT line>` first and at most 3 short lines after it: what is done, what is half-done and where, any trap.
 - The NEXT line is what `/yah:where` prints as NEXT: one concrete action someone could start cold, at most 140 characters. Example: "Run make eval, then paste the table into PR #9".
-- In the `## Plan:` section, keep the phase lines (the unindented checkboxes) true: `[x]` done, exactly one `[~]` current, `[ ]` open, with `| branch X | base Y | PR #N` fields. Indented checkbox lines under a phase are its sub-tasks.
-- A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Mark one being worked on `[~]`. Tick finished ones `[x]` or delete them.
+- In the `## Plan:` section, keep the phase lines (the outermost checkboxes) true: `[x]` done, exactly one `[~]` current, `[ ]` open, with `| branch X | base Y | PR #N` fields. Indented checkbox lines under a phase are its sub-tasks.
+- A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Mark one being worked on `[~]`. Delete finished ones; the commit or PR is their record.
+- Delete a `## Plan:` section whose phases are all `[x]` once none of their PRs is open (`gh pr view <N> --json state`). The plan file and the PRs keep its history, and the file the model reads each session stays short.
 - A step only the user can do (a review, a merge, a console step) ends with `(you)`. `/yah:where` lists the open ones as waiting on the user.
 - Keep only the 5 newest dated entries; delete older ones. Leave anything else in the file alone.
 

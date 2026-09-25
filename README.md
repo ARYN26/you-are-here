@@ -271,7 +271,7 @@ The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own cont
 
 - Claude Code's statusline JSON on stdin, `.git/HEAD`, the where cache and the session transcript (the statusline's idle time, the guard's context size).
 - `git`, plus `gh` when installed, in the current repo (`where.py`), and `bd` only in a repo with `.beads/`.
-- `STATE.md` or `NOW.md` at the repo root.
+- `STATE.md` or `NOW.md` at the repo root, or the main checkout's from a linked worktree.
 - The brain folder, plus `git diff --name-only` and `git status` when a note has `paths` (recall).
 - `config.json` in the data folder, and `settings.json` during setup.
 
@@ -338,6 +338,11 @@ Windows has `python`. macOS and Linux fail on it instantly and fall through to `
 
 yah keeps plan state in `STATE.md` (or `NOW.md`) at the repo root: plain markdown, nothing to install, and git is its history. `/yah:phases` writes the plan section and `/yah:wrap` keeps it true.
 
+For larger repos:
+- **Worktrees share one plan.** A linked worktree without its own STATE.md reads the main checkout's, and `/yah:wrap` writes there, so parallel sessions and agents in worktrees see the same plan and none of them loses its NEXT when its worktree is removed.
+- **The branch is the claim.** A phase's `| branch` says who holds it: a session on another branch gets `phase branch is X, you are on Y`.
+- **Finished work leaves.** `/yah:wrap` deletes finished follow-ups, and a plan whose phases are all done once none of its PRs is open. Git, the PRs and the plan file keep the history.
+
 ```markdown
 ## Plan: Checkout rewrite (docs/plans/checkout.md)
 - [x] P1 Cart API | branch checkout/cart | PR #11
@@ -354,7 +359,7 @@ yah keeps plan state in `STATE.md` (or `NOW.md`) at the repo root: plain markdow
 - Next: Wire the Stripe element into PaymentForm.tsx, then run the e2e test.
 ```
 
-- Phases are the unindented checkbox lines in a `## Plan:` section. `[x]` is closed, `[~]` or `[>]` is in progress, and `[ ]` is open. Exactly one top-level `[~]` is the current phase.
+- Phases are the outermost checkbox lines in a `## Plan:` section. `[x]` is closed, `[~]` or `[>]` is in progress, and `[ ]` is open. Exactly one outermost `[~]` is the current phase.
 - Fields are `branch X`, `base X` and `PR #N`, separated by `|` or `·`. The label is `P<n>`, and the id is `STATE.md:<line>`.
 - An indented checkbox line under a phase is a sub-task: not a phase, and not counted in done/total.
 - A `[~]` line anywhere else (a sub-task, or under `## Follow-ups` or another section) is work in progress, not a phase: with no plan, `/yah:where` lists it as a DOING row. Open `[ ]` lines that are neither phases nor `(you)` lines are open tasks: with no plan, the full view shows `TASKS   <N> open, no plan (/yah:phases after a plan is approved)`.
@@ -368,7 +373,7 @@ yah keeps plan state in `STATE.md` (or `NOW.md`) at the repo root: plain markdow
 
 yah never needs beads, and beads shows nothing STATE.md does not. A repo that already has `.beads/` at its root can keep it: with `bd` found, `/yah:phases` writes the plan as one epic with one child bead per phase, and `/yah:wrap` keeps them true. They run `bd` by the full path where.py finds: on PATH, or where Homebrew, pipx and the Windows installer put it. yah runs `bd` only in a repo with `.beads/`, and a `BEADS_DIR` that points outside the repo turns it off until you unset it.
 
-- A phase's NEXT is the first line of its notes. Only the current phase, or the next one when none is running, shows it.
+- A phase's NEXT is the first line of its notes, so a run pinned to that phase resumes from it. `/yah:where` shows the current phase's, or the next one's when none is running.
 - A bead labelled `human` waits on you, and so does a `(you)` line in STATE.md.
 - With no plan epic, open beads count toward the same `TASKS` row, and in-progress beads show as DOING.
 - If STATE.md or NOW.md also has a plan, STATE.md wins, and `/yah:where` warns: `!       beads epic <id> ignored: STATE.md has a plan`.

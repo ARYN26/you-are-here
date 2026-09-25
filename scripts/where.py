@@ -8,7 +8,7 @@
     --no-gh, --no-bd      skip `gh pr list` / the bd CLI (.beads/issues.jsonl is still read)
 
 Sources:
-  1. STATE.md / NOW.md at the repo root: a `## Plan:` section whose unindented checkbox lines are
+  1. STATE.md / NOW.md at the repo root: a `## Plan:` section whose outermost checkbox lines are
      the phases (the [~] one is current; indented lines are sub-tasks), and dated `## YYYY-MM-DD`
      entries whose `- Next:` line is NEXT. `(you)` marks an open line as waiting on you.
   2. beads, if you already use beads: the open epic labelled `plan`, its children labelled `phase`
@@ -217,13 +217,14 @@ def labels(issue):
 
 
 def pick_phase(state, views, nxt=None):
-    """The in_progress phase is current; with none running, the first unclosed one is next. Only that one
-    carries a NEXT: nxt when given (STATE.md's), else its own."""
+    """The in_progress phase is current; with none running, the first unclosed one is next. STATE.md's one NEXT
+    (nxt) goes on that phase. A bead keeps its own notes: wrap writes them, and a run pinned to that phase reads them."""
     running = [v for v in views if v["status"] == "in_progress"]
     pending = [v for v in views if v["status"] != "closed"]
     shown = running[0] if running else pending[0] if pending else None
-    for v in views:
-        v["next"] = "" if v is not shown else v["next"] if nxt is None else nxt
+    if nxt is not None:
+        for v in views:
+            v["next"] = nxt if v is shown else ""
     state.update(phases=views, phase=running[0] if running else None, next_phase=None if running else shown)
     return state
 
@@ -361,15 +362,16 @@ def md_plan(file, head, items, nxt):
                       views, nxt)
 
 
-def state_md(top):
+def state_md(top, main_root=None):
     """STATE.md (else NOW.md): its NEXT, its plan, and its other checkbox lines, anywhere outside code fences.
     An open or in-progress line marked `(you)` waits on you. A [~] line that is not a phase is work in progress,
     `(you)` or not. An open line that is neither a phase nor `(you)` counts as an open task. Their id is
-    file:line, so the model can go straight to it."""
-    for name in ("STATE.md", "NOW.md"):
-        f = Path(top) / name
+    file:line, so the model can go straight to it. A linked worktree with neither file reads the main checkout's,
+    as beads does: STATE.md is gitignored, so a new worktree never has one. `path` is the file wrap must edit."""
+    for f in (d / name for d in dict.fromkeys((Path(top), Path(main_root or top))) for name in ("STATE.md", "NOW.md")):
         if not f.is_file():
             continue
+        name = f.name
         text = f.read_text(encoding="utf-8", errors="replace")
         lines = text.split("\n")
         heads, items = md_scan(lines)
@@ -385,7 +387,7 @@ def state_md(top):
                 lead[sec] = min(lead.get(sec, ml[4]), ml[4])
         phase_lines = {n for n, sec, ml in items if sec in lead and ml[4] == lead[sec]}
         rest = [(n, ml) for n, _, ml in items if n not in phase_lines]
-        out: dict = {"file": name, "head": "", "next": "", "at": "", "plan": None,
+        out: dict = {"file": name, "path": str(f), "head": "", "next": "", "at": "", "plan": None,
                      "human": [{"id": f"{name}:{n}", "title": ml[1]} for n, _, ml in items
                                if ml[0] != "closed" and ml[3]],
                      "in_progress": [{"id": f"{name}:{n}", "title": ml[1]} for n, ml in rest
@@ -398,7 +400,7 @@ def state_md(top):
             out.update(head=heads[i][1], next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)),
                        at=at.group(1) if at else "")
         elif not plans:
-            plain = [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+            plain = [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#") and not CHECKBOX.match(ln)]
             out["next"] = plain[0] if plain else ""
         # The plan with a phase in progress, else one with an open phase, else the first. A finished plan
         # left above the next one does not hide it.
@@ -556,6 +558,8 @@ def md_stamp(top, sm):
     """The commit a STATE.md/NOW.md NEXT was written at: a tracked file's last own commit on this branch (none
     while it has uncommitted edits: NEXT was just written), else the `- At: <sha>` line wrap puts under `- Next:`.
     Merges are skipped: a merge of the base that touched the file was not a wrap."""
+    if Path(sm["path"]).parent != Path(top):  # the main checkout's, read from a worktree: never tracked here
+        return sm.get("at") or ""
     f = sm["file"]
     st = run(["git", "status", "--porcelain=v1", "--ignored", "--", f], top, timeout=3)
     if st is None:
@@ -709,7 +713,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
         g["branch"] = read_branch(git_dir) if git_dir else None
     issues, source = load_issues(top, main_root, use_bd)
     state = beads_state(issues) if issues is not None else None
-    sm = state_md(top)
+    sm = state_md(top, main_root)
     ignored, hidden = None, []  # a beads plan epic a STATE.md plan hides, and its phases
     if sm:
         md = {k: sm.pop(k) for k in ("plan", "human", "in_progress", "open_count")}
@@ -928,7 +932,7 @@ def home_view(brief):
             p = b.get("phase") or b.get("next_phase") or {}
             mark = "" if b.get("phase") else " (not started)"
             what = f"{b['plan']['short']} {p.get('label', '')}/{b['plan']['total']} {p.get('title', '')[:40]}{mark}"
-        elif b.get("in_progress"):
+        elif b.get("in_progress") and not (s["state_md"] or {}).get("next"):  # the last wrap's NEXT beats a [~]
             what = f"doing {b['in_progress'][0]['title'][:60]}"
         elif s["state_md"]:
             what = f"{s['state_md']['head'][:10]}: {clip(s['state_md']['next'], 60)}"

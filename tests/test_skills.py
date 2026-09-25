@@ -208,12 +208,19 @@ class BeadsTests(unittest.TestCase):
 
     def test_phases_documents_state_md_syntax(self):
         text = body("phases")
-        self.assertIn("Phases are the unindented checkbox lines", text)
-        self.assertIn("exactly one top-level `[~]`", text)
+        self.assertIn("Phases are the outermost checkbox lines", text)
+        self.assertIn("exactly one outermost `[~]`", text)
         self.assertIn("  - [ ] <sub-task>", text)
         self.assertIn("not counted in done/total", text)
         self.assertIn("shows it as DOING", text)
         self.assertIn("a STATE.md plan wins over a beads epic", text)
+
+    def test_wrap_writes_the_file_where_read_and_trims_it(self):
+        text = body("wrap")
+        for want in ("`state_md.path`", "create STATE.md at `main_root`", "Delete finished ones",
+                     "Delete a `## Plan:` section whose phases are all `[x]` once none of their PRs is open"):
+            self.assertIn(want, text, want)
+        self.assertIn("`state_md.path`", body("phases"))
 
     def test_scout_names_state_md(self):
         text = (ROOT / "agents/scout.md").read_text("utf-8")
@@ -251,7 +258,7 @@ class DocsTests(unittest.TestCase):
     def test_state_md_syntax_and_tasks_row(self):
         state = self.section("## Plan state: STATE.md")
         self.assertIn("  - [ ] Apple Pay button", state)
-        self.assertIn("Phases are the unindented checkbox lines", state)
+        self.assertIn("Phases are the outermost checkbox lines", state)
         self.assertIn("not counted in done/total", state)
         self.assertIn("DOING", state)
         self.assertIn("TASKS   <N> open, no plan (/yah:phases after a plan is approved)", state)

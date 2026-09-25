@@ -14,7 +14,7 @@ Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh` and read it
 
 ## STATE.md
 
-Edit STATE.md at the repo root (create it if missing; keep any dated entries). If a `## Plan:` section already names this plan path, replace it; otherwise add one at the top:
+Edit the file at `state_md.path` from the JSON above (in a linked worktree, the main checkout's); with no `state_md`, create STATE.md at `main_root`. Keep any dated entries. If a `## Plan:` section already names this plan path, replace it; otherwise add one at the top:
 
 ```markdown
 ## Plan: <plan name> (<plan path>)
@@ -28,7 +28,7 @@ Edit STATE.md at the repo root (create it if missing; keep any dated entries). I
 - At: <git rev-parse --short HEAD>
 ```
 
-Phases are the unindented checkbox lines in `## Plan:`: `[x]` done, `[~]` current (exactly one top-level `[~]`), `[ ]` open. Fields are optional and separated by `|`. `/yah:where` follows the plan with a `[~]` phase, else the first with an open phase, so a finished plan can stay below.
+Phases are the outermost checkbox lines in `## Plan:`: `[x]` done, `[~]` current (exactly one outermost `[~]`), `[ ]` open. Fields are optional and separated by `|`. `/yah:where` follows the plan with a `[~]` phase, else the first with an open phase, so a finished plan can stay below.
 
 An indented checkbox line under a phase is a sub-task: not a phase, and not counted in done/total. A `[~]` line anywhere else (a sub-task, or under `## Follow-ups`) is work in progress, not a phase; with no plan, `/yah:where` shows it as DOING.
 
