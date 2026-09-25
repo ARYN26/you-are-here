@@ -71,7 +71,7 @@ You can also run setup from a terminal (use `python` on Windows):
 python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --tier max5 --dry-run
 ```
 
-Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell` (prints the snippet), `--install-launcher RCFILE`, `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below) and `--yes` (no prompts).
+Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell|cmd` (prints the snippet), `--install-launcher RCFILE` (a `.cmd` path, or a folder on Windows, gets a whole `yah.cmd`), `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below) and `--yes` (no prompts).
 
 **Updating**
 
@@ -84,7 +84,7 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
 - **Claude Code:** tested with 2.1.280. `yah run` needs a version that supports `--permission-prompts`.
 - **macOS:** needs `python3` 3.9+, from the Xcode Command Line Tools or Homebrew. Without the Command Line Tools, `/usr/bin/python3` opens an install dialog, so setup times out its probe and tells you to run `xcode-select --install` or `brew install python`. zsh gets the launcher.
 - **Linux:** needs `python3` 3.9+. bash gets the launcher.
-- **Windows:** needs Python 3.9+ from python.org or winget, plus Git for Windows. Claude Code runs hooks in Git Bash there. Setup tries `python`, then `py -3`, then `python3`, because `python3` on Windows is often the Microsoft Store stub. PowerShell gets the launcher. Without Git Bash, Claude Code falls back to PowerShell for hooks, and yah's hooks cannot run there (the statusline still works). Setup warns when it cannot find Git Bash.
+- **Windows:** needs Python 3.9+ from python.org or winget, plus Git for Windows. Claude Code runs hooks in Git Bash there. Setup tries `python`, then `py -3`, then `python3`, because `python3` on Windows is often the Microsoft Store stub. PowerShell gets the launcher. cmd.exe loads no profile, so for cmd setup writes a `yah.cmd` into a folder on PATH instead (next to `claude` by default): `--install-launcher <folder>\yah.cmd`. After Ctrl+C in Claude, cmd may ask "Terminate batch job (Y/N)?"; that is cmd, not yah. Without Git Bash, Claude Code falls back to PowerShell for hooks, and yah's hooks cannot run there (the statusline still works). Setup warns when it cannot find Git Bash.
 - **Optional:** `gh` adds the PR lines, and `yah run` needs it to follow the PR. `bd` (beads) adds richer phase tracking. Without it, yah reads a `STATE.md` file (see below).
 
 ## The daily loop
@@ -426,7 +426,7 @@ Undo setup first, while the script is still on disk. On Windows, use `python` in
 python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --uninstall
 ```
 
-This restores your previous statusline (or removes yah's if there was none), and removes the launcher and RULES.md blocks if setup added them. Then remove the plugin and the marketplace:
+This restores your previous statusline (or removes yah's if there was none), and removes the launcher and RULES.md blocks (and a `yah.cmd` it wrote) if setup added them. Then remove the plugin and the marketplace:
 
 ```
 /plugin uninstall yah@you-are-here
