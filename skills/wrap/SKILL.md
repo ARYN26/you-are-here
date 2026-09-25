@@ -16,21 +16,22 @@ PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh
 
 `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
-Note `beads.plan` (its `source` is `beads`, `STATE.md` or `NOW.md`), `beads.phase` (label, branch, id), `beads_source`, `git.branch`, `git.dirty`, `state_md`, `protected`, `bd` and `next_stale`.
+Note `state.plan` (its `source` is `STATE.md`, `NOW.md` or `beads`, its `spec` the plan file), `state.phase` (label, branch, id), `beads_source`, `git.branch`, `git.dirty`, `state_md`, `protected`, `bd` and `next_stale`.
 
 `next_stale` set means commits landed after NEXT was written, so it may already be done. Run `git log --oneline <next_stale.sha>..<next_stale.branch>` and write the new NEXT from where those commits leave off.
 
-STATE.md is the default. Use beads only when the repo already uses it: `beads` is non-null, `beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path; run beads commands as that path, quoted. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
-- `bd` is a path, and the plan comes from beads or there is no plan but an in_progress bead: use **2b** (treat that bead as the phase).
-- Anything else (a plan from STATE.md/NOW.md, no beads DB here, or `bd` null): use **2a**. If `.beads/` exists but `bd` is null, say why first: print `bd_note`, or say the bd CLI is missing.
+STATE.md is the default. Use beads only if the repo already uses it: `beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path; run beads commands as that path, quoted. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
+- `beads_source` is set, `bd` is a path and `state.plan.source` is `beads`: use **2b**.
+- Anything else (a plan from STATE.md/NOW.md, no plan, no beads DB here, or `bd` null): use **2a**. If `.beads/` exists but `bd` is null, say why first: print `bd_note`, or say the bd CLI is missing. If `ignored_plan` is set, say that STATE.md's plan wins over that beads epic.
 
 ## 2a. STATE.md: write today's entry
 
-Edit STATE.md (or NOW.md) at the repo root; create STATE.md if neither exists.
+Edit the file at `state_md.path`. In a linked worktree that is the main checkout's, which outlives the worktree. With no `state_md`, create STATE.md at `main_root`.
 - Add a `## YYYY-MM-DD` entry for today (or rewrite today's), with `- Next: <NEXT line>` first and at most 3 short lines after it: what is done, what is half-done and where, any trap.
 - The NEXT line is what `/yah:where` prints as NEXT: one concrete action someone could start cold, at most 140 characters. Example: "Run make eval, then paste the table into PR #9".
-- In the `## Plan:` section, keep the checkboxes true: `[x]` done, `[~]` current, `[ ]` open, with `| branch X | base Y | PR #N` fields.
-- A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Tick finished ones `[x]` or delete them.
+- In the `## Plan:` section, keep the phase lines (the outermost checkboxes) true: `[x]` done, exactly one `[~]` current, `[ ]` open, with `| branch X | base Y | PR #N` fields. Indented checkbox lines under a phase are its sub-tasks.
+- A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Mark one being worked on `[~]`. Delete finished ones; the commit or PR is their record.
+- Delete a `## Plan:` section whose phases are all `[x]` once none of their PRs is open (`gh pr view <N> --json state`). The plan file and the PRs keep its history, and the file the model reads each session stays short.
 - A step only the user can do (a review, a merge, a console step) ends with `(you)`. `/yah:where` lists the open ones as waiting on the user.
 - Keep only the 5 newest dated entries; delete older ones. Leave anything else in the file alone.
 
@@ -42,8 +43,7 @@ bd update <phase-id> --notes "<NEXT line>
 <up to 3 short lines: what is done, what is half-done and where, any trap>"
 
 - The NEXT rules in 2a apply to the first line.
-- Close finished task beads: `bd close <id> --reason "<one line>"`.
-- A new follow-up becomes a bead (`bd create "<title>" --parent <epic> --silent`), never prose. A step only the user can do gets `-l human`.
+- A new follow-up becomes a bead (`bd create "<title>" --silent`), never prose. A step only the user can do gets `-l human`. Close finished ones: `bd close <id>`.
 
 ## 3. Brain note (only if the brain folder exists)
 
@@ -79,11 +79,11 @@ If this project's auto-memory index (`MEMORY.md` in its memory folder under `$CL
 
 ## 6. Only if the phase is complete
 
-The phase's done-when is met and the tests pass.
+The phase's done-when in the plan file (`state.plan.spec`: the path in `## Plan: <name> (<path>)`, or the epic's `spec_id`) is met and the tests pass.
 1. Review the branch diff: run `/code-review --fix`, then `/simplify`, if available. Re-run the tests.
 2. Push the feature branch. Never push a branch in `protected`.
 3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body.
-4. Record it. STATE.md: mark the phase `[x]` and add `| PR #<N>`. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open, checks <state>"`.
+4. Record it. STATE.md: mark the phase `[x]` and add `| PR #<N>`. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open"`.
 5. Claim the next phase and give it a NEXT line, stamped as in step 4. STATE.md: mark it `[~]`. Beads: `bd update <next-id> --claim`.
 
 Merging is always the user's.

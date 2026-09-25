@@ -7,11 +7,13 @@
     where.py --path NAME  print a project's path (for the `yah` launcher)
     --no-gh, --no-bd      skip `gh pr list` / the bd CLI (.beads/issues.jsonl is still read)
 
-Sources, in order:
-  1. beads: the open epic labelled `plan` (made by /yah:phases). Its children labelled
-     `phase` are the phases, the in_progress one is current, its first notes line is NEXT.
-  2. STATE.md / NOW.md at the repo root: a `## Plan:` section with one checkbox line per
-     phase, and dated `## YYYY-MM-DD` entries whose `- Next:` line is NEXT.
+Sources:
+  1. STATE.md / NOW.md at the repo root: a `## Plan:` section whose outermost checkbox lines are
+     the phases (the [~] one is current; indented lines are sub-tasks), and dated `## YYYY-MM-DD`
+     entries whose `- Next:` line is NEXT. `(you)` marks an open line as waiting on you.
+  2. beads, if you already use beads: the open epic labelled `plan`, its children labelled `phase`
+     (the in_progress one is current, its first notes line is NEXT) and beads labelled `human`.
+     A STATE.md plan wins over a beads one.
   3. git (branch, dirty, ahead/behind) and `gh pr list` (open PRs, checks, stacking).
 
 It writes where-<project>.json in the data dir for the statusline and the home view. For a repo
@@ -116,7 +118,7 @@ def git_state(top):
     return st
 
 
-# ---------------------------------------------------------------- beads
+# ---------------------------------------------------------------- beads, if you already use beads
 
 def as_dict(v):
     if isinstance(v, dict):
@@ -129,9 +131,14 @@ def as_dict(v):
     return {}
 
 
+def repo_dirs(top, main_root):
+    """The worktree, then the main checkout: gitignored state (.beads, STATE.md) exists only where it was made."""
+    return list(dict.fromkeys((Path(top), Path(main_root or top))))
+
+
 def find_beads(top, main_root):
     """This repo's .beads dir (the worktree's, else the main checkout's), or None."""
-    return next((d / ".beads" for d in (Path(top), Path(main_root)) if (d / ".beads").is_dir()), None)
+    return next((d / ".beads" for d in repo_dirs(top, main_root) if (d / ".beads").is_dir()), None)
 
 
 def load_issues(top, main_root, use_bd):
@@ -206,7 +213,7 @@ def clip(text, n=170):
 
 
 def short_of(title):
-    """A plan's statusline tag when none is given: its first word, upper case."""
+    """A plan's statusline tag: its title's first word, upper case."""
     return ((title or "").split() or ["PLAN"])[0].upper()[:8]
 
 
@@ -219,21 +226,22 @@ def pick_phase(state, views):
     running = [v for v in views if v["status"] == "in_progress"]
     pending = [v for v in views if v["status"] != "closed"]
     state.update(phases=views, phase=running[0] if running else None,
-                 next_phase=None if running or not pending else pending[0])
+                 next_phase=None if running else pending[0] if pending else None)
     return state
 
 
 def empty_state():
-    """The plan state with nothing in it: what beads_state fills, and what STATE.md merges into."""
-    return {"human": [], "in_progress": [], "open_count": 0, "plan": None, "phase": None, "next_phase": None}
+    """The plan state with nothing in it, that each source fills."""
+    return {"human": [], "in_progress": [], "open_count": 0, "plan": None, "phase": None, "next_phase": None,
+            "phases": []}
 
 
-def beads_state(issues, you=()):
-    """Pick the plan epic and its phases. Returns a dict or None.
+def beads_state(issues):
+    """The beads adapter: the plan epic and its phases, in the shape a STATE.md plan has. Returns a dict or None.
 
-    "Waiting on you" = open or in-progress beads labelled `human`, and open (unclaimed) ones
-    assigned to a name in `you` (config.json, else git user.name). `bd update --claim` assigns
-    git user.name, so a claimed bead is the work itself, not a wait; so is a phase bead."""
+    "Waiting on you" = open or in-progress beads labelled `human`, like a STATE.md `(you)` line. As in STATE.md,
+    a plan epic's phases are not loose work: in progress and open tasks leave them out, and open tasks leave
+    out `human` beads."""
     if not issues:
         return None
     by_parent = {}
@@ -251,12 +259,12 @@ def beads_state(issues, you=()):
     plans = [e for e in open_epics if "plan" in labels(e)] or \
             [e for e in open_epics if any("phase" in labels(k) for k in by_parent.get(e["id"], []))]
 
-    you = {y for y in you if y}
+    phase_ids = {k["id"] for e in plans for k in phases_of(e["id"])}
+    loose = [i for i in issues if i.get("issue_type") != "epic" and i["id"] not in phase_ids]
     human = [i for i in issues if i.get("status") in ("open", "in_progress") and i.get("issue_type") != "epic"
-             and ("human" in labels(i) or (i.get("status") == "open" and (i.get("assignee") or "") in you
-                                           and "phase" not in labels(i)))]
-    in_prog = [i for i in issues if i.get("status") == "in_progress" and i.get("issue_type") != "epic"]
-    ready = [i for i in issues if i.get("status") == "open" and i.get("issue_type") != "epic"]
+             and "human" in labels(i)]
+    in_prog = [i for i in loose if i.get("status") == "in_progress"]
+    ready = [i for i in loose if i.get("status") == "open" and "human" not in labels(i)]
 
     state = {**empty_state(), "human": [{"id": h["id"], "title": h.get("title", "")} for h in human],
              "in_progress": [{"id": i["id"], "title": i.get("title", "")} for i in in_prog], "open_count": len(ready)}
@@ -271,10 +279,9 @@ def beads_state(issues, you=()):
 
     epic = max(plans, key=active_score)
     kids = phases_of(epic["id"])
-    meta = as_dict(epic.get("metadata"))
     done = sum(1 for k in kids if k.get("status") == "closed")
     state["plan"] = {"id": epic["id"], "title": epic.get("title", ""), "source": "beads",
-                     "short": meta.get("short") or short_of(epic.get("title")),
+                     "short": short_of(epic.get("title")),
                      "spec": epic.get("spec_id") or "", "done": done, "total": len(kids)}
 
     def phase_view(k, idx):
@@ -292,50 +299,57 @@ def beads_state(issues, you=()):
 
 # ---------------------------------------------------------------- STATE.md / NOW.md
 
-PHASE_LINE = re.compile(r"^\s*[-*]\s*\[([ xX~>])\]\s*(.+)$")
+CHECKBOX = re.compile(r"^(\s*)[-*]\s*\[([ xX~>])\]\s*(.+)$")
 STATUS = {"x": "closed", "~": "in_progress", ">": "in_progress", " ": "open"}
 YOU_MARK = re.compile(r"\s*\(you\)\s*$", re.I)
 
 
 def md_line(ln):
-    """A checkbox line as (status, title, fields, you), or None. `(you)` may end the title or the line."""
-    pm = PHASE_LINE.match(ln)
+    """A checkbox line as (status, title, fields, you, indent), or None. `(you)` may end the title or the line."""
+    pm = CHECKBOX.match(ln)
     if not pm:
         return None
-    rest = pm.group(2)
+    rest = pm.group(3)
     you = bool(YOU_MARK.search(rest))
     parts = [p.strip() for p in re.split(r"[|·]", YOU_MARK.sub("", rest))]
     you = you or bool(YOU_MARK.search(parts[0]))
-    return STATUS[pm.group(1).lower()], YOU_MARK.sub("", parts[0]).strip(), parts[1:], you
+    return (STATUS[pm.group(2).lower()], YOU_MARK.sub("", parts[0]).strip(), parts[1:], you,
+            len(pm.group(1).expandtabs(4)))
 
 
-def md_human(file, text):
-    """Open or in-progress checkbox lines marked `(you)`, anywhere in the file outside code fences:
-    STATE.md's `human` label. The id is file:line, so the model can go straight to it."""
-    out, fence = [], False
-    for n, ln in enumerate(text.splitlines(), 1):
+def md_scan(lines):
+    """The `## ` headings, checkbox lines and other text lines outside code fences, so an example in a fence is
+    never a plan or a NEXT. heads: [(line number, heading)]. items: [(line number, the index in heads of its section
+    or None, md_line)]. prose: the stripped lines that are neither, nor any other heading."""
+    heads, items, prose, fence = [], [], [], False
+    for n, ln in enumerate(lines, 1):
         if ln.lstrip().startswith(("```", "~~~")):
             fence = not fence
             continue
-        ml = None if fence else md_line(ln)
-        if ml and ml[0] != "closed" and ml[3]:
-            out.append({"id": f"{file}:{n}", "title": ml[1]})
-    return out
+        if fence:
+            continue
+        hm = re.match(r"## +(.+?)\s*$", ln)
+        if hm:
+            heads.append((n, hm.group(1)))
+            continue
+        ml = md_line(ln)
+        if ml:
+            items.append((n, len(heads) - 1 if heads else None, ml))
+        elif ln.strip() and not ln.startswith("#"):
+            prose.append(ln.strip())
+    return heads, items, prose
 
 
-def md_plan(file, head, body, nxt):
-    """A `## Plan: Title (spec)` section as the same plan/phase/phases shape beads gives."""
+def md_plan(file, head, items, nxt):
+    """A `## Plan: Title (spec)` section as a plan: its phase lines (the least indented checkbox lines, normally
+    unindented) with id file:line. Lines indented under a phase are its sub-tasks, not phases."""
     m = re.match(r"Plan:\s*(.*?)\s*(?:\(([^)]*)\))?$", head, re.I)
     title, spec = (m.group(1), m.group(2) or "") if m else (head, "")
     views = []
-    for ln in body.splitlines():
-        ml = md_line(ln)
-        if not ml:
-            continue
-        status, text, fields, _ = ml
+    for n, (status, text, fields, _, _) in items:
         lm = re.match(r"(P\d+)\b[\s:.-]*(.*)", text)
         label, name = (lm.group(1), lm.group(2)) if lm else (f"P{len(views) + 1}", text)
-        v = {"id": file, "label": label, "title": name or text, "status": status,
+        v = {"id": f"{file}:{n}", "label": label, "title": name or text, "status": status,
              "branch": "", "base": "", "pr": "", "next": ""}
         for p in fields:
             fm = re.match(r"(branch|base)\s+(\S+)$", p, re.I)
@@ -347,41 +361,58 @@ def md_plan(file, head, body, nxt):
         views.append(v)
     if not views:
         return None
-    state = pick_phase({"plan": {"id": file, "title": title, "source": file, "short": short_of(title), "spec": spec,
-                                 "done": sum(1 for v in views if v["status"] == "closed"), "total": len(views)}},
-                       views)
-    cur = state["phase"] or state["next_phase"]
-    if cur:
-        cur["next"] = nxt
-    return state
+    s = pick_phase({"plan": {"id": file, "title": title, "source": file, "short": short_of(title), "spec": spec,
+                             "done": sum(1 for v in views if v["status"] == "closed"), "total": len(views)}}, views)
+    shown = s["phase"] or s["next_phase"]
+    if shown:  # the file's one NEXT goes on the phase it shows; a bead keeps its own notes
+        shown["next"] = nxt
+    return s
 
 
-def state_md(top):
-    for name in ("STATE.md", "NOW.md"):
-        f = Path(top) / name
+def state_md(top, main_root=None):
+    """STATE.md (else NOW.md): its NEXT, its plan, and its other checkbox lines, anywhere outside code fences.
+    An open or in-progress line marked `(you)` waits on you. A [~] line that is not a phase is work in progress,
+    `(you)` or not. An open line that is neither a phase nor `(you)` counts as an open task. Their id is
+    file:line, so the model can go straight to it. A linked worktree with neither file reads the main checkout's,
+    as beads does: STATE.md is gitignored, so a new worktree never has one. `path` is the file wrap must edit."""
+    for f in (d / name for d in repo_dirs(top, main_root) for name in ("STATE.md", "NOW.md")):
         if not f.is_file():
             continue
+        name = f.name
         text = f.read_text(encoding="utf-8", errors="replace")
-        heads = list(re.finditer(r"^## +(.+?)\s*$", text, re.M))
+        lines = text.split("\n")
+        heads, items, prose = md_scan(lines)
 
         def body(i):
-            return text[heads[i].end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
+            return "\n".join(lines[heads[i][0]:heads[i + 1][0] - 1 if i + 1 < len(heads) else len(lines)])
 
-        dated = [i for i, m in enumerate(heads) if re.match(r"\d{4}-\d{2}-\d{2}", m.group(1))]
-        plans = [i for i, m in enumerate(heads) if re.match(r"Plan:", m.group(1), re.I)]
-        out: dict = {"file": name, "head": "", "next": "", "at": "", "plan": None, "human": md_human(name, text)}
+        dated = [i for i, (_, h) in enumerate(heads) if re.match(r"\d{4}-\d{2}-\d{2}", h)]
+        plans = [i for i, (_, h) in enumerate(heads) if re.match(r"Plan:", h, re.I)]
+        lead = {}  # a plan section's phase indent: its least indented checkbox lines are the phases
+        for _, sec, ml in items:
+            if sec in plans:
+                lead[sec] = min(lead.get(sec, ml[4]), ml[4])
+        phase_lines = {n for n, sec, ml in items if sec in lead and ml[4] == lead[sec]}
+        rest = [(n, ml) for n, _, ml in items if n not in phase_lines]
+        out: dict = {"file": name, "path": str(f), "head": "", "next": "", "at": "", "plan": None,
+                     "human": [{"id": f"{name}:{n}", "title": ml[1]} for n, _, ml in items
+                               if ml[0] != "closed" and ml[3]],
+                     "in_progress": [{"id": f"{name}:{n}", "title": ml[1]} for n, ml in rest
+                                     if ml[0] == "in_progress"],
+                     "open_count": sum(1 for _, ml in rest if ml[0] == "open" and not ml[3])}
         if dated:
-            i = max(dated, key=lambda j: heads[j].group(1)[:10])  # the newest date, whatever the order
+            i = max(dated, key=lambda j: heads[j][1][:10])  # the newest date, whatever the order
             nxt = re.search(r"^- Next:\s*(.+(?:\n(?!- )\s+.+)*)", body(i), re.M)
             at = re.search(r"^- At:\s*(" + SHA.pattern + r")\b", body(i), re.M)  # the commit NEXT was written at
-            out.update(head=heads[i].group(1), next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)),
+            out.update(head=heads[i][1], next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)),
                        at=at.group(1) if at else "")
         elif not plans:
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
-            out["next"] = lines[0] if lines else ""
-        # Like beads' running epic: the plan with a phase in progress, else one with an open phase, else the first.
-        # A finished plan left above the next one does not hide it.
-        parsed = [p for p in (md_plan(name, heads[i].group(1), body(i), out["next"]) for i in plans) if p]
+            out["next"] = prose[0] if prose else ""
+        # The plan with a phase in progress, else one with an open phase, else the first. A finished plan
+        # left above the next one does not hide it.
+        parsed = [p for p in (md_plan(name, heads[i][1], [(n, ml) for n, sec, ml in items
+                                                           if sec == i and n in phase_lines], out["next"])
+                              for i in plans) if p]
         out["plan"] = next((p for p in parsed if p["phase"]), None) or \
             next((p for p in parsed if p["next_phase"]), None) or (parsed[0] if parsed else None)
         return out
@@ -429,7 +460,7 @@ def landing(top, prs):
 
 def phase_bases(phases):
     """The branches the plan's phase PRs target that are not themselves a phase's branch (a stacked phase
-    targets the phase below it), most used first. Read from beads metadata or the STATE.md lines."""
+    targets the phase below it), most used first. Read from the STATE.md lines or beads metadata."""
     branches = {v.get("branch") for v in phases or []}
     count = {}
     for v in phases or []:
@@ -533,6 +564,8 @@ def md_stamp(top, sm):
     """The commit a STATE.md/NOW.md NEXT was written at: a tracked file's last own commit on this branch (none
     while it has uncommitted edits: NEXT was just written), else the `- At: <sha>` line wrap puts under `- Next:`.
     Merges are skipped: a merge of the base that touched the file was not a wrap."""
+    if Path(sm["path"]).parent != Path(top):  # the main checkout's, read from a worktree: never tracked here
+        return sm.get("at") or ""
     f = sm["file"]
     st = run(["git", "status", "--porcelain=v1", "--ignored", "--", f], top, timeout=3)
     if st is None:
@@ -614,7 +647,7 @@ def prod_line(s):
     return ""
 
 
-def pr_lines(prs, branch, bstate, limit=4, trunks=()):
+def pr_lines(prs, branch, state, limit=4, trunks=()):
     if not prs:
         return [], {}
     trunks = DEFAULT_TRUNKS | set(trunks)
@@ -626,7 +659,7 @@ def pr_lines(prs, branch, bstate, limit=4, trunks=()):
         chain.add(cur)
         cur = base_of[cur]
     phase_by_pr = {}
-    for v in (bstate or {}).get("phases", []) or []:
+    for v in (state or {}).get("phases", []) or []:
         m = re.match(r"(?:gh-|#)?(\d+)$", v.get("pr") or "")
         if m:
             phase_by_pr[int(m.group(1))] = v["label"]
@@ -685,23 +718,25 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     if not g["branch"]:
         g["branch"] = read_branch(git_dir) if git_dir else None
     issues, source = load_issues(top, main_root, use_bd)
-    you = cfg.get("you") or []
-    you = [you] if isinstance(you, str) else you
-    if issues and not you:
-        you = [(run(["git", "config", "user.name"], str(top), timeout=5) or "").strip()]
-    bstate = beads_state(issues, you) if issues is not None else None
-    sm = state_md(top)
-    mdplan = sm.pop("plan", None) if sm else None
-    mdhuman = sm.pop("human", []) if sm else []
-    if mdplan and not (bstate or {}).get("plan"):  # beads wins when it has a plan epic
-        bstate = {**(bstate or empty_state()), **mdplan}
-    if mdhuman:  # a `(you)` line waits on you whichever source holds the plan
-        bstate = bstate or empty_state()
-        bstate["human"] = bstate["human"] + mdhuman
-    phases = (bstate or {}).get("phases") or []
+    state = beads_state(issues) if issues is not None else None
+    sm = state_md(top, main_root)
+    ignored, hidden = None, []  # a beads plan epic a STATE.md plan hides, and its phases
+    if sm:
+        md = {k: sm.pop(k) for k in ("plan", "human", "in_progress", "open_count")}
+        state = state or empty_state()
+        if md["plan"]:  # STATE.md wins over a beads plan epic
+            if state["plan"]:
+                ignored = {"id": state["plan"]["id"], "title": state["plan"]["title"], "source": "beads"}
+                hidden = state["phases"]
+            state = {**state, **md["plan"]}
+        # (you) lines, work in progress and open tasks count from both sources, whichever holds the plan
+        state = {**state, **{k: state[k] + md[k] for k in ("human", "in_progress", "open_count")}}
+    phases = (state or {}).get("phases") or []
     mine = {v.get("branch") for v in phases} - {"", None}
     # A phase's own branch (a merged lower phase's, say) is never a landing, even when a PR still targets it.
+    # The hidden epic's bases stay protected too: protection fails closed.
     bases = phase_bases(phases)
+    bases += [b for b in phase_bases(hidden) if b not in bases and b not in mine]
     cached = [b for b in (read_json(where_cache_path(main_root), {}) or {}).get("landing") or [] if b not in mine]
     # "Cut from" only means something on a work branch: on main, a branch merged with --no-ff is an ancestor too.
     # Checked against the cached landing here so the git walk overlaps gh, and against the live one below.
@@ -709,7 +744,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     trunkish = trunks | set(bases) | set(cached) | {prod_branch(cfg.get("prod"))}
     near, merged = nearest_bases(str(top), g["branch"], mine, trunks) \
         if infer and g["branch"] and g["branch"] not in trunkish else ([], [])
-    plan, phase = (bstate or {}).get("plan") or {}, (bstate or {}).get("phase") or {}
+    plan, phase = (state or {}).get("plan") or {}, (state or {}).get("phase") or {}
     stamp = ""  # the commit NEXT was written at: the running phase's, or a plan-less STATE.md's
     if infer and phase and plan.get("source") == "beads":
         stamp = phase.get("next_sha") or ""
@@ -739,8 +774,8 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     # An inherited BEADS_DIR would send the model's own bd calls to another repo's DB.
     bd_note = ("BEADS_DIR points outside this repo; unset it to use beads here" if beads_dir and env_dir
                and os.path.normcase(os.path.abspath(env_dir)) != os.path.normcase(str(beads_dir)) else None)
-    s = {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "beads": bstate,
-            "beads_source": source, "state_md": sm, "prs": prs, "gh_tried": proc is not None,
+    s = {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "state": state,
+            "ignored_plan": ignored, "beads_source": source, "state_md": sm, "prs": prs, "gh_tried": proc is not None,
             "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
             "bases": bases, "ancestors": near, "merged_in": merged, "next_stale": stale,
             "aliases": aliases(str(top), plan.get("spec")) if infer else [],
@@ -752,7 +787,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
 
 
 def render(s, brief=False):
-    g, b = s["git"], s["beads"] or {}
+    g, b = s["git"], s["state"] or {}
     plan, phase, nxt_phase = b.get("plan"), b.get("phase"), b.get("next_phase")
     branch = g["branch"] or "?"
     tree = f"{g['dirty']} uncommitted" if g["dirty"] else "clean"
@@ -789,7 +824,7 @@ def render(s, brief=False):
         elif s["state_md"]:
             sm = s["state_md"]
             lines.append(f"{sm['file']} {sm['head']}  NEXT {clip(sm['next'])}{swarn}")
-        elif b.get("in_progress"):
+        if not plan and b.get("in_progress"):  # no plan, so no NEXT line: still 6 lines at most
             lines.append("IN PROGRESS " + "; ".join(f"{i['id']} {i['title'][:60]}" for i in b["in_progress"][:2]))
         tail = []
         if prl:
@@ -809,6 +844,8 @@ def render(s, brief=False):
     if plan:
         spec = f"  {Path(plan['spec']).name}" if plan["spec"] else ""
         lines.append(f"PLAN    {clip(plan['title'], 58)}  [{plan['done']}/{plan['total']} done]  {plan['id']}{spec}")
+        if s.get("ignored_plan"):
+            lines.append(f"!       beads epic {s['ignored_plan']['id']} ignored: {plan['id']} has a plan")
         if phase:
             br = f"  branch {phase['branch']}" if phase.get("branch") else ""
             lines.append(f"PHASE   {phase['label']} {clip(phase['title'], 64)}  in_progress  {phase['id']}{br}")
@@ -835,8 +872,8 @@ def render(s, brief=False):
         if b.get("in_progress"):
             for i in b["in_progress"][:3]:
                 lines.append(f"DOING   {i['id']}  {i['title'][:70]}")
-        if s["beads_source"] and s["beads"] is not None and not s["beads"].get("plan"):
-            lines.append(f"BEADS   {b.get('open_count', 0)} open, no plan epic (/yah:phases after a plan is approved)")
+        if b.get("open_count"):
+            lines.append(f"TASKS   {b['open_count']} open, no plan (/yah:phases after a plan is approved)")
     for i, h in enumerate((b.get("human") or [])[:2]):
         more = f"  (+{len(b['human']) - 2} more)" if i == 1 and len(b["human"]) > 2 else ""
         lines.append(("YOU     " if i == 0 else "        ") + f"{h['id']}  {h['title'][:64]}{more}")
@@ -850,7 +887,7 @@ def render(s, brief=False):
 
 
 def write_cache(s):
-    g, b = s["git"], s["beads"] or {}
+    g, b = s["git"], s["state"] or {}
     _, index = pr_lines(s["prs"], g["branch"], b, trunks=s["trunks"])
     path = where_cache_path(s["main_root"])
     old = read_json(path, {}) or {}
@@ -895,16 +932,16 @@ def home_view(brief):
         if s is None:
             continue
         cache = read_json(where_cache_path(s["main_root"]), {}) or {}
-        b = s["beads"] or {}
+        b = s["state"] or {}
         branch = s["git"]["branch"] or "?"
         if b.get("plan"):
             p = b.get("phase") or b.get("next_phase") or {}
             mark = "" if b.get("phase") else " (not started)"
             what = f"{b['plan']['short']} {p.get('label', '')}/{b['plan']['total']} {p.get('title', '')[:40]}{mark}"
+        elif b.get("in_progress") and not (s["state_md"] or {}).get("next"):  # the last wrap's NEXT beats a [~]
+            what = f"doing {b['in_progress'][0]['title'][:60]}"
         elif s["state_md"]:
             what = f"{s['state_md']['head'][:10]}: {clip(s['state_md']['next'], 60)}"
-        elif b.get("in_progress"):
-            what = f"doing {b['in_progress'][0]['title'][:60]}"
         else:
             what = "no plan"
         pr = (cache.get("prs") or {}).get(branch)

@@ -6,10 +6,10 @@
 <text x="424" y="17" text-anchor="middle" class="t">~/code/shop  (fictional project)</text>
 <text x="18" y="44"><tspan class="d">&gt; </tspan><tspan class="c">/yah:where</tspan></text>
 <text x="18" y="63"><tspan class="l">BRANCH  </tspan><tspan>checkout/payment  2 uncommitted, 1 unpushed</tspan></text>
-<text x="18" y="82"><tspan class="l">PLAN    </tspan><tspan>Checkout rewrite  [1/4 done]  shop-7k2  checkout.md</tspan></text>
-<text x="18" y="101"><tspan class="l">PHASE   </tspan><tspan>P2 Payment form  in_progress  shop-7k2.2  branch checkout/payment</tspan></text>
+<text x="18" y="82"><tspan class="l">PLAN    </tspan><tspan>Checkout rewrite  [1/4 done]  STATE.md  checkout.md</tspan></text>
+<text x="18" y="101"><tspan class="l">PHASE   </tspan><tspan>P2 Payment form  in_progress  STATE.md:5  branch checkout/payment</tspan></text>
 <text x="18" y="120"><tspan class="l">NEXT    </tspan><tspan>Wire the Stripe element into PaymentForm.tsx, then run the e2e test.</tspan></text>
-<text x="18" y="139"><tspan class="l">YOU     </tspan><tspan>shop-9df  Approve the refund email copy</tspan></text>
+<text x="18" y="139"><tspan class="l">YOU     </tspan><tspan>STATE.md:13  Approve the refund email copy</tspan></text>
 <text x="18" y="158"><tspan class="l">PRs     </tspan><tspan>#12 P2  checkout/payment -&gt; checkout/cart  checks running  stacked on #11: retarget after it merges</tspan></text>
 <text x="18" y="177"><tspan class="l">        </tspan><tspan>#11 P1  checkout/cart -&gt; main  green  merge: you</tspan></text>
 <text x="18" y="196"><tspan class="l">PROD    </tspan><tspan>main deploys on push. PRs only.</tspan></text>
