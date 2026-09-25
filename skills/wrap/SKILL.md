@@ -93,5 +93,5 @@ Merging is always the user's.
 ```
 Saved   <phase label> NEXT = <the NEXT line>
 Commit  <short sha or none>   PR <#N or none>
-Safe to /clear. The next session starts from /yah:where; just say "continue".
+Safe to /clear. Then /yah:auto, or `yah <project>` from a terminal, picks up from NEXT.
 ```

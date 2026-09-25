@@ -1,8 +1,9 @@
 """setup.py: point Claude Code's statusLine at yah, write config.json, offer the `yah` launcher.
 
     setup.py [--tier pro|max5|max20|api] [--python CMD] [--dry-run] [--yes]
-    setup.py --launcher bash|zsh|fish|powershell   print the launcher snippet
+    setup.py --launcher bash|zsh|fish|powershell|cmd   print the launcher snippet
     setup.py --install-launcher RCFILE             append it to RCFILE as a marked block
+                                                   (a .cmd path gets a whole yah.cmd, for cmd.exe)
     setup.py --install-rules [FILE]                append RULES.md to FILE (default: CLAUDE.md)
     setup.py --ultracode                           opt-in: ultracode on by default, workflows medium
     setup.py --uninstall                           undo all of the above
@@ -26,9 +27,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from yahlib import TIERS, claude_dir, data_dir, read_json, utf8_stdout  # noqa: E402
 
 PROBE = "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"
-SHELLS = ("bash", "zsh", "fish", "powershell")
+SHELLS = ("bash", "zsh", "fish", "powershell", "cmd")
 RC = {"bash": "~/.bashrc", "zsh": "~/.zshrc", "fish": "~/.config/fish/config.fish", "powershell": "$PROFILE"}
 LAUNCH = ("# >>> you-are-here >>>", "# <<< you-are-here <<<")
+CMD_LAUNCH = ("@rem >>> you-are-here >>>", "@rem <<< you-are-here <<<")  # a # line is an error in cmd
 RULES = ("<!-- >>> you-are-here rules >>> -->", "<!-- <<< you-are-here rules <<< -->")
 
 
@@ -115,7 +117,8 @@ def edit_block(path, block, marks, dry, say, what):
             f"Paste this into it by hand:\n{block}" if block is not None
             else f"Remove the lines from {marks[0]} to {marks[1]} by hand."))
         return None
-    nl = "\r\n" if text.count("\r\n") * 2 > text.count("\n") else "\n"
+    crlf = text.count("\r\n") * 2 > text.count("\n") or path.suffix.lower() in (".cmd", ".bat")
+    nl = "\r\n" if crlf else "\n"  # a batch file always gets CRLF: cmd's goto can miss labels in LF files
     if block is not None:
         block = block.replace("\n", nl)
         if block in text:
@@ -160,12 +163,29 @@ def default_shell():
 
 def shell_for(rc):
     n = Path(rc).name.lower()
-    return "powershell" if n.endswith(".ps1") else "fish" if n.endswith(".fish") else "zsh" if "zsh" in n else "bash"
+    return ("cmd" if n.endswith((".cmd", ".bat")) else "powershell" if n.endswith(".ps1") else
+            "fish" if n.endswith(".fish") else "zsh" if "zsh" in n else "bash")
+
+
+def marks_for(shell):
+    return CMD_LAUNCH if shell == "cmd" else LAUNCH
+
+
+def cmd_file():
+    """Where yah.cmd goes by default: next to claude, because that folder is already on PATH."""
+    claude = shutil.which("claude")
+    return str(Path(claude).parent / "yah.cmd") if claude else "~/.local/bin/yah.cmd"
+
+
+def on_path(folder):
+    key = lambda d: os.path.normcase(os.path.abspath(os.path.expandvars(d)))  # noqa: E731
+    return key(str(folder)) in {key(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d}
 
 
 def snippet(shell, py, sdir):
-    """`yah <project> [claude args]` cds into the project and runs claude; `yah` alone lists projects;
-    `yah run <args>` hands off to scripts/run.py."""
+    """`yah <project>` cds into the project and runs claude with /yah:auto as the first prompt, so the session
+    starts on its own; `yah <project> <task words>` hands /yah:auto the task; `yah <project> -flags...` passes
+    the flags to claude and sends no prompt. `yah` alone lists projects; `yah run <args>` runs scripts/run.py."""
     pyc = " ".join(f'"{x}"' if " " in x else x for x in py)
     where, run = f'"{sdir}/where.py"', f'"{sdir}/run.py"'
     if shell == "powershell":
@@ -175,7 +195,8 @@ def snippet(shell, py, sdir):
                 f"  $d = & {pyc} {where} --path \"$($args[0])\"",
                 "  if ($LASTEXITCODE -ne 0 -or -not $d) { return }",
                 "  Set-Location $d",
-                "  claude @rest",
+                "  if ($rest.Count -and \"$($rest[0])\".StartsWith('-')) { claude @rest; return }",
+                "  claude ((@('/yah:auto') + $rest) -join ' ')",
                 "}"]
     elif shell == "fish":
         body = ["function yah",
@@ -184,17 +205,56 @@ def snippet(shell, py, sdir):
                 "        return",
                 "    end",
                 f"    set -l d ({pyc} {where} --path \"$argv[1]\"); or return 1",
-                "    cd $d; and claude $argv[2..-1]",
+                "    set -l rest $argv[2..-1]",
+                "    if string match -q -- '-*' \"$rest[1]\"",
+                "        cd $d; and claude $rest",
+                "    else",
+                "        cd $d; and claude (string join ' ' /yah:auto $rest)",
+                "    end",
                 "end"]
+    elif shell == "cmd":
+        # cmd.exe loads no profile, so this is a whole yah.cmd on PATH. setlocal keeps its variables out of
+        # the window; endlocal shares a line with the cd, so the cd outlives it. for /f hands its command to
+        # cmd /c, which strips the outer quotes of a command that starts with one; `call` first prevents that
+        # and keeps every path quoted, so a ( or ) in a path cannot end the for clause.
+        win = lambda x: x.replace("/", "\\")  # noqa: E731
+        pyw = " ".join(f'"{win(x)}"' if " " in x else win(x) for x in py)
+        find = f'call {pyw} "{win(sdir)}\\where.py" --path "%~1"'
+        body = ["@echo off",
+                "rem yah PROJECT [task words] cds into the project and starts claude on /yah:auto; flags after",
+                "rem PROJECT go to claude with no prompt; yah alone lists projects; yah run ARGS runs run.py.",
+                "rem Written by yah's setup.py; setup.py --uninstall deletes it.",
+                "setlocal",
+                'set "YAH_ALL=%*"',
+                'set "YAH_REST="',
+                'set "YAH_A2=x%~2"',
+                'if not "%~1"=="" call set "YAH_REST=%%YAH_ALL:*%1=%%"',
+                'if /i "%~1"=="run" goto yah_run',
+                'set "YAH_D="',
+                f'for /f "usebackq delims=" %%D in (`{find}`) do set "YAH_D=%%D"',
+                "if not defined YAH_D exit /b 1",
+                'if "%YAH_A2:~0,2%"=="x-" goto yah_flags',
+                'if defined YAH_REST set "YAH_REST=%YAH_REST:"=%"',
+                'endlocal & cd /d "%YAH_D%" && claude "/yah:auto%YAH_REST%"',
+                "goto :eof",
+                ":yah_flags",
+                'endlocal & cd /d "%YAH_D%" && claude %YAH_REST%',
+                "goto :eof",
+                ":yah_run",
+                f'endlocal & {pyw} "{win(sdir)}\\run.py" %YAH_REST%']
     else:
         body = ["yah() {",
                 f"  if [ \"$1\" = run ]; then shift; {pyc} {run} \"$@\"; return; fi",
                 "  local d",
                 f"  d=\"$({pyc} {where} --path \"$1\")\" || return 1",
                 "  shift",
-                "  cd \"$d\" && claude \"$@\"",
+                "  case \"$1\" in",
+                "    -*) cd \"$d\" && claude \"$@\" ;;",
+                "    *) cd \"$d\" && claude \"/yah:auto${*:+ $*}\" ;;",
+                "  esac",
                 "}"]
-    return "\n".join([LAUNCH[0], *body, LAUNCH[1]])
+    marks = marks_for(shell)
+    return "\n".join([marks[0], *body, marks[1]])
 
 
 # ---------------------------------------------------------------- actions
@@ -259,6 +319,8 @@ def install(a, py, sdir, state, state_file, say):
         say(f"launcher   optional. `yah <project>` opens Claude Code in a project. Add it with "
             f"--install-launcher {RC[shell]}, or paste this into {RC[shell]}:")
         print(snippet(shell, py, sdir))
+        if os.name == "nt":
+            say(f"launcher   for cmd.exe, add yah.cmd with --install-launcher {cmd_file()}")
     say(f"data       {data_dir()}")
     return 0
 
@@ -310,8 +372,11 @@ def uninstall(sdir, state, state_file, dry, say):
     else:
         say("statusLine not set by yah; left as is")
     for key, marks, what in (("launchers", LAUNCH, "launcher"), ("rules", RULES, "rules")):
-        for f in state.get(key, []):
-            edit_block(Path(f), None, marks, dry, say, what)
+        for f in map(Path, state.get(key, [])):
+            cmd = key == "launchers" and shell_for(f) == "cmd"
+            if edit_block(f, None, marks_for("cmd") if cmd else marks, dry, say, what) and cmd and not dry \
+                    and not f.read_bytes().strip():
+                f.unlink()  # the whole yah.cmd was the launcher
     if state_file.exists() and not dry:
         state_file.unlink()
     say(f"data       left in place: {data_dir()}")
@@ -359,8 +424,22 @@ def main():
         return 1
     if a.install_launcher:
         rc = Path(a.install_launcher).expanduser()
-        text = snippet(a.launcher or shell_for(rc), py, sdir)
-        if edit_block(rc, text, LAUNCH, a.dry_run, say, "launcher") is not None:
+        if rc.is_dir() and os.name == "nt":
+            rc = rc / "yah.cmd"
+        shell = a.launcher or shell_for(rc)
+        if (shell == "cmd") != (shell_for(rc) == "cmd"):  # uninstall finds the markers by the file's extension
+            print(f"[yah] a cmd launcher needs a .cmd or .bat path, and only a cmd launcher may use one: {rc}",
+                  file=sys.stderr)
+            return 1
+        if shell == "cmd":
+            raw = rc.read_bytes() if rc.is_file() else b""
+            if raw.strip() and CMD_LAUNCH[0].encode() not in raw:
+                print(f"[yah] {rc} exists and yah did not write it, so it was left as is. "
+                      "Delete it or pick another path.", file=sys.stderr)
+                return 1
+            if os.name == "nt" and not on_path(rc.parent):
+                say(f"WARNING    {rc.parent} is not on PATH, so cmd will not find yah. Add it, or pick a folder on PATH.")
+        if edit_block(rc, snippet(shell, py, sdir), marks_for(shell), a.dry_run, say, "launcher") is not None:
             record(state, "launchers", rc, state_file, a.dry_run)
         return 0
     if a.launcher:
