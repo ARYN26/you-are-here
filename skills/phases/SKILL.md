@@ -1,6 +1,6 @@
 ---
 name: phases
-description: Track a multi-phase plan in STATE.md or beads. Use right after a plan is approved.
+description: Track a multi-phase plan in STATE.md. Use right after a plan is approved.
 argument-hint: "[plan path]"
 ---
 

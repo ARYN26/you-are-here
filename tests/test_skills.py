@@ -85,6 +85,12 @@ class DescriptionTests(unittest.TestCase):
             for w in words:
                 self.assertIn(w, desc, f"{w!r} missing from {f.relative_to(ROOT)}")
 
+    def test_no_listing_offers_beads(self):
+        # the listing is in context every turn; beads is only "if you already use it"
+        for f in SKILLS + AGENTS:
+            with self.subTest(f=str(f.relative_to(ROOT))):
+                self.assertNotIn("beads", parse(f)[0]["description"].lower())
+
 
 class StartTests(unittest.TestCase):
     def setUp(self):
@@ -160,6 +166,9 @@ class BeadsTests(unittest.TestCase):
                 self.assertIn("Never set, export or follow `BEADS_DIR`", text)
                 self.assertIn("never run bd against a database outside this repo", text)
                 self.assertNotRegex(text, r"(export|set)\s+BEADS_DIR\s*=")
+                # same 2a/2b choice in both: beads only for a beads plan
+                self.assertIn("`state.plan.source` is `beads`", text)
+                self.assertIn("`ignored_plan`", text)
 
     def test_skills_read_the_state_key(self):
         for name in ("wrap", "resume"):
