@@ -337,6 +337,9 @@ class WhereTests(Base):
         brief = self.where(repo, "--brief")
         self.assertIn("NEXT Ship the login fix, then tag v1.2.  ! NEXT predates 1 commit on main: /yah:wrap first", brief)
         self.assertIn("!       NEXT predates 1 commit on main", self.where(repo))
+        self.git(repo, "checkout", "-q", "--detach")  # no branch: wrap's `git log <sha>..HEAD` still works
+        self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["branch"], "HEAD")
+        self.git(repo, "checkout", "-q", "main")
         (repo / "STATE.md").write_text(STATE_DATED.replace("Ship", "Now ship"), encoding="utf-8")
         self.assertNotIn("predates", self.where(repo, "--brief"))  # being rewritten: not stale
         other = self.repo(name="blog", branch="checkout/payment")  # untracked: the `- At:` line wrap writes
@@ -350,9 +353,83 @@ class WhereTests(Base):
         (other / "STATE.md").write_text(text.replace("- [~] P2", "- [ ] P2"), encoding="utf-8")
         self.assertNotIn("predates", self.where(other, "--brief"))  # no running phase: nothing to be stale
 
+    def test_stale_next_skips_a_base_merge_that_touched_state_md(self):
+        repo = self.repo({"STATE.md": STATE_DATED})  # tracked and plan-less
+        self.git(repo, "checkout", "-q", "-b", "feat/a")
+        (repo / "STATE.md").write_text(STATE_DATED.replace("Ship", "Now ship"), encoding="utf-8")
+        self.git(repo, "commit", "-qam", "wrap")  # NEXT is written here
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        self.git(repo, "checkout", "-q", "main")
+        (repo / "STATE.md").write_text(STATE_DATED.replace("Old.", "Older."), encoding="utf-8")
+        self.git(repo, "commit", "-qam", "base notes")
+        self.git(repo, "checkout", "-q", "feat/a")
+        self.git(repo, "merge", "-q", "--no-edit", "main")  # touches STATE.md, but is not a wrap
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["next_stale"]["commits"], s["next_stale"]["branch"]), (1, "feat/a"))  # the work only
+
+    def test_stale_next_when_the_phase_base_is_gone(self):
+        repo = self.beads_repo(branch="checkout/cart")
+        init = self.head(repo)
+        self.stamp_beads(repo, init)  # /yah:phases stamps every phase at plan time
+        self.git(repo, "commit", "-qam", "plan")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "cart work")
+        self.git(repo, "checkout", "-q", "-b", "main", init)
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge P1", "checkout/cart")
+        self.git(repo, "checkout", "-q", "-b", "checkout/payment", "checkout/cart")
+        self.git(repo, "branch", "-q", "-D", "checkout/cart")  # merged and deleted: P1's commits are main's now
+        self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"])
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "pay work")
+        self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["commits"], 1)
+
+    def test_base_ahead_counts_past_a_stale_local_base(self):
+        repo = self.repo(branch="main")
+        old = self.head(repo)
+        self.git(repo, "checkout", "-q", "-b", "feat/x")
+        for i in (1, 2, 3):
+            self.git(repo, "commit", "-q", "--allow-empty", "-m", f"dev {i}")
+        self.git(repo, "update-ref", "refs/remotes/origin/aryan_dev", "HEAD")  # cut from origin's aryan_dev
+        self.git(repo, "branch", "-q", "aryan_dev", old)  # the local copy was never pulled
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["git"]["base"], s["git"]["base_ahead"]), ("aryan_dev", 1))
+
+    def test_protects_a_base_synced_in_with_merge(self):
+        repo = self.repo(branch="main")
+        self.git(repo, "checkout", "-q", "-b", "feat/old")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "old")
+        self.git(repo, "checkout", "-q", "main")
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge feat/old", "feat/old")
+        self.git(repo, "checkout", "-q", "-b", "feat/y")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "y")
+        s = json.loads(self.where(repo, "--json"))  # feat/old is off the chain, but main has it: not synced in
+        self.assertEqual((s["ancestors"], s["merged_in"]), (["main"], []))
+        self.git(repo, "checkout", "-q", "main")
+        self.git(repo, "checkout", "-q", "-b", "aryan_dev")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "dev")
+        self.git(repo, "checkout", "-q", "-b", "feat/x")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        self.git(repo, "checkout", "-q", "aryan_dev")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "dev 2")
+        self.git(repo, "checkout", "-q", "feat/x")
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "sync aryan_dev", "aryan_dev")  # its tip is off the chain now
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["ancestors"], s["merged_in"]), (["main"], ["aryan_dev"]))
+        self.assertIn("aryan_dev", s["protected"])
+        self.assertNotIn("PROD", self.where(repo))  # protected, but never inferred as PROD
+
+    def test_a_claimed_bead_is_not_waiting_on_you(self):
+        w = load_where()
+        issues = [{"id": "x-1", "title": "Fix the flaky test", "issue_type": "task", "status": "in_progress",
+                   "assignee": "Sam"},  # `bd update --claim` assigns git user.name
+                  {"id": "x-2", "title": "Rotate the keys", "issue_type": "task", "status": "open", "assignee": "Sam"},
+                  {"id": "x-3", "title": "Approve the copy", "issue_type": "task", "status": "in_progress",
+                   "labels": ["human"]}]
+        self.assertEqual([i["id"] for i in w.beads_state(issues, ["Sam"])["human"]], ["x-2", "x-3"])
+
     def test_footer_maps_other_plugins_skill_names(self):
         repo = self.repo({"CLAUDE.md": "End each step with /acme:wrap; start with `/acme:where`.\n"
-                                       "Not these: https://x.io/acme:start, /yah:wrap, /acme:build.\n",
+                                       "Not these: https://x.io/acme:start, /yah:wrap, /acme:build, "
+                                       "/acme:wrap-up, /acme:deep-dive.\n",
                           "plans/p.md": "Then run /acme:phases.\n",
                           "STATE.md": "## Plan: P (plans/p.md)\n- [~] P1 Go\n"}, branch="feat/a")
         self.assertEqual(self.where(repo, "--brief").splitlines()[-1],

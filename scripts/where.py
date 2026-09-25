@@ -38,7 +38,7 @@ PR_FIELDS = "number,title,headRefName,baseRefName,isDraft,reviewDecision,statusC
 FOOTER = ("This is the current state. Do not read docs to orient; /yah:where shows the full view. "
           "Reply first with one line (phase, NEXT, what waits on the user), before any tool call or branch change.")
 SKILLS = ("where", "wrap", "start", "phases", "deep")
-ALIAS = re.compile(r"(?<![\w/:])/([a-z][\w-]*):(" + "|".join(SKILLS) + r")\b")
+ALIAS = re.compile(r"(?<![\w/:])/([a-z][\w-]*):(" + "|".join(SKILLS) + r")(?![\w-])")
 SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 
 
@@ -226,9 +226,9 @@ def pick_phase(state, views):
 def beads_state(issues, you=()):
     """Pick the plan epic and its phases. Returns a dict or None.
 
-    "Waiting on you" = open (not blocked) beads labelled `human` or assigned to a
-    name in `you` (config.json, else git user.name). A phase bead counts only when labelled
-    `human`: the running phase is the work itself, not a wait."""
+    "Waiting on you" = open or in-progress beads labelled `human`, and open (unclaimed) ones
+    assigned to a name in `you` (config.json, else git user.name). `bd update --claim` assigns
+    git user.name, so a claimed bead is the work itself, not a wait; so is a phase bead."""
     if not issues:
         return None
     by_parent = {}
@@ -248,7 +248,8 @@ def beads_state(issues, you=()):
 
     you = {y for y in you if y}
     human = [i for i in issues if i.get("status") in ("open", "in_progress") and i.get("issue_type") != "epic"
-             and ("human" in labels(i) or ((i.get("assignee") or "") in you and "phase" not in labels(i)))]
+             and ("human" in labels(i) or (i.get("status") == "open" and (i.get("assignee") or "") in you
+                                           and "phase" not in labels(i)))]
     in_prog = [i for i in issues if i.get("status") == "in_progress" and i.get("issue_type") != "epic"]
     ready = [i for i in issues if i.get("status") == "open" and i.get("issue_type") != "epic"]
 
@@ -404,67 +405,127 @@ def phase_bases(phases):
     return sorted(count, key=lambda b: (-count[b], b))
 
 
-def nearest_bases(top, branch, skip=()):
-    """The branches HEAD was cut from, from git alone: of the local and origin branches whose tip is on HEAD's
-    first-parent chain (not HEAD's own branch or a phase branch), the nearest. A branch merged in as a second
-    parent, like a docs PR merged into this branch, was never cut from, so it is not one. A branch whose tip
-    is HEAD counts 0, like a phase branch just cut from its base. At the same distance a branch on origin
-    beats a local-only one. [] on any failure."""
+def branch_name(ref):
+    """refs/heads/x and refs/remotes/origin/x are both x; any other ref is None."""
+    return ref[11:] if ref.startswith("refs/heads/") else \
+        ref[20:] if ref.startswith("refs/remotes/origin/") else None
+
+
+def nearest(dist, shared):
+    """The names at the smallest distance, those on origin first."""
+    best = [k for k, v in dist.items() if v == min(dist.values())] if dist else []
+    return sorted([k for k in best if k in shared] or best)
+
+
+def nearest_bases(top, branch, skip=(), trunks=()):
+    """(cut, merged) from git alone. [] for either on any failure.
+
+    cut: the branches HEAD was cut from. Of the local and origin branches whose tip is on HEAD's first-parent
+    chain (not HEAD's own branch or a phase branch), the nearest. A branch merged in as a second parent, like a
+    docs PR merged into this branch, was never cut from, so it is not one. A branch whose tip is HEAD counts 0,
+    like a phase branch just cut from its base. At the same distance a branch on origin beats a local-only one.
+
+    merged: when cut names only trunks, the branches merged into HEAD off that chain with the fewest commits
+    B..HEAD. A base synced in with `git merge` has moved its tip off the chain, and git cannot tell it from a
+    merged docs PR, so these are protected (fail closed) but never called cut from."""
     skip = set(skip) | {branch, "HEAD", "", None}
     chain = run(["git", "rev-list", "--first-parent", "--max-count=5000", "HEAD"], top, timeout=3)
     pos = {sha: i for i, sha in enumerate((chain or "").split())}  # steps back from HEAD
     out = run(["git", "for-each-ref", "--format", "%(refname)%09%(objectname)", "refs/heads", "refs/remotes/origin"],
               top, timeout=3) if pos else None
-    dist, shared = {}, set()
+    dist, shared, tips = {}, set(), {}
     for ln in (out or "").splitlines():
         ref, _, tip = ln.partition("\t")
-        name = ref[11:] if ref.startswith("refs/heads/") else \
-            ref[20:] if ref.startswith("refs/remotes/origin/") else None
+        name = branch_name(ref)
+        tips.setdefault(name, set()).add(tip)
         if name in skip or tip not in pos:
             continue
         if ref.startswith("refs/remotes/"):
             shared.add(name)
         dist[name] = min(dist.get(name, pos[tip]), pos[tip])
-    if not dist:
-        return []
-    best = [k for k, v in dist.items() if v == min(dist.values())]
-    return sorted([k for k in best if k in shared] or best)
+    cut = nearest(dist, shared)
+    if not pos or set(cut) - set(trunks):
+        return cut, []
+    done = {t for n in set(trunks) | set(cut) for t in tips.get(n, ())}  # old feature branches merged into main
+    return cut, merged_in(top, skip | set(dist), pos, done)
+
+
+def merged_in(top, skip, pos, done=()):
+    """The branches merged into HEAD, but not into any commit in done, whose tips are off HEAD's first-parent
+    chain (not in pos), nearest by B..HEAD, those on origin first. Tips past the chain walk's 5000 commits count
+    as off it. A few seconds at most."""
+    refs, fmt = ["refs/heads", "refs/remotes/origin"], "%(refname)%09%(objectname)"
+    filt = ["--merged", "HEAD", *[a for t in sorted(done) for a in ("--no-merged", t)]]
+    out = run(["git", "for-each-ref", *filt, "--format", fmt + "%09%(ahead-behind:HEAD)", *refs], top, timeout=3)
+    if out is None:  # git before 2.41 has no ahead-behind atom: count each tip with rev-list below
+        out = run(["git", "for-each-ref", *filt, "--format", fmt, *refs], top, timeout=3)
+    dist, shared, counts, deadline = {}, set(), {}, time.monotonic() + 3
+    for ln in (out or "").splitlines():
+        f = ln.split("\t")
+        name = branch_name(f[0])
+        if len(f) < 2 or name in skip or f[1] in pos:
+            continue
+        ab = f[2].split() if len(f) > 2 else []  # "ahead behind"; behind is B..HEAD
+        if len(ab) == 2 and ab[1].isdigit():
+            counts[f[1]] = int(ab[1])
+        elif f[1] not in counts and time.monotonic() < deadline:
+            c = run(["git", "rev-list", "--count", f"{f[1]}..HEAD"], top, timeout=2) or ""
+            counts[f[1]] = int(c) if c.strip().isdigit() else None
+        if counts.get(f[1]) is not None:
+            if f[0].startswith("refs/remotes/"):
+                shared.add(name)
+            dist[name] = min(dist.get(name, counts[f[1]]), counts[f[1]])
+    return nearest(dist, shared)
 
 
 def existing(top, names):
-    """{name: its ref} for each name that is a local branch, else a branch on origin. One git call."""
+    """{name: [its refs]}: the local branch and the one on origin, for each name that is either. One git call."""
     names = [n for n in dict.fromkeys(names) if n]
     cands = {n: (f"refs/heads/{n}", f"refs/remotes/origin/{n}") for n in names}
     out = run(["git", "for-each-ref", "--format=%(refname)", *[r for rs in cands.values() for r in rs]],
               top, timeout=3) if names else None
     have = set((out or "").split())
-    return {n: next(r for r in rs if r in have) for n, rs in cands.items() if have & set(rs)}
+    return {n: [r for r in rs if r in have] for n, rs in cands.items() if have & set(rs)}
 
 
-def count(top, revs):
-    """`git rev-list --count --first-parent` over revs, or None."""
-    out = run(["git", "rev-list", "--count", "--first-parent", *revs], top, timeout=3)
+def count(top, revs, merges=True):
+    """`git rev-list --count --first-parent` over revs (merges=False adds --no-merges), or None."""
+    out = run(["git", "rev-list", "--count", "--first-parent", *([] if merges else ["--no-merges"]), *revs],
+              top, timeout=3)
     return int(out) if out and out.strip().isdigit() else None
 
 
 def md_stamp(top, sm):
-    """The commit a STATE.md/NOW.md NEXT was written at: a tracked file's last commit (none while it has
-    uncommitted edits: NEXT was just written), else the `- At: <sha>` line wrap puts under `- Next:`."""
+    """The commit a STATE.md/NOW.md NEXT was written at: a tracked file's last own commit on this branch (none
+    while it has uncommitted edits: NEXT was just written), else the `- At: <sha>` line wrap puts under `- Next:`.
+    Merges are skipped: a merge of the base that touched the file was not a wrap."""
     f = sm["file"]
-    if run(["git", "ls-files", "--error-unmatch", "--", f], top, timeout=3) is None:
-        return sm.get("at") or ""
-    if run(["git", "diff", "--quiet", "HEAD", "--", f], top, timeout=3) is None:
+    st = run(["git", "status", "--porcelain=v1", "--ignored", "--", f], top, timeout=3)
+    if st is None:
         return ""
-    return (run(["git", "log", "-1", "--format=%H", "--", f], top, timeout=3) or "").strip()
+    if st[:2] in ("??", "!!"):
+        return sm.get("at") or ""
+    if st.strip():
+        return ""
+    return (run(["git", "log", "-1", "--first-parent", "--no-merges", "--format=%H", "--", f], top, timeout=3)
+            or "").strip() or sm.get("at") or ""
 
 
 def stale_next(top, sha, branch, base, refs):
-    """Commits on the phase branch (HEAD when it names none) that the commit NEXT was written at lacks, leaving
-    out the base's: the work NEXT does not know about. None when there is no stamp, or the stamp or the branch
-    is not in this clone. Never compares timestamps: wrap writes NEXT before its own WIP commit."""
+    """Non-merge commits on the phase branch, local or on origin (HEAD when it names none), that the commit NEXT
+    was written at lacks, leaving out the base's: the work NEXT does not know about. When the base is gone (merged
+    and deleted, say), every other branch's commits are left out instead. None when there is no stamp, or the
+    stamp or the branch is not in this clone. Never compares timestamps: wrap writes NEXT before its WIP commit."""
     if not SHA.fullmatch(sha or "") or (branch and branch not in refs):
         return None
-    return count(top, [refs.get(branch) or "HEAD", "^" + sha] + (["^" + refs[base]] if base in refs else []))
+    if base in refs:
+        away = ["^" + r for r in refs[base]]
+    elif base:
+        away = ["--not", *([f"--exclude={branch}"] if branch else []), "--branches",
+                *([f"--exclude=origin/{branch}"] if branch else []), "--remotes=origin"]
+    else:
+        away = []
+    return count(top, (refs.get(branch) or ["HEAD"]) + ["^" + sha] + away, merges=False)
 
 
 def aliases(top, spec):
@@ -499,10 +560,10 @@ def trunk_set(s):
 
 def protected(s):
     """Branches nothing may commit on or push: trunks, the PROD branch, the plan's phase bases, where open PRs
-    land (the last gh run's too when gh sees none), origin/HEAD and the branch HEAD was cut from. Fails closed:
-    each source only adds."""
+    land (the last gh run's too when gh sees none), origin/HEAD, the branch HEAD was cut from, and when that is
+    only a trunk, the nearest branch merged in (a synced base). Fails closed: each source only adds."""
     return sorted(trunk_set(s) | set(s.get("landing") or []) | set(s.get("bases") or [])
-                  | set(s.get("ancestors") or []) | ({prod_branch(s["prod"])} - {""}))
+                  | set(s.get("ancestors") or []) | set(s.get("merged_in") or []) | ({prod_branch(s["prod"])} - {""}))
 
 
 def prod_line(s):
@@ -606,14 +667,10 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     cached = [b for b in (read_json(where_cache_path(main_root), {}) or {}).get("landing") or [] if b not in mine]
     # "Cut from" only means something on a work branch: on main, a branch merged with --no-ff is an ancestor too.
     # Checked against the cached landing here so the git walk overlaps gh, and against the live one below.
-    trunkish = trunk_set({"trunks": cfg.get("trunks")}) | set(bases) | set(cached) | {prod_branch(cfg.get("prod"))}
-    near = nearest_bases(str(top), g["branch"], mine) if infer and g["branch"] and g["branch"] not in trunkish else []
-    prs = finish_gh(proc)
-    land = [b for b in landing(str(top), prs) if b not in mine]
-    if not prs:  # no gh, or gh sees no open PR: keep the PR bases the last gh run saw (fail closed)
-        land += [b for b in cached if b not in land]
-    if g["branch"] in land:
-        near = []
+    trunks = trunk_set({"trunks": cfg.get("trunks")})
+    trunkish = trunks | set(bases) | set(cached) | {prod_branch(cfg.get("prod"))}
+    near, merged = nearest_bases(str(top), g["branch"], mine, trunks) \
+        if infer and g["branch"] and g["branch"] not in trunkish else ([], [])
     plan, phase = (bstate or {}).get("plan") or {}, (bstate or {}).get("phase") or {}
     stamp = ""  # the commit NEXT was written at: the running phase's, or a plan-less STATE.md's
     if infer and phase and plan.get("source") == "beads":
@@ -626,10 +683,19 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
         cands = [c for c in (phase.get("base") if on_phase else "", *near[:1]) if c and c != g["branch"]]
     refs = existing(str(top), ([phase.get("branch"), phase.get("base")] if SHA.fullmatch(stamp) else []) + cands)
     base = next((c for c in cands if c in refs), "")
-    if base:
-        g["base"], g["base_ahead"] = base, count(str(top), ["HEAD", "^" + refs[base]])
+    if base:  # local and origin both: a stale local base must not count origin's newer commits as ahead
+        g["base"], g["base_ahead"] = base, count(str(top), ["HEAD", *["^" + r for r in refs[base]]])
     n = stale_next(str(top), stamp, phase.get("branch"), phase.get("base"), refs)
-    stale = {"commits": n, "branch": phase.get("branch") or g["branch"], "sha": stamp} if n else None
+    on = g["branch"] if g["branch"] and not g["branch"].startswith("HEAD (") else "HEAD"  # detached: "HEAD (no branch)"
+    stale = {"commits": n, "branch": phase.get("branch") or on, "sha": stamp} if n else None
+    prs = finish_gh(proc)  # the git calls above overlap it
+    land = [b for b in landing(str(top), prs) if b not in mine]
+    if not prs:  # no gh, or gh sees no open PR: keep the PR bases the last gh run saw (fail closed)
+        land += [b for b in cached if b not in land]
+    if g["branch"] in land:
+        if g["base"] in near and g["base"] != phase.get("base"):
+            g["base"] = g["base_ahead"] = None
+        near, merged = [], []
     beads_dir = find_beads(top, main_root)
     env_dir = os.environ.get("BEADS_DIR")
     # An inherited BEADS_DIR would send the model's own bd calls to another repo's DB.
@@ -638,7 +704,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     s = {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "beads": bstate,
             "beads_source": source, "state_md": sm, "prs": prs, "gh_tried": proc is not None,
             "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
-            "bases": bases, "ancestors": near, "next_stale": stale,
+            "bases": bases, "ancestors": near, "merged_in": merged, "next_stale": stale,
             "aliases": aliases(str(top), plan.get("spec")) if infer else [],
             "beads_dir": str(beads_dir) if beads_dir else None,
             "bd": find_tool("bd") if use_bd and beads_dir and not bd_note else None,  # null: no CLI, no .beads here, or bd_note

@@ -4,7 +4,7 @@ brain notes that match the prompt (brain.py recall, run in-process). Never block
   - once per session: recall-<session>.flag in the data dir marks that recall ran
   - /yah:start and /yah:resume recall themselves: they use up the session's recall and inject nothing
   - any other prompt starting with "/" injects nothing and leaves recall for the first real prompt
-  - no brain folder in the repo: nothing, no git calls, and the session's recall is not used up
+  - no brain folder in the repo (brain.brain_dir): nothing, and the session's recall is not used up
   - recall-*.flag files older than 3 days are deleted when a flag is written
 """
 import json
@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import config, data_dir, find_git, utf8_stdout  # noqa: E402
+from yahlib import config, data_dir, utf8_stdout  # noqa: E402
 
 MAX_AGE = 3 * 86400
 OWN_RECALL = ("/yah:start", "/yah:resume")
@@ -53,13 +53,12 @@ def main():
     if flag.exists():
         return
     cwd = d.get("cwd") or os.getcwd()
-    top = find_git(cwd)[0]
-    if top is None or not (Path(top) / config()["brain_dir"]).is_dir():  # keep the recall for a brain made later
+    import brain
+    if brain.brain_dir(cwd) is None:  # keep the recall for a brain made later
         return
     use_up(flag)
     if slash:
         return
-    import brain
     r = brain.recall(cwd, prompt)
     block = brain.render(r, int(config()["recall_max_chars"]))
     if block:
