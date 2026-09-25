@@ -1,4 +1,4 @@
-"""push_guard.py: PreToolUse hook for Bash, active only inside `yah run` iterations. run.py adds it
+"""push_guard.py: PreToolUse hook for Bash and PowerShell, active only inside `yah run` iterations. run.py adds it
 through --settings and sets YAH_PROTECTED to the protected branches (trunks, PROD, main, master).
 
 It denies, in any simple command of the Bash line (split on && || ; | & and newlines outside quotes,
@@ -27,6 +27,7 @@ WRAPPERS = {"env", "command", "builtin", "exec", "nohup", "time", "sudo", "xargs
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "pwsh", "powershell"}
 GIT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
 PUSH_ARG = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+SHELL_TOOLS = {"Bash", "PowerShell"}  # PowerShell splits on ; | & too, and `& git push` is a separator + git
 DANGER = ("force", "force-with-lease", "force-if-includes", "mirror", "all", "delete", "prune")
 
 
@@ -179,7 +180,7 @@ def main():
     if not protected:
         return  # not inside `yah run`
     d = json.loads(sys.stdin.buffer.read().decode("utf-8", "replace") or "{}")
-    cmd = (d.get("tool_input") or {}).get("command") if d.get("tool_name", "Bash") == "Bash" else None
+    cmd = (d.get("tool_input") or {}).get("command") if d.get("tool_name", "Bash") in SHELL_TOOLS else None
     why = problem(cmd, d.get("cwd") or os.getcwd(), protected) if isinstance(cmd, str) else None
     if why:
         print(json.dumps({"hookSpecificOutput": {

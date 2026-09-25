@@ -1,6 +1,5 @@
 {
   "name": "yah",
-  "version": "0.1.0",
   "description": "You are here: your plan, phase, next step and PRs at session start and in the statusline; nudges to wrap and /clear before limits bite; a small per-repo brain of one-fact notes; and `yah run`, which chains fresh sessions until a PR is open and green. It never merges.",
   "author": {
     "name": "ARYN26",

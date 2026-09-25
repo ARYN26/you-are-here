@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up yah - the statusline, the plan tier, the optional `yah` launcher and the optional working rules. Run once after installing, or to change the tier.
+description: Set up yah - statusline, plan tier, optional launcher and rules. Run once after install.
 disable-model-invocation: true
 ---
 
@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 Every step changes a file outside this repo, so each one needs the user's explicit yes. If they say no, skip that step and go on.
 
-Run setup with Bash as `python3 "${CLAUDE_SKILL_DIR}/../../scripts/setup.py" <flags>`. If `python3` is not found or fails (as on Windows), use `python` instead, for this and every later step.
+Run setup with Bash as `PY "${CLAUDE_SKILL_DIR}/../../scripts/setup.py" <flags>`. `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
 ## 1. Tier
 
@@ -25,6 +25,10 @@ Run `setup.py --tier <tier> --dry-run` and show the output verbatim. It writes n
 ## 3. Apply
 
 On yes, run `setup.py --tier <tier> --yes` and show the output. The statusline shows from the next render.
+
+## 3b. Ultracode by default (max20 only, optional)
+
+Only when the tier is `max20`, offer: "Turn ultracode on for every session? It runs xhigh effort with workflows, which costs more per turn. yah keeps it lean: workflows capped at medium size (<10 agents), and a once-per-session rule to use workflows only for genuinely parallel work, with low or medium effort for mechanical stages." On yes, run `setup.py --ultracode --yes` and show the output. `--uninstall` restores the previous values.
 
 ## 4. Launcher (optional)
 

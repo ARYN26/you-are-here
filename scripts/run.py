@@ -6,13 +6,18 @@
 TARGET is P<n> (a plan phase), #<pr> (a bare PR number works too, since shells treat # as a
 comment) or empty for the current phase, which is pinned at start and passed as P<n>. Each iteration
 is one `claude -p "/yah:resume TARGET MODE"` in auto permission mode, with prompts off and a DENY
-list for force pushes, pushes to trunks and PROD, merges and deletes, backed by the push_guard.py
-PreToolUse hook. A P<n> that is not in the plan is refused. Before and after each iteration
-it reads the PR (gh) and the phase (where.py), and the first stop rule that matches sets the exit code:
+list for force pushes, pushes to protected branches, merges and deletes, backed by the push_guard.py
+PreToolUse hook. Protected is where.py's set (trunks, PROD, the plan's phase bases, where PRs land,
+origin/HEAD, the branch HEAD was cut from) plus main and master. A P<n> that is not in the plan is
+refused, and so is a run that cannot name the branch its PR targets. Run from a yah checkout rather
+than an installed plugin, it passes --plugin-dir <checkout> so each session has /yah:resume. Before
+and after each iteration it reads the PR (gh) and the phase (where.py), and the first stop rule that
+matches sets the exit code:
 
     0  PR open, green, phase closed: the merge is yours      4  iteration or wall-clock cap
-    2  needs you: error, denial, needs-human or blocked      5  refused to start
-    3  stalled: HEAD and NEXT unchanged twice in a row       6  PR merged or closed
+    2  needs you: error, denial, needs-human, blocked, or    5  refused to start
+       a session that ended without a YAH-RESULT line        6  PR merged or closed
+    3  stalled: HEAD and NEXT unchanged twice in a row
     7  weekly usage at run_week_stop_pct or over pace + pace_slack
     1  run.py itself failed
 
@@ -51,13 +56,17 @@ NO_WINDOW = where.NO_WINDOW
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
 KEEP_RUNS = 20
 TAG = re.compile(r"^\s*YAH-RESULT:\s*(.+?)\s*$", re.M)
-DENY_BASE = ["Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push *--force*)", "Bash(git push * -f*)",
+DENY_BASE = ["PowerShell", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push *--force*)", "Bash(git push * -f*)",
              "Bash(git push *+*)", "Bash(gh pr merge*)", "Bash(gh api *merge*)", "Bash(gh repo delete*)",
              "Bash(git push *--delete*)", "Bash(git push *--mirror*)", "Bash(git push *--all*)",
              "Bash(git push *--prune*)", "Bash(git push -d*)", "Bash(git push * -d *)"]
 DENY_BRANCH = ["Bash(git push * {})", "Bash(git push * {} *)", "Bash(git push * HEAD:{}*)", "Bash(git push * *:{}*)",
                "Bash(git push *refs/heads/{}*)"]
-PR_JSON = "state,url,reviewDecision,reviews,commits,headRefName"
+PR_JSON = "state,url,reviewDecision,reviews,commits,headRefName,baseRefName"
+NO_TAG = "session ended without a YAH-RESULT line; is the yah plugin loaded? (--plugin-dir)"
+NO_BASE = ("cannot tell which branch {} targets: no base in the plan, no open PR for {}, no origin/HEAD and no "
+           "prod in config.json, so it cannot be protected. Set base in the plan (beads metadata, or "
+           "`| base <branch>` on the STATE.md phase line) or prod in config.json.")
 
 
 def say(text=""):
@@ -77,19 +86,36 @@ def brief(value, n=60):
 
 # ---------------------------------------------------------------- setup
 
-def prod_branch(prod):
-    """The branch a PROD line names: a `backticked` word, else its first word."""
-    m = re.search(r"`([^`\s]+)`", prod or "") or re.match(r"\s*([\w./-]+)", prod or "")
-    return m.group(1) if m else ""
+prod_branch = where.prod_branch
 
 
-def protected(trunks, prod):
-    """The branches no iteration may push: trunks, the PROD branch, main and master."""
-    return sorted({str(t) for t in trunks} | {"main", "master"} | ({prod} if prod else set()))
+def protected(branches, prod=""):
+    """The branches no iteration may push: where.py's protected set, the PROD branch, main and master."""
+    return sorted({str(b) for b in branches if b} | {"main", "master"} | ({prod} if prod else set()))
 
 
-def deny_list(trunks, prod):
-    return DENY_BASE + [p.format(b) for b in protected(trunks, prod) for p in DENY_BRANCH]
+def deny_list(branches):
+    return DENY_BASE + [p.format(b) for b in branches for p in DENY_BRANCH]
+
+
+def guard(r, branches):
+    """Grow the protected set (it never shrinks mid-run) and rebuild the DENY list from it."""
+    r.protected = protected(set(r.protected) | set(branches))
+    r.deny = deny_list(r.protected)
+
+
+def plugin_source(given, here=None):
+    """(--plugin-dir for each session or None, what the dry run says). An installed plugin, in
+    <config>/plugins/cache/... or <config>/plugins/marketplaces/..., is already loaded; a checkout is not."""
+    if given:
+        path = str(Path(given).resolve())
+        return path, f"--plugin-dir {path} (given)"
+    here = Path(here or __file__).resolve()
+    names = [p.name for p in here.parents]
+    if any(a in ("cache", "marketplaces") and b == "plugins" for a, b in zip(names, names[1:])):
+        return None, f"the installed yah plugin ({here.parents[1]})"
+    root = str(here.parents[1])
+    return root, f"--plugin-dir {root} (this checkout: run.py is not an installed plugin)"
 
 
 def parse_target(t):
@@ -122,13 +148,15 @@ def claude_argv(r):
 def guard_settings():
     """Hooks for run iterations only; interactive sessions never pay for them. Headless sessions get one
     prompt, so the UserPromptSubmit guard fires once: the context guard also runs as PostToolUse. The push
-    guard (PreToolUse on Bash) denies pushes the DENY patterns can miss; YAH_PROTECTED names the branches."""
+    guard (PreToolUse on Bash and PowerShell) denies pushes the DENY patterns can miss; YAH_PROTECTED names the
+    branches. DENY_BASE also turns the PowerShell tool off in runs: its commands would bypass the Bash patterns."""
     here, py = Path(__file__).resolve().parent, Path(sys.executable).as_posix()
 
     def hook(name):
         return {"type": "command", "command": f'"{py}" "{(here / name).as_posix()}"', "timeout": 10}
     return json.dumps({"hooks": {"PostToolUse": [{"hooks": [hook("context_guard.py")]}],
-                                 "PreToolUse": [{"matcher": "Bash", "hooks": [hook("push_guard.py")]}]}})
+                                 "PreToolUse": [{"matcher": t, "hooks": [hook("push_guard.py")]}
+                                                for t in ("Bash", "PowerShell")]}})  # no "|": cmd /c reads it as a pipe
 
 
 # ---------------------------------------------------------------- PR and phase
@@ -191,9 +219,25 @@ def pr_from_where(s, ph):
     return heads.get((ph or {}).get("branch") or (s.get("git") or {}).get("branch"))
 
 
-def refresh(r):
-    """Re-read the target phase, NEXT and HEAD, and the PR while none is known."""
-    s = where.collect(r.top, use_gh=bool(r.gh) and not r.pr) or {}
+def pr_base(r, s):
+    """(branch, source): what the run's PR targets. The phase's base, else the open PR's base for the
+    phase branch (or this branch), else origin/HEAD, else PROD. ("", "") when nothing names it."""
+    if (r.phase or {}).get("base"):
+        return r.phase["base"], "the plan's base for " + r.label
+    mine = (r.phase or {}).get("branch") or (s.get("git") or {}).get("branch")
+    for p in s.get("prs") or []:
+        if isinstance(p, dict) and p.get("baseRefName") and (p.get("number") == r.pr or p.get("headRefName") == mine):
+            return p["baseRefName"], f"the base of PR #{p.get('number')}"
+    ref = (where.run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], r.top, timeout=3) or "").strip()
+    if ref.startswith("origin/"):
+        return ref[7:], "origin/HEAD"
+    return (r.prod, "prod in config.json") if r.prod else ("", "")
+
+
+def refresh(r, s=None):
+    """Re-read the target phase, NEXT and HEAD, the protected branches, and the PR while none is known."""
+    s = s or where.collect(r.top, use_gh=bool(r.gh) and not r.pr) or {}
+    guard(r, s.get("protected") or [])
     b = s.get("beads") or {}
     r.labels = [p.get("label") for p in b.get("phases") or []]
     if r.label is None and not r.target:  # empty TARGET: pin the phase that is current now
@@ -239,6 +283,9 @@ def evaluate(r, wait=True):
         view = pr_view(r)
         state = str((view or {}).get("state") or "").upper()
         r.url = (view or {}).get("url") or r.url
+        if (view or {}).get("baseRefName"):  # the PR's own base: protect it, and it is what the PR targets
+            guard(r, [view["baseRefName"]])
+            r.base, r.base_from = view["baseRefName"], f"the base of PR #{r.pr}"
         if state in ("MERGED", "CLOSED"):
             return 6, f"PR #{r.pr} is {state.lower()}."
         if state == "OPEN":
@@ -250,6 +297,8 @@ def evaluate(r, wait=True):
     if r.last:
         if r.last["is_error"] or r.last["denials"] or r.last["word"] in ("needs-human", "blocked"):
             return 2, needs_you(r)
+        if not r.last["tag"]:
+            return 2, NO_TAG
         if r.stalls >= 2:
             return 3, "HEAD and NEXT unchanged for 2 iterations in a row."
     if r.n >= r.cap:
@@ -471,15 +520,25 @@ def refuse(reason):
     return 5
 
 
+def no_base(r):
+    who = f"phase {r.label}'s PR" if r.label else f"PR #{r.pr}" if r.pr else "this run's PR"
+    return NO_BASE.format(who, (r.phase or {}).get("branch") or r.branch or "this branch")
+
+
 def dry_run(r):
     r.pace_logged = True  # the week line says it instead
     code, reason = evaluate(r, wait=False)
+    if code is None and not r.base:
+        code, reason = 5, "run refused: " + no_base(r)
     c, usage = r.cfg, week_usage(r)
     phase = f"phase {r.label}" if r.label else "no plan phase"
     say("[yah] dry run: nothing is spawned")
     say(f"repo    {r.top}  branch {r.branch}  project {r.key}")
     say(f"target  {r.target or 'current phase'} ({phase})  PR {f'#{r.pr}' if r.pr else 'none yet'}"
         + (f"  {r.url}" if r.url else ""))
+    say(f"base    {r.base} ({r.base_from})" if r.base else "base    unknown")
+    say(f"plugin  {r.plugin_src}")
+    say(f"protect {', '.join(r.protected)}")
     say(f"argv    {shlex.join(claude_argv(r))}")
     say(f"deny    {len(r.deny)} patterns")
     for p in r.deny:
@@ -531,28 +590,36 @@ def main():
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
     prod = prod_branch(str(pcfg.get("prod") or ""))
     branch = read_branch(git_dir) if git_dir else None
-    if not target and (branch in trunks or (prod and branch == prod)):
+    gh_path = where.find_tool("gh")
+    # where.py's protected set covers a repo with no config.json: the plan's phase bases, where open PRs land
+    # (or landed when gh last saw any), origin/HEAD and the branch HEAD was cut from, beside the trunks.
+    s = where.collect(str(top), use_gh=bool(gh_path)) or {}
+    fence = protected(trunks | set(s.get("protected") or []), prod)
+    if not target and branch in fence:
         return refuse(f"you are on {branch}, a trunk or the PROD branch. Check out the phase branch first, "
                       "or pass P<n> and resume creates it from base.")
     claude = shutil.which("claude")
     if not claude:
         return refuse("claude not found on PATH.")
-    gh_path = where.find_tool("gh")
     if not gh_path:
         return refuse("gh (the GitHub CLI) not found. yah run needs it to open the PR and follow its checks.")
+    plugin_dir, plugin_src = plugin_source(a.plugin_dir)
     r = SimpleNamespace(
         cfg=cfg, top=str(top), key=key, branch=branch, target=target, claude=claude, gh=gh_path, model=a.model,
-        plugin_dir=str(Path(a.plugin_dir).resolve()) if a.plugin_dir else None,
-        deny=deny_list(trunks, prod), protected=protected(trunks, prod),
+        plugin_dir=plugin_dir, plugin_src=plugin_src, prod=prod, base="", base_from="",
+        deny=deny_list(fence), protected=fence,
         cap=int(cfg["run_iterations"] if a.iterations is None else a.iterations),
         budget=cfg["run_budget_usd"] if a.budget is None else a.budget,
         pr=int(target[1:]) if target[:1] == "#" else None, label=target if target[:1] == "P" else None,
         phase=None, labels=[], next="", head="", mode="build", checks="", url="", waiting=False, week=None,
         pace_logged=False, n=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None)
-    refresh(r)
+    refresh(r, s)
     if target[:1] == "P" and r.phase is None:
         return refuse(f"no phase {target} in this repo's plan. "
                       + (f"Phases: {', '.join(r.labels)}." if r.labels else "There is no plan (beads or STATE.md)."))
+    r.base, r.base_from = pr_base(r, s)
+    if not r.base and not r.pr:  # a known PR names its base once evaluate reads it
+        return refuse(no_base(r))
     if a.dry_run:
         return dry_run(r)
     runs = data_dir() / "runs"
@@ -564,6 +631,9 @@ def main():
         while True:
             code, reason = evaluate(r)
             if code is not None:
+                break
+            if not r.base:  # the PR gh could not read names no base either
+                code, reason = 5, "run refused: " + no_base(r)
                 break
             before = (r.head, r.next)
             r.last = iterate(r)

@@ -151,6 +151,15 @@ class RecallTests(Base):
                                    "from PR branches. (PR #41, 2026-09-20)")
         self.assertEqual(self.recall_json(repo, "stripe", "signature")["matches"][0]["slug"], "stripe-webhooks")
 
+    def test_stems_and_short_words(self):
+        b = self.brain
+        for a, c in (("pushes", "push"), ("pushed", "pushing"), ("caches", "cache"), ("queries", "query"),
+                     ("boxes", "box"), ("phases", "phase"), ("notes", "note"), ("deploys", "deployed")):
+            with self.subTest(a=a, c=c):
+                self.assertEqual(b.tokens(a), b.tokens(c))
+        self.assertEqual(b.tokens("the PR and UI"), {"pr", "ui"})
+        self.assertEqual(b.tokens("status process"), {"status", "process"})
+
     def test_superseded_notes_are_excluded(self):
         repo = self.repo(VAULT)
         r = self.recall_json(repo, "deploys run from the release branch")
@@ -165,8 +174,8 @@ class RecallTests(Base):
 
     def test_paths_globs_match_diff_and_status(self):
         repo = self.repo(VAULT)
-        # nothing in the text matches: only the +4 for globs over the changed files scores
-        self.assertEqual(self.scores(repo, "zzz"), {"api-rate-limit": 4, "stripe-webhooks": 4})
+        # nothing in the text matches: only the +2 for globs over the changed files scores
+        self.assertEqual(self.scores(repo, "zzz"), {"api-rate-limit": 2, "stripe-webhooks": 2})
         (repo / ".github" / "workflows").mkdir(parents=True)
         (repo / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")  # untracked
         self.assertEqual(set(self.scores(repo, "zzz")), {"api-rate-limit", "stripe-webhooks", "vercel-deploys-main"})
@@ -174,6 +183,42 @@ class RecallTests(Base):
         self.data.mkdir(exist_ok=True)
         self.yahlib.where_cache_path(repo).write_text(json.dumps({"phase": {"base": "feature"}}), encoding="utf-8")
         self.assertEqual(set(self.scores(repo, "zzz")), {"api-rate-limit", "vercel-deploys-main"})
+
+    def test_brain_folder_files_are_not_changed_files(self):
+        vault = dict(VAULT, **{"pr-titles": note("PR titles are imperative", "Write PR titles in the imperative.",
+                                                 ("pr",), ("README.md",))})
+        repo = self.repo(vault)
+        # the brain's own README.md, a new note and an edited note: none may path-match README.md
+        (repo / "docs" / "brain" / "README.md").write_text("# Brain\n", encoding="utf-8")
+        (repo / "docs" / "brain" / "new-note.md").write_text(note("New", "New."), encoding="utf-8")
+        self.note_file(repo, "log-format").write_text(VAULT["log-format"] + "More.\n", encoding="utf-8")
+        self.assertEqual(self.brain.changed_files(repo), {"src/payments/charge.ts", "src/api/client.py"})
+        self.assertEqual(self.scores(repo, "zzz"), {"api-rate-limit": 2, "stripe-webhooks": 2})
+        (repo / "README.md").write_text("shop 2\n", encoding="utf-8")  # the repo's README still counts
+        self.assertEqual(self.scores(repo, "zzz")["pr-titles"], 2)
+        # brain_dir comes from config
+        self.data.mkdir(exist_ok=True)
+        (self.data / "config.json").write_text(json.dumps({"brain_dir": "src/api"}), encoding="utf-8")
+        self.yahlib._config = None
+        self.assertNotIn("src/api/client.py", self.brain.changed_files(repo))
+
+    def test_no_commits_gives_no_path_signal(self):
+        r = self.tmp / "fresh"
+        for slug, text in VAULT.items():
+            (r / "docs" / "brain").mkdir(parents=True, exist_ok=True)
+            (r / "docs" / "brain" / (slug + ".md")).write_bytes(text.encode("utf-8"))
+        for rel in ("README.md", "src/api/client.py", "src/payments/charge.ts", "vercel.json"):
+            (r / rel).parent.mkdir(parents=True, exist_ok=True)
+            (r / rel).write_text("x\n", encoding="utf-8")
+        self.git(r, "init", "-q")
+        self.git(r, "symbolic-ref", "HEAD", "refs/heads/main")
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                if staged:
+                    self.git(r, "add", "-A")
+                self.assertEqual(self.brain.changed_files(r, "main"), set())
+                self.assertEqual(self.scores(r, "zzz"), {})
+                self.assertEqual(self.scores(r, "stripe")["stripe-webhooks"], 6)  # words still match
 
     def test_glob_rules(self):
         hit = self.brain.glob_hit
@@ -192,7 +237,7 @@ class RecallTests(Base):
             encoding="utf-8")
         # 1.5 x {stripe, webhook, payment} + 4 for src/payments/charge.ts
         self.assertEqual(self.scores(repo, "zzz")["stripe-webhooks"], 8.5)
-        self.assertEqual(self.scores(repo, "zzz", "--phase", "")["stripe-webhooks"], 4)
+        self.assertEqual(self.scores(repo, "zzz", "--phase", "")["stripe-webhooks"], 2)
 
     def test_one_hop_link_bonus(self):
         repo = self.repo(VAULT)
@@ -402,9 +447,14 @@ class HookTests(Base):
         old = self.data / "recall-old.flag"
         old.write_bytes(b"")
         os.utime(old, (time.time() - 4 * 86400,) * 2)
-        self.assertEqual(self.hook("s1", "deploy to vercel", repo), "")
-        self.assertFalse(old.exists())
+        self.assertEqual(self.hook("s1", "did this command work?", repo), "")
+        self.assertFalse((self.data / "recall-s1.flag").exists())  # no brain: the session keeps its recall
         self.assertEqual(self.hook("s2", "deploy", self.home), "")
+        self.assertFalse((self.data / "recall-s2.flag").exists())
+        self.assertEqual(self.bp(repo, "init")[2], 0)  # a brain made later in the session
+        self.hook("s1", "continue", repo)
+        self.assertTrue((self.data / "recall-s1.flag").exists())
+        self.assertFalse(old.exists())  # swept when a flag is written
 
 
 if __name__ == "__main__":

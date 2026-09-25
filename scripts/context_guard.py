@@ -4,6 +4,7 @@
   context >= wrap_now    "wrap now"
   premium main model     once per session (config.json premium_models)
   weekly % more than pace_slack points ahead of the week's elapsed share: once a day
+  ultracode on (config.json, set by setup.py --ultracode): workflow sizing rules, once per session
 
 Thresholds come from config.json and its tier preset. Context size comes from the
 transcript's last main-thread assistant turn (fresh), falling back to the statusline's
@@ -97,21 +98,31 @@ def main():
                          "work suggest a fresh session on a standard model, and use /yah:deep for single hard questions.")
         to_user.append(f"Main thread is {name} (premium). Keep it short.")
 
+    ultra = bool(cfg["ultracode"])
+    if ultra and not flags.get("ultra"):
+        flags["ultra"] = True
+        to_claude.append("[yah] Ultracode is on. Questions, single-file edits and reviews of a few files stay in the "
+                         "main thread (/code-review for small reviews). Use a workflow only for genuinely parallel "
+                         "work: one agent per independent unit, low or medium effort for mechanical stages, high for "
+                         "research and judges, one verifier per finding, reports of 1,500 characters or fewer.")
+
     week, pace = state.get("week"), state.get("pace")
     if week is not None and pace is not None and week > pace + cfg["pace_slack"] and daily.get("pace") != today:
         daily["pace"] = today
         write_json(daily_path, daily)
-        to_claude.append(f"[yah] Weekly usage is {week:.0f}% with {pace}% of the week gone. Prefer effort high over "
-                         "xhigh, avoid large parallel agent fan-outs unless the work is genuinely parallel, and keep "
-                         "sessions short.")
+        to_claude.append(f"[yah] Weekly usage is {week:.0f}% with {pace}% of the week gone. " + (
+            "Keep workflows under 5 agents with low effort for mechanical stages; for work that is not parallel, "
+            "suggest /effort high for the rest of this session. Keep sessions short." if ultra else
+            "Prefer effort high over xhigh, avoid large parallel agent fan-outs unless the work is genuinely "
+            "parallel, and keep sessions short."))
         to_user.append(f"Weekly {week:.0f}% vs {pace}% of the week gone: run lean today.")
 
     write_json(flags_path, flags)
     if to_claude:
-        print(json.dumps({
-            "systemMessage": " ".join(to_user),
-            "hookSpecificOutput": {"hookEventName": event, "additionalContext": "\n".join(to_claude)},
-        }, ensure_ascii=False))
+        out = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": "\n".join(to_claude)}}
+        if to_user:
+            out["systemMessage"] = " ".join(to_user)
+        print(json.dumps(out, ensure_ascii=False))
 
 
 if __name__ == "__main__":

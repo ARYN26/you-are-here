@@ -1,7 +1,7 @@
 ---
 name: deep
-description: Send one hard, self-contained question to Fable in a forked context, without switching this session's model. Use when the user says "deep", or for a bug that resisted two attempts.
-argument-hint: "<self-contained question naming files and what was tried>"
+description: Ask Fable one hard, self-contained question. For "deep" or a bug that resisted two attempts.
+argument-hint: "<self-contained question>"
 context: fork
 agent: yah:deep
 ---

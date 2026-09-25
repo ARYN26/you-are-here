@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 GREEN, AMBER, RED, RST = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 WEEK = 7 * 86400
-FOOTER = "This is the current state. Do not read docs to orient; /yah:where shows the full view."
+FOOTER = ("This is the current state. Do not read docs to orient; /yah:where shows the full view. "
+          "Reply first with one line (phase, NEXT, what waits on the user), before any tool call or branch change.")
 PREMIUM = ("On Max plans Fable can use up to half of the weekly cap (it has its own usage bar); "
            "on Pro it needs extra-usage credits.")
 
@@ -33,6 +34,7 @@ BEADS = [
     {"id": "yah-2", "title": "P1 Cart API", "issue_type": "task", "status": "closed", "labels": ["phase"],
      "parent": "yah-1", "metadata": {"phase": 1, "branch": "checkout/cart", "base": "main"}, "external_ref": "gh-12"},
     {"id": "yah-3", "title": "P2 Payment form", "issue_type": "task", "status": "in_progress", "labels": ["phase"],
+     "assignee": "Sam",  # a claimed phase is the work itself, never "waiting on you"
      "parent": "yah-1", "metadata": {"phase": 2, "branch": "checkout/payment", "base": "checkout/cart"},
      "notes": "Wire the Stripe element into PaymentForm.tsx, then run the e2e test.\nCart API is merged."},
     {"id": "yah-4", "title": "P3 Emails", "issue_type": "task", "status": "open", "labels": ["phase"],
@@ -87,6 +89,10 @@ class Base(unittest.TestCase):
 
     def git(self, repo, *args):
         subprocess.run(["git", *args], cwd=str(repo), env=self.env, check=True, capture_output=True)
+
+    def head(self, repo):
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), env=self.env, check=True,
+                              capture_output=True).stdout.decode().strip()
 
     def repo(self, files=None, branch="main", name="shop"):
         r = self.tmp / name
@@ -252,6 +258,17 @@ class GuardTests(Base):
         self.state("g5", week=60, pace=30, tokens=1000)
         self.assertIsNone(self.guard(sid="g5"))  # once a day, across sessions
 
+    def test_ultracode_rules_once_per_session(self):
+        self.config(ultracode=True)
+        r = self.guard(sid="u1")
+        self.assertIn("Ultracode is on", r["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("systemMessage", r)  # model-only: nothing shown to the user
+        self.assertIsNone(self.guard(sid="u1"))
+        self.state("u2", week=60, pace=30, tokens=1000)
+        ctx = self.guard(sid="u2")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("under 5 agents", ctx)
+        self.assertNotIn("high over xhigh", ctx)
+
 
 # ---------------------------------------------------------------- where.py
 
@@ -273,8 +290,157 @@ class WhereTests(Base):
                      "NEXT    Wire the Stripe element", "YOU     yah-5  Approve the payment copy",
                      "        yah-6  Rotate the Stripe test keys"):
             self.assertTrue(any(ln.startswith(want) for ln in full), want)
+        self.assertFalse(any("yah-3" in ln for ln in full if not ln.startswith("PHASE")), full)  # not in YOU
         s = json.loads(self.where(repo, "--json"))
         self.assertEqual((s["beads"]["plan"]["source"], s["beads"]["phase"]["base"]), ("beads", "checkout/cart"))
+        self.assertEqual([h["id"] for h in s["beads"]["human"]], ["yah-5", "yah-6"])
+        self.assertIsNone(s["next_stale"])  # no stamp, no flag
+        self.assertNotIn("predates", "\n".join(brief + full))
+
+    def stamp_beads(self, repo, sha):
+        beads = [dict(b, metadata=dict(b["metadata"], next_sha=sha)) if b["id"] == "yah-3" else b for b in BEADS]
+        (repo / ".beads" / "issues.jsonl").write_text("\n".join(json.dumps(b) for b in beads) + "\n", "utf-8")
+
+    def test_stale_next_from_beads_counts_only_the_phase_branch(self):
+        repo = self.beads_repo(branch="checkout/cart")  # NEXT written on the base, before the phase branch
+        self.stamp_beads(repo, self.head(repo))
+        self.git(repo, "commit", "-qam", "plan")  # base commits after the stamp never count
+        self.git(repo, "checkout", "-q", "-b", "checkout/payment")
+        brief = self.where(repo, "--brief")
+        self.assertNotIn("predates", brief)
+        self.assertIn("branch checkout/payment (clean, 0 ahead of checkout/cart, no upstream)", brief)
+        for i in (1, 2):
+            self.git(repo, "commit", "-q", "--allow-empty", "-m", f"work {i}")
+        warn = "NEXT predates 2 commits on checkout/payment: /yah:wrap first"
+        brief = self.where(repo, "--brief").splitlines()
+        self.assertLessEqual(len(brief), 6)
+        self.assertEqual(brief[2], f"NEXT Wire the Stripe element into PaymentForm.tsx, then run the e2e test.  ! {warn}")
+        self.assertIn("(clean, 2 ahead of checkout/cart, no upstream)", brief[0])
+        full = self.where(repo).splitlines()
+        self.assertEqual(full[full.index("NEXT    Wire the Stripe element into PaymentForm.tsx, then run the e2e test.") + 1],
+                         f"!       {warn}")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["next_stale"]["commits"], s["next_stale"]["branch"]), (2, "checkout/payment"))
+        self.git(repo, "checkout", "-q", "checkout/cart")  # off the phase branch: still counts the phase branch
+        self.assertIn(warn, self.where(repo, "--brief"))
+        self.git(repo, "checkout", "-q", "checkout/payment")
+        self.stamp_beads(repo, self.head(repo)[:7])  # wrap re-stamps after its WIP commit
+        self.assertNotIn("predates", self.where(repo, "--brief"))
+        for bad in ("--output=x", "HEAD", "zzzzzzz", ""):  # never passed to git as an option or a ref
+            self.stamp_beads(repo, bad)
+            self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"], bad)
+
+    def test_stale_next_from_state_md(self):
+        repo = self.repo({"STATE.md": STATE_DATED})  # tracked: its own last commit is the stamp
+        self.assertNotIn("predates", self.where(repo, "--brief"))
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        brief = self.where(repo, "--brief")
+        self.assertIn("NEXT Ship the login fix, then tag v1.2.  ! NEXT predates 1 commit on main: /yah:wrap first", brief)
+        self.assertIn("!       NEXT predates 1 commit on main", self.where(repo))
+        self.git(repo, "checkout", "-q", "--detach")  # no branch: wrap's `git log <sha>..HEAD` still works
+        self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["branch"], "HEAD")
+        self.git(repo, "checkout", "-q", "main")
+        (repo / "STATE.md").write_text(STATE_DATED.replace("Ship", "Now ship"), encoding="utf-8")
+        self.assertNotIn("predates", self.where(repo, "--brief"))  # being rewritten: not stale
+        other = self.repo(name="blog", branch="checkout/payment")  # untracked: the `- At:` line wrap writes
+        sha = self.head(other)
+        text = STATE_PLAN.replace("then run the e2e test.", "then run the e2e test.\n- At: " + sha[:9])
+        (other / "STATE.md").write_text(text, encoding="utf-8")
+        self.assertNotIn("predates", self.where(other, "--brief"))
+        self.git(other, "commit", "-q", "--allow-empty", "-m", "work")
+        self.assertIn("! NEXT predates 1 commit on checkout/payment: /yah:wrap first", self.where(other, "--brief"))
+        self.assertIn("PaymentForm.tsx, then run the e2e test.  !", self.where(other, "--brief"))  # At: is not NEXT
+        (other / "STATE.md").write_text(text.replace("- [~] P2", "- [ ] P2"), encoding="utf-8")
+        self.assertNotIn("predates", self.where(other, "--brief"))  # no running phase: nothing to be stale
+
+    def test_stale_next_skips_a_base_merge_that_touched_state_md(self):
+        repo = self.repo({"STATE.md": STATE_DATED})  # tracked and plan-less
+        self.git(repo, "checkout", "-q", "-b", "feat/a")
+        (repo / "STATE.md").write_text(STATE_DATED.replace("Ship", "Now ship"), encoding="utf-8")
+        self.git(repo, "commit", "-qam", "wrap")  # NEXT is written here
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        self.git(repo, "checkout", "-q", "main")
+        (repo / "STATE.md").write_text(STATE_DATED.replace("Old.", "Older."), encoding="utf-8")
+        self.git(repo, "commit", "-qam", "base notes")
+        self.git(repo, "checkout", "-q", "feat/a")
+        self.git(repo, "merge", "-q", "--no-edit", "main")  # touches STATE.md, but is not a wrap
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["next_stale"]["commits"], s["next_stale"]["branch"]), (1, "feat/a"))  # the work only
+
+    def test_stale_next_when_the_phase_base_is_gone(self):
+        repo = self.beads_repo(branch="checkout/cart")
+        init = self.head(repo)
+        self.stamp_beads(repo, init)  # /yah:phases stamps every phase at plan time
+        self.git(repo, "commit", "-qam", "plan")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "cart work")
+        self.git(repo, "checkout", "-q", "-b", "main", init)
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge P1", "checkout/cart")
+        self.git(repo, "checkout", "-q", "-b", "checkout/payment", "checkout/cart")
+        self.git(repo, "branch", "-q", "-D", "checkout/cart")  # merged and deleted: P1's commits are main's now
+        self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"])
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "pay work")
+        self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["commits"], 1)
+
+    def test_base_ahead_counts_past_a_stale_local_base(self):
+        repo = self.repo(branch="main")
+        old = self.head(repo)
+        self.git(repo, "checkout", "-q", "-b", "feat/x")
+        for i in (1, 2, 3):
+            self.git(repo, "commit", "-q", "--allow-empty", "-m", f"dev {i}")
+        self.git(repo, "update-ref", "refs/remotes/origin/aryan_dev", "HEAD")  # cut from origin's aryan_dev
+        self.git(repo, "branch", "-q", "aryan_dev", old)  # the local copy was never pulled
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["git"]["base"], s["git"]["base_ahead"]), ("aryan_dev", 1))
+
+    def test_protects_a_base_synced_in_with_merge(self):
+        repo = self.repo(branch="main")
+        self.git(repo, "checkout", "-q", "-b", "feat/old")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "old")
+        self.git(repo, "checkout", "-q", "main")
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge feat/old", "feat/old")
+        self.git(repo, "checkout", "-q", "-b", "feat/y")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "y")
+        s = json.loads(self.where(repo, "--json"))  # feat/old is off the chain, but main has it: not synced in
+        self.assertEqual((s["ancestors"], s["merged_in"]), (["main"], []))
+        self.git(repo, "checkout", "-q", "main")
+        self.git(repo, "checkout", "-q", "-b", "aryan_dev")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "dev")
+        self.git(repo, "checkout", "-q", "-b", "feat/x")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        self.git(repo, "checkout", "-q", "aryan_dev")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "dev 2")
+        self.git(repo, "checkout", "-q", "feat/x")
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "sync aryan_dev", "aryan_dev")  # its tip is off the chain now
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["ancestors"], s["merged_in"]), (["main"], ["aryan_dev"]))
+        self.assertIn("aryan_dev", s["protected"])
+        self.assertNotIn("PROD", self.where(repo))  # protected, but never inferred as PROD
+
+    def test_a_claimed_bead_is_not_waiting_on_you(self):
+        w = load_where()
+        issues = [{"id": "x-1", "title": "Fix the flaky test", "issue_type": "task", "status": "in_progress",
+                   "assignee": "Sam"},  # `bd update --claim` assigns git user.name
+                  {"id": "x-2", "title": "Rotate the keys", "issue_type": "task", "status": "open", "assignee": "Sam"},
+                  {"id": "x-3", "title": "Approve the copy", "issue_type": "task", "status": "in_progress",
+                   "labels": ["human"]}]
+        self.assertEqual([i["id"] for i in w.beads_state(issues, ["Sam"])["human"]], ["x-2", "x-3"])
+
+    def test_footer_maps_other_plugins_skill_names(self):
+        repo = self.repo({"CLAUDE.md": "End each step with /acme:wrap; start with `/acme:where`.\n"
+                                       "Not these: https://x.io/acme:start, /yah:wrap, /acme:build, "
+                                       "/acme:wrap-up, /acme:deep-dive.\n",
+                          "plans/p.md": "Then run /acme:phases.\n",
+                          "STATE.md": "## Plan: P (plans/p.md)\n- [~] P1 Go\n"}, branch="feat/a")
+        self.assertEqual(self.where(repo, "--brief").splitlines()[-1],
+                         FOOTER + " The plan or CLAUDE.md says /acme:where, /acme:wrap, /acme:phases; unless those "
+                                  "skills are listed, use /yah:where, /yah:wrap, /yah:phases.")
+        (self.cfg / "CLAUDE.md").write_text("Hard bugs: /zed:deep.\n", encoding="utf-8")  # the user's own
+        self.assertIn("/acme:phases, /zed:deep; unless", self.where(repo, "--brief"))
+        self.assertNotIn("The plan or CLAUDE.md", self.where(repo))  # the full view has no footer
+        self.assertEqual(self.where(self.repo(name="plain"), "--brief").splitlines()[-1],
+                         FOOTER + " The plan or CLAUDE.md says /zed:deep; unless those skills are listed, "
+                                  "use /yah:deep.")
 
     def test_you_from_config_beats_git_user_name(self):
         self.config(projects={"shop": {"you": ["Nobody"]}})
@@ -354,6 +520,79 @@ class WhereTests(Base):
         self.config(recent_days=0)  # the cache is now too old to count
         self.assertEqual(self.py("where.py", "--brief")[0], "")
 
+    def test_protects_the_phase_base_and_the_branch_head_was_cut_from(self):
+        repo = self.repo(branch="main")  # no plan, no remote, no gh
+        self.git(repo, "checkout", "-q", "-b", "aryan_dev")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "dev")
+        self.git(repo, "checkout", "-q", "-b", "feat/x")  # tip is HEAD: 0 commits away, main is 1
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["ancestors"], s["bases"]), (["aryan_dev"], []))
+        self.assertIn("aryan_dev", s["protected"])
+        self.assertIn("PROD    `aryan_dev` inferred: this branch was cut from it. Never push or commit it; "
+                      "set prod in config.json", self.where(repo))
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        self.assertEqual(json.loads(self.where(repo, "--json"))["ancestors"], ["aryan_dev"])
+        self.git(repo, "checkout", "-q", "-b", "docs/y", "aryan_dev")  # a docs PR branch, merged into this one
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "docs")
+        self.git(repo, "checkout", "-q", "feat/x")
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge docs/y", "docs/y")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["ancestors"], ["aryan_dev"])  # docs/y is only a second parent, and nearer by B..HEAD
+        self.assertNotIn("docs/y", s["protected"])
+        self.assertIn("aryan_dev", s["protected"])
+        self.assertEqual((s["git"]["base"], s["git"]["base_ahead"]), ("aryan_dev", 2))  # work + the merge
+        self.assertIn("BRANCH  feat/x  clean, 2 ahead of aryan_dev, no upstream", self.where(repo))
+        (repo / "STATE.md").write_text("## Plan: X\n- [~] P1 Fix | branch feat/x | base staging\n", encoding="utf-8")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["bases"], ["staging"])
+        self.assertTrue({"aryan_dev", "staging"} <= set(s["protected"]), s["protected"])
+        self.assertIn("PROD    `staging` inferred: phase PRs target it.", self.where(repo))
+        cache = next(self.data.glob("where-*.json"))  # where open PRs landed when gh last saw any
+        cache.write_text(json.dumps(dict(json.loads(cache.read_text("utf-8")), landing=["feat/x", "live"])), "utf-8")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertTrue({"live", "aryan_dev"} <= set(s["protected"]), s["protected"])
+        self.assertNotIn("feat/x", s["protected"])  # the phase's own branch never is
+        (repo / "STATE.md").unlink()
+        cache.unlink()
+        self.git(repo, "checkout", "-q", "main")  # nothing main descends from: only trunks, so no PROD line
+        self.assertNotIn("PROD", self.where(repo))
+        self.git(repo, "checkout", "-q", "-b", "feat/old")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "old")
+        self.git(repo, "checkout", "-q", "main")
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge feat/old", "feat/old")  # an ancestor of main now
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["ancestors"], [])  # on a trunk, "cut from" means nothing
+        self.assertNotIn("feat/old", s["protected"])
+        self.assertNotIn("PROD", self.where(repo))
+
+    def test_bd_is_null_without_beads_and_pinned_to_this_repos_beads(self):
+        bin_dir, fake = self.tmp / "bin", self.tmp / "fake_bd.py"
+        bin_dir.mkdir()
+        fake.write_text("import json, os\nprint(json.dumps([{'id': 'x-1', 'issue_type': 'task', 'status': "
+                        "'in_progress', 'title': os.environ.get('BEADS_DIR', '-')}]))\n", encoding="utf-8")
+        if os.name == "nt":
+            (bin_dir / "bd.cmd").write_text(f'@"{sys.executable}" "{fake}" %*\r\n', encoding="utf-8")
+        else:
+            (bin_dir / "bd").write_text(f"#!{sys.executable}\n" + fake.read_text("utf-8"), encoding="utf-8")
+            (bin_dir / "bd").chmod(0o755)
+        self.env.update(PATH=str(bin_dir) + os.pathsep + self.env.get("PATH", ""),
+                        BEADS_DIR=str(self.tmp / "other" / ".beads"))  # another repo's database
+        plain = self.repo(name="plain")
+        out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=plain)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((json.loads(out)["bd"], json.loads(out)["beads_dir"]), (None, None))
+        repo = self.beads_repo()
+        out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=repo)
+        s = json.loads(out)
+        self.assertEqual(s["beads_source"], "bd", err)
+        self.assertEqual(Path(s["beads"]["in_progress"][0]["title"]), repo / ".beads")
+        self.assertIsNone(s["bd"])  # the model's own bd calls would inherit the foreign BEADS_DIR
+        self.assertIn("BEADS_DIR", s["bd_note"])
+        del self.env["BEADS_DIR"]
+        s = json.loads(self.py("where.py", "--no-gh", "--json", cwd=repo)[0])
+        self.assertTrue(Path(s["bd"]).name.startswith("bd"))
+        self.assertIsNone(s["bd_note"])
+
     def test_same_named_repos_keep_separate_caches(self):
         (self.tmp / "a").mkdir()
         (self.tmp / "b").mkdir()
@@ -401,6 +640,28 @@ class PrLinesTests(unittest.TestCase):
         self.assertIn("stacked on #5", [ln for ln in lines if ln.startswith("#6")][0])
         lines, _ = w.pr_lines(prs, "main", None, limit=2)
         self.assertEqual(lines[-1], "+2 more (gh pr list)")
+
+    def test_prod_is_inferred_from_where_prs_land(self):
+        w = load_where()
+        prs = [{"headRefName": "feat/a", "baseRefName": "live"}, {"headRefName": "feat/b", "baseRefName": "feat/a"},
+               {"headRefName": "feat/c", "baseRefName": "live"}, {"headRefName": "fix", "baseRefName": "main"}]
+        with tempfile.TemporaryDirectory() as d:  # no remote: no origin/HEAD
+            subprocess.run(["git", "init", "-q", d], check=True)
+            self.assertEqual(w.landing(d, prs), ["live", "main"])
+            self.assertEqual(w.landing(d, None), [])
+        s = {"prod": "", "trunks": "release", "landing": ["main", "live"]}
+        self.assertTrue(w.prod_line(s).startswith("`live` inferred"))
+        self.assertEqual(w.prod_line({**s, "landing": ["main", "release"]}), "")  # ordinary trunks say nothing
+        self.assertEqual(w.prod_line({**s, "prod": "main deploys"}), "main deploys")
+        phases = [{"branch": "p/1", "base": "aryan_dev"}, {"branch": "p/2", "base": "p/1"},  # p/2 is stacked
+                  {"branch": "p/3", "base": "aryan_dev"}, {"branch": "p/4", "base": "main"}, {"branch": "", "base": ""}]
+        self.assertEqual(w.phase_bases(phases), ["aryan_dev", "main"])
+        s2 = {**s, "bases": ["main", "aryan_dev"], "ancestors": ["feat/q"]}
+        self.assertTrue(w.prod_line(s2).startswith("`aryan_dev` inferred: phase PRs target it."))  # bases first
+        self.assertEqual(w.protected(s2), sorted(w.DEFAULT_TRUNKS | {"release", "live", "aryan_dev", "feat/q"}))
+        near = {**s, "landing": ["main"], "ancestors": ["feat/q"]}
+        self.assertTrue(w.prod_line(near).startswith("`feat/q` inferred: this branch was cut from it."))
+        self.assertEqual(w.prod_line({**near, "ancestors": ["feat/q", "main"]}), "")  # as near a trunk: say nothing
 
 
 # ---------------------------------------------------------------- setup.py
@@ -492,6 +753,20 @@ class SetupTests(Base):
         self.assertIn("statusLine", self.settings())
         self.setup_py("--uninstall")
         self.assertEqual(self.settings(), {})
+
+    def test_ultracode_opt_in_and_uninstall(self):
+        self.settings({**self.SETTINGS, "workflowSizeGuideline": "small"})
+        out, err, rc = self.setup_py("--tier", "max20", "--ultracode", "--yes")
+        self.assertEqual(rc, 0, err)
+        s = self.settings()
+        self.assertEqual((s["ultracode"], s["workflowSizeGuideline"]), (True, "medium"))
+        self.assertEqual({k: s[k] for k in self.SETTINGS}, self.SETTINGS)  # model, effort, env untouched
+        self.assertTrue(json.loads((self.data / "config.json").read_text("utf-8"))["ultracode"])
+        self.assertIn("ultracode  unchanged", self.setup_py("--ultracode", "--yes")[0])
+        self.setup_py("--uninstall")
+        s = self.settings()
+        self.assertNotIn("ultracode", s)
+        self.assertEqual(s["workflowSizeGuideline"], "small")
 
     def test_launcher_block(self):
         rc_file = self.home / ".bashrc"
