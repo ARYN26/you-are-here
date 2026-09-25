@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from yahlib import config, data_dir, utf8_stdout  # noqa: E402
 
 MAX_AGE = 3 * 86400
-OWN_RECALL = ("/yah:start", "/yah:resume")
+OWN_RECALL = ("/yah:start", "/yah:resume", "/yah:auto")
 
 
 def flag_path(sid):

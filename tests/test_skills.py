@@ -48,7 +48,7 @@ def body(name):
 class DescriptionTests(unittest.TestCase):
     def test_files_found(self):
         self.assertEqual({p.parent.name for p in SKILLS},
-                         {"deep", "phases", "resume", "setup", "start", "where", "wrap"})
+                         {"auto", "deep", "phases", "resume", "setup", "start", "where", "wrap"})
         self.assertEqual({p.stem for p in AGENTS}, {"deep", "scout"})
 
     def test_each_description_short(self):
@@ -60,7 +60,7 @@ class DescriptionTests(unittest.TestCase):
 
     def test_model_visible_total(self):
         visible = [f for f in SKILLS + AGENTS if model_visible(f)]
-        self.assertEqual(len(visible), 7)  # 5 skills + 2 agents; resume and setup are user-only
+        self.assertEqual(len(visible), 7)  # 5 skills + 2 agents; auto, resume and setup are user-only
         total = sum(len(parse(f)[0]["description"]) for f in visible)
         self.assertLessEqual(total, MAX_VISIBLE)
 
@@ -152,6 +152,28 @@ class StampTests(unittest.TestCase):
         text = body("phases")
         self.assertIn('"next_sha":"<HEAD>"', text)
         self.assertIn("- At: <git rev-parse --short HEAD>", text)
+
+
+class AutoTests(unittest.TestCase):
+    """/yah:auto is the launcher's first prompt: it routes to the other skills and never makes up work."""
+
+    def setUp(self):
+        self.meta, self.body = parse(ROOT / "skills/auto/SKILL.md")
+
+    def test_user_only(self):
+        self.assertEqual(self.meta.get("disable-model-invocation"), "true")  # the launcher sends it
+
+    def test_never_invents_a_task(self):
+        self.assertIn("Ask one question", self.body)
+        self.assertIn("Never invent a task", self.body)
+
+    def test_hands_off_to_the_skills(self):
+        for name in ("yah:start", "yah:phases", "yah:wrap", "yah:deep"):
+            self.assertIn(f"`{name}`", self.body)
+
+    def test_deep_on_every_tier_and_merges_stay_the_users(self):
+        self.assertIn("every plan tier", self.body)
+        self.assertIn("Never merge a PR", self.body)
 
 
 class BeadsTests(unittest.TestCase):
