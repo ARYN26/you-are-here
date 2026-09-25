@@ -1,7 +1,13 @@
 """run.py: `yah run`, which chains fresh headless sessions until the phase's PR is open and green.
 
-    yah run [TARGET] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--dry-run] [--model M]
-            [--plugin-dir DIR]
+    yah run [TARGET] [--plan] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--dry-run]
+            [--model M] [--plugin-dir DIR]
+
+--plan goes on past exit 0: once a phase's PR is open and green (or merged) and the phase is closed, it
+pins the next open phase and runs that, until none is left ("plan done", exit 0). The iteration cap is per
+phase; run_total_hours and the weekly pace hold for the whole run. A phase whose plan base is a phase
+branch that has since merged builds on where it merged, and a phase with no base stacks on the phase this
+run just finished while that PR is open; either way /yah:resume is told `base=<branch>`.
 
 TARGET is P<n> (a plan phase), #<pr> (a bare PR number works too, since shells treat # as a
 comment) or empty for the current phase, which is pinned at start and passed as P<n>. Each iteration
@@ -14,10 +20,12 @@ than an installed plugin, it passes --plugin-dir <checkout> so each session has 
 and after each iteration it reads the PR (gh) and the phase (where.py), and the first stop rule that
 matches sets the exit code:
 
-    0  PR open, green, phase closed: the merge is yours      4  iteration or wall-clock cap
-    2  needs you: error, denial, needs-human, blocked, or    5  refused to start
-       a session that ended without a YAH-RESULT line        6  PR merged or closed
+    0  PR open, green, phase closed: the merge is yours (--plan: no open phase left, "plan done")
+    2  needs you: error, denial, needs-human, blocked, or a session that ended without a YAH-RESULT line
     3  stalled: HEAD and NEXT unchanged twice in a row
+    4  iteration or wall-clock cap
+    5  refused to start
+    6  PR merged or closed (--plan goes on past a merged PR of a closed phase)
     7  weekly usage at run_week_stop_pct or over pace + pace_slack
     1  run.py itself failed
 
@@ -137,7 +145,8 @@ def command(path, args):
 
 
 def claude_argv(r):
-    prompt = " ".join(x for x in ("/yah:resume", r.target or r.label, r.mode) if x)
+    prompt = " ".join(x for x in ("/yah:resume", r.target or r.label, r.mode, r.base_arg and "base=" + r.base_arg)
+                      if x)
     argv = [r.claude, "-p", prompt, "--permission-mode", "auto", "--permission-prompts", "none",
             "--disallowedTools", *r.deny, "--max-budget-usd", "{:g}".format(r.budget),
             "--output-format", "stream-json", "--verbose", "--settings", guard_settings()]
@@ -170,8 +179,9 @@ def gh(r, *args):
         return None, "", ""
 
 
-def pr_view(r):
-    rc, out, _ = gh(r, "pr", "view", str(r.pr), "--json", PR_JSON)
+def pr_view(r, ref=None, fields=PR_JSON):
+    """`gh pr view` of ref (a number or a branch; default the run's PR) as a dict, or None when gh cannot say."""
+    rc, out, _ = gh(r, "pr", "view", str(ref or r.pr), "--json", fields)
     try:
         view = json.loads(out) if rc == 0 else None
     except ValueError:
@@ -210,23 +220,76 @@ def changes_requested(view):
                for rv in latest.values())
 
 
-def pr_from_where(s, ph):
+def pr_number(ph):
+    """A phase's PR number from its `pr` field (#12 or gh-12), else None."""
     m = re.search(r"(\d+)\s*$", (ph or {}).get("pr") or "")
-    if m:
-        return int(m.group(1))
-    heads = {p.get("headRefName"): p.get("number") for p in s.get("prs") or [] if isinstance(p, dict)}
+    return int(m.group(1)) if m else None
+
+
+def pr_from_where(s, ph, skip=()):
+    """The phase's PR: its `pr` field, else the open PR from the phase branch (or this branch). skip: the PRs of
+    phases this run finished, since their branch can still be checked out when the next phase starts."""
+    n = pr_number(ph)
+    if n is not None:
+        return n
+    heads = {p.get("headRefName"): p.get("number") for p in s.get("prs") or []
+             if isinstance(p, dict) and p.get("number") not in skip}
     return heads.get((ph or {}).get("branch") or (s.get("git") or {}).get("branch"))
 
 
+def phase_pr(r, ph):
+    """gh's number, state and baseRefName for a phase's PR (by number, else by branch), or {} when gh cannot say."""
+    n = pr_number(ph)
+    ref = str(n) if n is not None else (ph or {}).get("branch") or ""
+    if not ref or not r.gh:
+        return {}
+    view = pr_view(r, ref, "number,state,baseRefName") or {}
+    if n is not None:
+        view.setdefault("number", n)
+    return view
+
+
+def settle(r, base, why):
+    """(base, why) with a stacked base followed down while its phase's PR has merged: that branch may be
+    gone, and what it merged into holds its work."""
+    owner = {p.get("branch"): p for p in r.phases if p.get("branch")}
+    first, seen = base, set()
+    while base in owner and base not in seen:
+        seen.add(base)
+        v = phase_pr(r, owner[base])
+        if str(v.get("state") or "").upper() != "MERGED" or not v.get("baseRefName"):
+            break
+        hop = f"{owner[base]['label']}'s PR #{v.get('number')} merged into it"
+        base = v["baseRefName"]
+    return (base, why) if base == first else (base, f"{hop}; {why} is {first}")
+
+
 def pr_base(r, s):
-    """(branch, source): what the run's PR targets. The phase's base, else the open PR's base for the
-    phase branch (or this branch), else origin/HEAD, else PROD. ("", "") when nothing names it."""
-    if (r.phase or {}).get("base"):
-        return r.phase["base"], "the plan's base for " + r.label
+    """(branch, source): what the run's PR targets. The phase's base (settled), else the open PR's base for
+    the phase branch (or this branch), else in --plan the phase this run just finished, else origin/HEAD,
+    else PROD. ("", "") when nothing names it. Sets r.base_arg when /yah:resume cannot read the base from
+    the plan: a settled stacked base, or a stack on the previous phase."""
+    r.base_arg = ""
+    plan_base = (r.phase or {}).get("base")
+    if plan_base:
+        base, why = settle(r, plan_base, "the plan's base for " + r.label)
+        r.base_arg = "" if base == plan_base else base
+        return base, why
     mine = (r.phase or {}).get("branch") or (s.get("git") or {}).get("branch")
+    done = {d[1] for d in r.done}  # a finished phase's branch can still be checked out: its PR is not this one's
     for p in s.get("prs") or []:
-        if isinstance(p, dict) and p.get("baseRefName") and (p.get("number") == r.pr or p.get("headRefName") == mine):
+        if isinstance(p, dict) and p.get("baseRefName") and p.get("number") not in done \
+                and (p.get("number") == r.pr or p.get("headRefName") == mine):
             return p["baseRefName"], f"the base of PR #{p.get('number')}"
+    if r.prev:  # what evaluate last read of the phase this run just finished
+        name = f"{r.prev['label']}'s PR {r.prev['pr']}"
+        own = (r.phase or {}).get("branch")
+        if r.prev["pr_state"] == "OPEN" and r.prev.get("branch") and r.prev["branch"] != own:
+            r.base_arg = r.prev["branch"]
+            return r.base_arg, f"stacked on {name}, still open"
+        if r.prev["pr_state"] == "MERGED" and r.prev.get("merged_into"):
+            r.base_arg = r.prev["merged_into"]
+            return r.base_arg, f"where {name} merged"
     ref = (run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], r.top, timeout=3) or "").strip()
     if ref.startswith("origin/"):
         return ref[7:], "origin/HEAD"
@@ -238,14 +301,24 @@ def refresh(r, s=None):
     s = s or where.collect(r.top, use_gh=bool(r.gh) and not r.pr) or {}
     guard(r, s.get("protected") or [])
     b = s.get("state") or {}
-    r.labels = [p.get("label") for p in b.get("phases") or []]
-    if r.label is None and not r.target:  # empty TARGET: pin the phase that is current now
+    r.phases = plan_phases(r, b)
+    if r.label is None and not r.target and r.phases:  # empty TARGET: pin the phase that is current now
         r.label = (b.get("phase") or b.get("next_phase") or {}).get("label")
-    r.phase = next((p for p in b.get("phases") or [] if p.get("label") == r.label), None) if r.label else None
+    r.phase = next((p for p in r.phases if p.get("label") == r.label), None) if r.label else None
     r.next = (r.phase or {}).get("next") or (s.get("state_md") or {}).get("next") or ""
     r.head = (run(["git", "rev-parse", "--short", "HEAD"], r.top, timeout=5) or "").strip() or "?"
     if not r.pr:
-        r.pr = pr_from_where(s, r.phase)
+        r.pr = pr_from_where(s, r.phase, {d[1] for d in r.done})
+
+
+def plan_phases(r, b):
+    """The phases of the plan this run started on (pinned at the first read). Once that plan has no open phase,
+    where.py shows the next `## Plan:` with one, and its P<n> labels are not this run's."""
+    plan = b.get("plan") or {}
+    key = (plan.get("id"), plan.get("spec") or plan.get("title"))
+    if r.plan_key is None:
+        r.plan_key = key
+    return [p for p in b.get("phases") or [] if isinstance(p, dict)] if key == r.plan_key else []
 
 
 def week_usage(r):
@@ -280,11 +353,11 @@ def evaluate(r, wait=True):
     r.mode, r.checks = "build", ""
     if r.pr and r.gh:
         view = pr_view(r)
-        state = str((view or {}).get("state") or "").upper()
+        state = r.pr_state = str((view or {}).get("state") or "").upper()
         r.url = (view or {}).get("url") or r.url
         if (view or {}).get("baseRefName"):  # the PR's own base: protect it, and it is what the PR targets
             guard(r, [view["baseRefName"]])
-            r.base, r.base_from = view["baseRefName"], f"the base of PR #{r.pr}"
+            r.base, r.base_from, r.base_arg = view["baseRefName"], f"the base of PR #{r.pr}", ""
         if state in ("MERGED", "CLOSED"):
             return 6, f"PR #{r.pr} is {state.lower()}."
         if state == "OPEN":
@@ -406,8 +479,9 @@ def read_stream(proc, raw, it, r):
 
 
 def iterate(r):
-    """One headless session. Returns its summary dict."""
+    """One headless session. Returns its summary dict. r.n counts the phase's sessions, r.total the run's."""
     r.n += 1
+    r.total += 1
     argv = claude_argv(r)
     say(f"[yah] iteration {r.n}/{r.cap}: {argv[2]}")
     it = {"n": r.n, "done": False, "is_error": True, "cost": 0.0, "turns": 0, "denials": [], "tag": "", "error": ""}
@@ -415,7 +489,7 @@ def iterate(r):
     limit = min(r.cfg["run_iteration_minutes"], max(left, 0.1))
     kw = {} if os.name == "nt" else {"start_new_session": True}
     timed_out = False
-    with open(r.log.with_name(f"{r.log.stem}-{r.n}.jsonl"), "wb") as raw:
+    with open(r.log.with_name(f"{r.log.stem}-{r.total}.jsonl"), "wb") as raw:
         try:
             proc = subprocess.Popen(command(argv[0], argv[1:]), cwd=r.top, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -504,12 +578,54 @@ def notify(title, msg):
         pass
 
 
+def goes_on(r, code):
+    """--plan: the stop rule says the phase is done, so the run goes on: its PR open and green, or merged and
+    the phase closed. A closed PR, or a merged one whose phase is still open, stops the run."""
+    return bool(r.chain) and (code == 0 or (code == 6 and r.pr_state == "MERGED"
+                                            and (r.phase or {}).get("status") == "closed"))
+
+
+def advance(r, code, reason):
+    """--plan: the stop rule said the phase is done (its PR open and green, or merged, and the phase closed),
+    so pin the next open phase and go on. (None, "") to run again, else the (code, reason) to stop with."""
+    if not goes_on(r, code):
+        return code, reason
+    merged = r.pr_state == "MERGED"
+    it = r.last or {}
+    if it.get("denials") or it.get("word") in ("needs-human", "blocked"):  # evaluate reads the PR before these
+        return 2, f"{needs_you(r)} ({r.label}'s PR #{r.pr} is {'merged' if merged else 'open and green'}.)"
+    r.done.append((r.label, r.pr, merged))
+    s = where.collect(r.top, use_gh=bool(r.gh)) or {}
+    done = [d[0] for d in r.done]
+    nxt = next((p for p in plan_phases(r, s.get("state") or {})
+                if p.get("status") != "closed" and p.get("label") not in done), None)
+    parts = ", ".join(f"{label} PR #{pr} {'merged' if m else 'green'}" for label, pr, m in r.done)
+    if nxt is None:
+        return 0, f"plan done: {parts}." + (" The merges are yours." if not all(d[2] for d in r.done) else "")
+    human = {h.get("id") for h in (s.get("state") or {}).get("human") or [] if isinstance(h, dict)}
+    if nxt.get("id") in human:
+        return 2, f"needs you: {nxt['label']} ({nxt.get('title')}) is marked (you). So far: {parts}."
+    r.prev = dict(r.phase or {}, label=r.label, pr=f"#{r.pr}", pr_state=r.pr_state, merged_into=r.base)
+    r.label = r.target = nxt["label"]
+    r.pr, r.url, r.pr_state, r.n, r.stalls, r.last, r.waiting = None, "", "", 0, 0, None, False
+    refresh(r, s)
+    r.base, r.base_from = pr_base(r, s)
+    # Nothing in this run pushes the finished phase's branch again, nor the new phase's base.
+    guard(r, [r.base_arg] + ([r.prev.get("branch")] if r.prev.get("branch") != (r.phase or {}).get("branch") else []))
+    line = "{} done: PR {} {}. Next: {} on {}".format(
+        r.prev["label"], r.prev["pr"], "merged" if r.done[-1][2] else "open and green", r.label,
+        f"{r.base} ({r.base_from})" if r.base else "no base")
+    say("[yah] " + line)
+    log(r, line)
+    return None, ""
+
+
 def finish(r, code, reason):
-    log(r, f"stop, exit {code}: {reason} Cost ${r.cost:.2f} over {r.n} iterations.")
+    log(r, f"stop, exit {code}: {reason} Cost ${r.cost:.2f} over {r.total} iterations.")
     notify(f"yah run {r.key}", reason)
     say(f"[yah] stop (exit {code}): {reason}")
     say(f"[yah] PR {r.url or (f'#{r.pr}' if r.pr else 'none')} | cost ${r.cost:.2f} | "
-        f"{r.n} iterations | log {r.log}")
+        f"{r.total} iterations | log {r.log}")
 
 
 # ---------------------------------------------------------------- main
@@ -529,6 +645,8 @@ def dry_run(r):
     code, reason = evaluate(r, wait=False)
     if code is None and not r.base:
         code, reason = 5, "run refused: " + no_base(r)
+    if goes_on(r, code):
+        reason += " With --plan, a done phase goes on to the next open one."
     c, usage = r.cfg, week_usage(r)
     phase = f"phase {r.label}" if r.label else "no plan phase"
     say("[yah] dry run: nothing is spawned")
@@ -536,6 +654,13 @@ def dry_run(r):
     say(f"target  {r.target or 'current phase'} ({phase})  PR {f'#{r.pr}' if r.pr else 'none yet'}"
         + (f"  {r.url}" if r.url else ""))
     say(f"base    {r.base} ({r.base_from})" if r.base else "base    unknown")
+    if r.chain:
+        todo, prev, steps = [p for p in r.phases if p.get("status") != "closed"], "", []
+        for p in todo:
+            base = r.base if p.get("label") == r.label else p.get("base") or (f"{prev}'s branch" if prev else "?")
+            steps.append(f"{p.get('label')} {p.get('branch') or '(new branch)'} <- {base}")
+            prev = p.get("label")
+        say(f"plan    {' | '.join(steps)}; each phase until its PR is green, then the next")
     say(f"plugin  {r.plugin_src}")
     say(f"protect {', '.join(r.protected)}")
     say(f"argv    {shlex.join(claude_argv(r))}")
@@ -557,10 +682,12 @@ def main():
     ap = argparse.ArgumentParser(prog="yah run", description="Chain headless /yah:resume sessions until the "
                                  "phase's PR is open and green. It never merges.")
     ap.add_argument("target", nargs="?", default="", help="P<n>, #<pr> (or the bare number), or empty")
+    ap.add_argument("--plan", action="store_true", help="after the phase's PR is green, go on to the next open "
+                    "phase until the plan is done")
     grp = ap.add_mutually_exclusive_group()
     grp.add_argument("--cwd", help="run in this repo")
     grp.add_argument("--project", help="run in this project (config.json or seen by where.py)")
-    ap.add_argument("--iterations", type=int, help="max sessions (config run_iterations)")
+    ap.add_argument("--iterations", type=int, help="max sessions per phase (config run_iterations)")
     ap.add_argument("--budget", type=float, help="--max-budget-usd per session (config run_budget_usd)")
     ap.add_argument("--dry-run", action="store_true", help="show the argv, DENY list, caps and evaluation")
     ap.add_argument("--model", help="passed to claude as --model")
@@ -570,6 +697,8 @@ def main():
     target = parse_target(a.target)
     if target is None:
         return refuse(f"TARGET must be P<n>, #<pr> or empty, not '{a.target}'.")
+    if a.plan and target[:1] == "#":
+        return refuse("--plan follows the plan's phases, so TARGET must be P<n> or empty, not a PR.")
     cwd = a.cwd or os.getcwd()
     if a.project:
         projects = where.known_projects()
@@ -594,7 +723,7 @@ def main():
     # (or landed when gh last saw any), origin/HEAD and the branch HEAD was cut from, beside the trunks.
     s = where.collect(str(top), use_gh=bool(gh_path)) or {}
     fence = protected(trunks | set(s.get("protected") or []), prod)
-    if not target and branch in fence:
+    if not target and not a.plan and branch in fence:  # --plan pins its phase from the plan, like P<n>
         return refuse(f"you are on {branch}, a trunk or the PROD branch. Check out the phase branch first, "
                       "or pass P<n> and resume creates it from base.")
     claude = shutil.which("claude")
@@ -610,14 +739,17 @@ def main():
         cap=int(cfg["run_iterations"] if a.iterations is None else a.iterations),
         budget=cfg["run_budget_usd"] if a.budget is None else a.budget,
         pr=int(target[1:]) if target[:1] == "#" else None, label=target if target[:1] == "P" else None,
-        phase=None, labels=[], next="", head="", mode="build", checks="", url="", waiting=False, week=None,
-        pace_logged=False, n=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None)
+        phase=None, phases=[], plan_key=None, next="", head="", mode="build", checks="", url="", waiting=False,
+        week=None, pace_logged=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
+        chain=a.plan, prev=None, done=[], pr_state="", base_arg="")
     refresh(r, s)
-    if target[:1] == "P" and r.phase is None:
-        return refuse(f"no phase {target} in this repo's plan. "
-                      + (f"Phases: {', '.join(r.labels)}." if r.labels
-                         else "There is no plan in STATE.md (or beads, if you already use it)."))
+    if (target[:1] == "P" or a.plan) and r.phase is None:
+        what = f"no phase {target} in this repo's plan. " if target else "--plan found no open phase in this repo's plan. "
+        labels = [p.get("label") for p in r.phases]
+        return refuse(what + (f"Phases: {', '.join(labels)}." if labels
+                              else "There is no plan in STATE.md (or beads, if you already use it)."))
     r.base, r.base_from = pr_base(r, s)
+    guard(r, [r.base_arg])  # a base the plan does not name is protected like one it does
     if not r.base and not r.pr:  # a known PR names its base once evaluate reads it
         return refuse(no_base(r))
     if a.dry_run:
@@ -631,6 +763,9 @@ def main():
         while True:
             code, reason = evaluate(r)
             if code is not None:
+                code, reason = advance(r, code, reason)
+                if code is None:  # a new phase: its own stop rules (hours, week, its PR) before its first session
+                    continue
                 break
             if not r.base:  # the PR gh could not read names no base either
                 code, reason = 5, "run refused: " + no_base(r)

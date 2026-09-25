@@ -49,7 +49,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | `/yah:phases` | Turns an approved plan into phases in STATE.md. | One turn. Writes in your repo. |
 | `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). Works on every tier: when the account cannot use Fable, Claude Code runs the agent on the session's model. | Fable usage. See the plan table. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
-| `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops. The merge is yours. See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
+| `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops; with `--plan`, through every open phase. The merge is yours. See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
 | PostToolUse guard | The context guard again after each tool call, so wrap nudges reach a headless session, which has only one prompt. | Only inside `yah run` iterations: one local Python run per tool call. Interactive sessions never run it. |
 | Push guard | A PreToolUse hook on Bash and PowerShell that denies force pushes, pushes to protected branches and merges. See [Rails](#hands-free-runs-yah-run). | Only inside `yah run` iterations: one local Python run per Bash call. Interactive sessions never run it. |
 | Ultracode opt-in | Max 20x only, offered by `/yah:setup`: ultracode on in every session with workflows capped at medium size, plus a once-per-session rule for sizing workflows. See [Ultracode on Max 20x](#ultracode-on-max-20x). | About 80 tokens once per session. The spend is ultracode's own: xhigh effort and workflow agents. |
@@ -161,7 +161,7 @@ Ranking is word overlap, not semantic search. The title counts 3, tags 2, the TL
 Claude Code cannot `/clear` itself or start a new session from inside one. No hook, skill or tool can. So the wrap, clear, continue loop needs an outside driver, and `yah run` is that driver. Run it in a terminal, not inside Claude Code:
 
 ```
-yah run [TARGET] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--model M] [--plugin-dir DIR] [--dry-run]
+yah run [TARGET] [--plan] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--model M] [--plugin-dir DIR] [--dry-run]
 ```
 
 Without the launcher, run `python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/run.py"` with the same arguments (`python` on Windows). Try `--dry-run` first.
@@ -169,8 +169,9 @@ Without the launcher, run `python3 "$HOME/.claude/plugins/marketplaces/you-are-h
 | Argument | Meaning |
 |---|---|
 | `TARGET` | `P<n>` (a plan phase), `#<pr>`, or empty for the current phase. Shells treat `#` as a comment, so pass `12` or `'#12'`. A `P<n>` with no such phase is refused (exit 5). An empty TARGET is pinned to the current phase at start, so a wrap that claims the next phase cannot move the run. |
+| `--plan` | Go on past exit 0: once the phase's PR is open and green (or merged) and the phase is closed, run the next open phase, until none is left. TARGET must be `P<n>` or empty; an empty one works from a trunk checkout too, since the plan names the phase. See [Whole plans](#whole-plans---plan). |
 | `--cwd DIR`, `--project NAME` | The repo to run in. Default: the current folder. `--project` refuses (exit 5) when two known repos share the name; use `--cwd` then. |
-| `--iterations N` | Max sessions. Default `run_iterations`, 8. |
+| `--iterations N` | Max sessions per phase. Default `run_iterations`, 8. |
 | `--budget USD` | `--max-budget-usd` per session. Default `run_budget_usd`, by tier (below). |
 | `--model M`, `--plugin-dir DIR` | Passed to `claude`. Without `--plugin-dir`, a run.py started from a yah checkout (not from `plugins/cache` or `plugins/marketplaces`) passes `--plugin-dir <checkout>` itself, so each session has `/yah:resume`. `--dry-run` prints which one it used. |
 | `--dry-run` | Prints the resolved argv, the DENY list, the caps and what it would do now. Spawns nothing, but still calls `gh`. |
@@ -189,14 +190,24 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 
 | Exit | When |
 |---|---|
-| 6 | The PR was merged or closed. |
-| 0 | The PR is open, its checks pass (or it has none), no CHANGES_REQUESTED review is newer than the head commit, and the phase is closed (or TARGET was a PR). "The merge is yours." |
+| 6 | The PR was merged or closed. With `--plan`, a merged PR whose phase is closed moves on to the next phase instead. |
+| 0 | The PR is open, its checks pass (or it has none), no CHANGES_REQUESTED review is newer than the head commit, and the phase is closed (or TARGET was a PR). "The merge is yours." With `--plan`: no open phase is left, "plan done", with each phase's PR. |
 | 2 | The last session needs you: it ended in an error (a timeout included), a permission was denied during it, it ended `needs-human` or `blocked`, or it ended without a `YAH-RESULT:` line (usually the plugin was not loaded). The denial or question is printed. |
 | 3 | Stalled: HEAD and NEXT unchanged for 2 iterations in a row. |
 | 4 | The iteration cap, or `run_total_hours` of wall clock. |
 | 7 | Weekly usage at or over `run_week_stop_pct`, or more than `pace_slack` points ahead of pace. |
 | 5 | Refused: not a git repo, on a trunk or the PROD branch with no TARGET, `claude` not on PATH, `gh` missing, an invalid TARGET, a `P<n>` with no such phase, an unknown or ambiguous project, or no way to name the branch the PR targets (no base in the plan, no open PR, no `origin/HEAD` and no `prod` in config), so it cannot be protected. That last check also runs before each iteration. |
 | 1, 130 | run.py itself failed, or you pressed Ctrl-C. |
+
+#### Whole plans: `--plan`
+
+`yah run --plan` keeps going where a plain run stops. When the phase's PR is open and green (or merged) and its phase is closed, it pins the next open phase and runs that. It stops with exit 0, "plan done", when no open phase is left in the plan it started on (another `## Plan:` below is not run). It stops with exit 2 when the next phase is marked `(you)`, or when the finished phase's last session asked for you or hit a denial. It never merges: each green PR waits for you, and the finished phase's branch is protected for the rest of the run.
+
+A new phase's base comes from the plan. There are two exceptions, and in both `/yah:resume` gets `base=<branch>` and writes it to the phase line:
+- If the plan's base is another phase's branch whose PR has merged, the phase builds on where that PR merged, since the branch may be gone.
+- If the phase has no base, it stacks on the phase the run just finished, while that PR is open.
+
+The iteration cap is per phase. `run_total_hours` and the weekly pace hold for the whole run. `--dry-run` prints the phase order with each base.
 
 **Rails.** Every iteration gets two layers. Neither is a sandbox (see Limits). run.py never passes `--bare`, `bypassPermissions` or `--dangerously-skip-permissions`. Protected branches are `main`, `master`, your `trunks` (default also `develop` and `dev`), the branch your `prod` text names, and, with no config needed, what where.py infers from git alone: the plan's phase bases, the branch open PRs land on (cached, so a closed PR still counts), `origin/HEAD`, and on a work branch the nearest branch on its first-parent chain, the one it was cut from (a branch merged into it, like a docs PR, is not one). When that chain holds only trunks, the nearest branch merged into it is protected too: a base synced in with `git merge` looks just like a merged docs PR to git. The set only grows during a run, including the base of the PR it follows.
 
@@ -213,7 +224,7 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 
 | Key | Default | Meaning |
 |---|---|---|
-| `run_iterations` | 8 | Max sessions per run. |
+| `run_iterations` | 8 | Max sessions per phase. |
 | `run_budget_usd` | pro 5, max5 10, max20 15, api 5 | `--max-budget-usd` per iteration, from your tier. |
 | `run_iteration_minutes` | 45 | Wall clock per iteration, or the time left in the run if that is less. At the cap the whole process tree is killed. |
 | `run_total_hours` | 6 | Wall clock for the whole run. |
