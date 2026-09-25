@@ -73,6 +73,10 @@ python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --tie
 
 Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell` (prints the snippet), `--install-launcher RCFILE`, `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below) and `--yes` (no prompts).
 
+**Updating**
+
+yah sets no version number, so every commit to main counts as a new version. Claude Code does not auto-update third-party marketplaces unless you turn it on: `/plugin` → **Marketplaces** → `you-are-here` → **Enable auto-update**. Without that, update by hand with `claude plugin update yah@you-are-here` (or `/plugin` → **Installed** → yah → **Update now**), then run `/reload-plugins` or start a new session. The statusline and the launcher run from the marketplace clone, so they pick up the update too.
+
 Running a fork of yah, or another plugin with the same hooks? Disable it while yah is installed (`/plugin disable <name>`); otherwise every hook and skill listing runs twice.
 
 **Requirements**
