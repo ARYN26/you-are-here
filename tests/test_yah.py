@@ -485,6 +485,75 @@ class WhereTests(Base):
         self.assertIn("NEXT    Ship the login fix, then tag v1.2.", full)
         self.assertNotIn("PLAN", full)
 
+    def test_state_md_matches_beads(self):
+        """The same plan in STATE.md and in beads gives the same plan, phase, NEXT and waiting-on-you."""
+        text = STATE_PLAN.replace("- [ ] P3 Emails", "- [ ] P3 Emails\n\n## Follow-ups\n"
+                                  "- [ ] Approve the payment copy (you)\n- [ ] Rotate the Stripe test keys (you)")
+        md = json.loads(self.where(self.repo({"STATE.md": text}, branch="checkout/payment", name="md"), "--json"))
+        bd = json.loads(self.where(self.beads_repo(), "--json"))
+
+        def view(s):
+            b = s["beads"]
+            return ({k: b["plan"][k] for k in ("title", "short", "spec", "done", "total")},
+                    [(p["label"], p["title"], p["status"], p["branch"]) for p in b["phases"]],
+                    {k: b["phase"][k] for k in ("label", "branch", "base", "next")},
+                    [h["title"] for h in b["human"]], s["protected"])
+        self.assertEqual(view(md)[:4], view(bd)[:4])
+        self.assertEqual(set(view(md)[4]), set(view(bd)[4]))
+
+    def test_state_md_you_marker(self):
+        text = ("## Plan: Launch\n- [x] P1 Build | branch launch/build\n- [ ] P2 Merge PR #12 (you) | PR #12\n\n"
+                "## Follow-ups\n- [ ] Rotate the test keys (you)\n- [x] Old console step (you)\n- [ ] Flaky e2e test\n"
+                "- [ ] Ask (you) about it later\n\n"
+                "## 2026-09-23\n- Next: Wait for review.\n")
+        repo = self.repo({"STATE.md": text})
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["beads"]["human"], [{"id": "STATE.md:3", "title": "P2 Merge PR #12"},
+                                               {"id": "STATE.md:6", "title": "Rotate the test keys"}])
+        self.assertEqual((s["beads"]["plan"]["total"], s["beads"]["next_phase"]["label"]), (2, "P2"))
+        self.assertNotIn("human", s["state_md"])
+        full = self.where(repo)
+        self.assertIn("YOU     STATE.md:3  P2 Merge PR #12", full)
+        self.assertIn("        STATE.md:6  Rotate the test keys", full)
+        self.assertIn("2 waiting on you", self.where(repo, "--brief"))
+        cache = next(self.data.glob("where-*.json"))  # the statusline's "for you" count
+        self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))["human"], 2)
+
+    def test_state_md_you_after_fields_and_fences(self):
+        text = ("## Plan: Launch\n- [ ] P1 Ship | branch launch/ship | PR #13 (you)\n\n"
+                "```markdown\n- [ ] An example line (you)\n```\n")
+        s = json.loads(self.where(self.repo({"STATE.md": text}), "--json"))
+        self.assertEqual(s["beads"]["human"], [{"id": "STATE.md:2", "title": "P1 Ship"}])
+        p = s["beads"]["phases"][0]
+        self.assertEqual((p["title"], p["branch"], p["pr"]), ("Ship", "launch/ship", "#13"))
+
+    def test_state_md_you_with_a_beads_plan(self):
+        repo = self.beads_repo()
+        (repo / "STATE.md").write_text("## Follow-ups\n- [ ] Rotate the prod keys (you)\n", encoding="utf-8")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["beads"]["plan"]["source"], "beads")
+        self.assertEqual([h["id"] for h in s["beads"]["human"]], ["yah-5", "yah-6", "STATE.md:2"])
+
+    def test_state_md_you_without_plan(self):
+        repo = self.repo({"STATE.md": STATE_DATED + "\n## Follow-ups\n- [ ] Rotate the test keys (you)\n"})
+        full = self.where(repo)
+        self.assertIn("NEXT    Ship the login fix, then tag v1.2.", full)
+        self.assertIn("YOU     STATE.md:11  Rotate the test keys", full)
+        self.assertNotIn("BEADS", full)
+        self.assertNotIn("PLAN", full)
+
+    def test_state_md_picks_the_running_plan(self):
+        done = "## Plan: Old (plans/old.md)\n- [x] P1 Shipped\n\n"
+        cases = {"running": done + "## Plan: New (plans/new.md)\n- [x] P1 A\n- [~] P2 B\n",
+                 "open": done + "## Plan: New (plans/new.md)\n- [ ] P1 A\n",
+                 "running over open": "## Plan: Old\n- [ ] P1 Later\n\n## Plan: New\n- [~] P1 Now\n"}
+        for i, (case, text) in enumerate(cases.items()):
+            with self.subTest(case=case):
+                s = json.loads(self.where(self.repo({"STATE.md": text}, name=f"r{i}"), "--json"))
+                self.assertEqual(s["beads"]["plan"]["title"], "New")
+        s = json.loads(self.where(self.repo({"STATE.md": done}, name="all-done"), "--json"))
+        self.assertEqual((s["beads"]["plan"]["title"], s["beads"]["phase"], s["beads"]["next_phase"]), ("Old", None, None))
+
     def test_path(self):
         repo = self.beads_repo()
         self.where(repo)

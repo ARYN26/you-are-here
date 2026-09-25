@@ -223,6 +223,11 @@ def pick_phase(state, views):
     return state
 
 
+def empty_state():
+    """The plan state with nothing in it: what beads_state fills, and what STATE.md merges into."""
+    return {"human": [], "in_progress": [], "open_count": 0, "plan": None, "phase": None, "next_phase": None}
+
+
 def beads_state(issues, you=()):
     """Pick the plan epic and its phases. Returns a dict or None.
 
@@ -253,9 +258,8 @@ def beads_state(issues, you=()):
     in_prog = [i for i in issues if i.get("status") == "in_progress" and i.get("issue_type") != "epic"]
     ready = [i for i in issues if i.get("status") == "open" and i.get("issue_type") != "epic"]
 
-    state = {"human": [{"id": h["id"], "title": h.get("title", "")} for h in human],
-             "in_progress": [{"id": i["id"], "title": i.get("title", "")} for i in in_prog],
-             "open_count": len(ready), "plan": None, "phase": None, "next_phase": None}
+    state = {**empty_state(), "human": [{"id": h["id"], "title": h.get("title", "")} for h in human],
+             "in_progress": [{"id": i["id"], "title": i.get("title", "")} for i in in_prog], "open_count": len(ready)}
     if not plans:
         return state
 
@@ -290,6 +294,33 @@ def beads_state(issues, you=()):
 
 PHASE_LINE = re.compile(r"^\s*[-*]\s*\[([ xX~>])\]\s*(.+)$")
 STATUS = {"x": "closed", "~": "in_progress", ">": "in_progress", " ": "open"}
+YOU_MARK = re.compile(r"\s*\(you\)\s*$", re.I)
+
+
+def md_line(ln):
+    """A checkbox line as (status, title, fields, you), or None. `(you)` may end the title or the line."""
+    pm = PHASE_LINE.match(ln)
+    if not pm:
+        return None
+    rest = pm.group(2)
+    you = bool(YOU_MARK.search(rest))
+    parts = [p.strip() for p in re.split(r"[|·]", YOU_MARK.sub("", rest))]
+    you = you or bool(YOU_MARK.search(parts[0]))
+    return STATUS[pm.group(1).lower()], YOU_MARK.sub("", parts[0]).strip(), parts[1:], you
+
+
+def md_human(file, text):
+    """Open or in-progress checkbox lines marked `(you)`, anywhere in the file outside code fences:
+    STATE.md's `human` label. The id is file:line, so the model can go straight to it."""
+    out, fence = [], False
+    for n, ln in enumerate(text.splitlines(), 1):
+        if ln.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        ml = None if fence else md_line(ln)
+        if ml and ml[0] != "closed" and ml[3]:
+            out.append({"id": f"{file}:{n}", "title": ml[1]})
+    return out
 
 
 def md_plan(file, head, body, nxt):
@@ -298,15 +329,15 @@ def md_plan(file, head, body, nxt):
     title, spec = (m.group(1), m.group(2) or "") if m else (head, "")
     views = []
     for ln in body.splitlines():
-        pm = PHASE_LINE.match(ln)
-        if not pm:
+        ml = md_line(ln)
+        if not ml:
             continue
-        parts = [p.strip() for p in re.split(r"[|·]", pm.group(2))]
-        lm = re.match(r"(P\d+)\b[\s:.-]*(.*)", parts[0])
-        label, name = (lm.group(1), lm.group(2)) if lm else (f"P{len(views) + 1}", parts[0])
-        v = {"id": file, "label": label, "title": name or parts[0], "status": STATUS[pm.group(1).lower()],
+        status, text, fields, _ = ml
+        lm = re.match(r"(P\d+)\b[\s:.-]*(.*)", text)
+        label, name = (lm.group(1), lm.group(2)) if lm else (f"P{len(views) + 1}", text)
+        v = {"id": file, "label": label, "title": name or text, "status": status,
              "branch": "", "base": "", "pr": "", "next": ""}
-        for p in parts[1:]:
+        for p in fields:
             fm = re.match(r"(branch|base)\s+(\S+)$", p, re.I)
             pr = re.match(r"PR\s*#?(\d+)$", p, re.I)
             if fm:
@@ -337,19 +368,22 @@ def state_md(top):
             return text[heads[i].end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
 
         dated = [i for i, m in enumerate(heads) if re.match(r"\d{4}-\d{2}-\d{2}", m.group(1))]
-        plan = next((i for i, m in enumerate(heads) if re.match(r"Plan:", m.group(1), re.I)), None)
-        out: dict = {"file": name, "head": "", "next": "", "at": "", "plan": None}
+        plans = [i for i, m in enumerate(heads) if re.match(r"Plan:", m.group(1), re.I)]
+        out: dict = {"file": name, "head": "", "next": "", "at": "", "plan": None, "human": md_human(name, text)}
         if dated:
             i = max(dated, key=lambda j: heads[j].group(1)[:10])  # the newest date, whatever the order
             nxt = re.search(r"^- Next:\s*(.+(?:\n(?!- )\s+.+)*)", body(i), re.M)
             at = re.search(r"^- At:\s*(" + SHA.pattern + r")\b", body(i), re.M)  # the commit NEXT was written at
             out.update(head=heads[i].group(1), next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)),
                        at=at.group(1) if at else "")
-        elif plan is None:
+        elif not plans:
             lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
             out["next"] = lines[0] if lines else ""
-        if plan is not None:
-            out["plan"] = md_plan(name, heads[plan].group(1), body(plan), out["next"])
+        # Like beads' running epic: the plan with a phase in progress, else one with an open phase, else the first.
+        # A finished plan left above the next one does not hide it.
+        parsed = [p for p in (md_plan(name, heads[i].group(1), body(i), out["next"]) for i in plans) if p]
+        out["plan"] = next((p for p in parsed if p["phase"]), None) or \
+            next((p for p in parsed if p["next_phase"]), None) or (parsed[0] if parsed else None)
         return out
     return None
 
@@ -658,8 +692,12 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     bstate = beads_state(issues, you) if issues is not None else None
     sm = state_md(top)
     mdplan = sm.pop("plan", None) if sm else None
+    mdhuman = sm.pop("human", []) if sm else []
     if mdplan and not (bstate or {}).get("plan"):  # beads wins when it has a plan epic
-        bstate = {**(bstate or {"human": [], "in_progress": [], "open_count": 0}), **mdplan}
+        bstate = {**(bstate or empty_state()), **mdplan}
+    if mdhuman:  # a `(you)` line waits on you whichever source holds the plan
+        bstate = bstate or empty_state()
+        bstate["human"] = bstate["human"] + mdhuman
     phases = (bstate or {}).get("phases") or []
     mine = {v.get("branch") for v in phases} - {"", None}
     # A phase's own branch (a merged lower phase's, say) is never a landing, even when a PR still targets it.
@@ -797,7 +835,7 @@ def render(s, brief=False):
         if b.get("in_progress"):
             for i in b["in_progress"][:3]:
                 lines.append(f"DOING   {i['id']}  {i['title'][:70]}")
-        if s["beads"] is not None and not s["beads"].get("plan"):
+        if s["beads_source"] and s["beads"] is not None and not s["beads"].get("plan"):
             lines.append(f"BEADS   {b.get('open_count', 0)} open, no plan epic (/yah:phases after a plan is approved)")
     for i, h in enumerate((b.get("human") or [])[:2]):
         more = f"  (+{len(b['human']) - 2} more)" if i == 1 and len(b["human"]) > 2 else ""
