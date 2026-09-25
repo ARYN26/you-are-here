@@ -571,11 +571,13 @@ class WhereTests(Base):
 
     def test_tasks_row_for_open_work_without_a_plan(self):
         issues = [{"id": "x-1", "title": "Fix the flaky test", "issue_type": "task", "status": "in_progress"},
-                  {"id": "x-2", "title": "Bump the deps", "issue_type": "task", "status": "open"}]
+                  {"id": "x-2", "title": "Bump the deps", "issue_type": "task", "status": "open"},
+                  {"id": "x-3", "title": "Rotate the keys", "issue_type": "task", "status": "open", "labels": ["human"]}]
         repo = self.repo({".beads/issues.jsonl": "\n".join(json.dumps(i) for i in issues) + "\n"})
         full = self.where(repo)
         self.assertIn("DOING   x-1  Fix the flaky test", full)
-        self.assertIn("TASKS   1 open, no plan (/yah:phases after a plan is approved)", full)
+        self.assertIn("TASKS   1 open, no plan (/yah:phases after a plan is approved)", full)  # a human bead is not
+        self.assertIn("YOU     x-3  Rotate the keys", full)  # an open task, like a (you) line
         self.assertNotIn("BEADS", full)
         (repo / "STATE.md").write_text("## Follow-ups\n- [ ] Update the README\n", encoding="utf-8")
         self.assertIn("TASKS   2 open, no plan", self.where(repo))  # both sources count
@@ -611,7 +613,8 @@ class WhereTests(Base):
         self.assertNotIn("PLAN", full)
 
     def test_state_md_matches_beads(self):
-        """The same plan in STATE.md and in beads gives the same plan, phase, NEXT and waiting-on-you."""
+        """The same plan in STATE.md and in beads gives the same plan, phase, NEXT, waiting-on-you, work in
+        progress and open tasks: phases are none of the last two, in either source."""
         md = json.loads(self.where(self.state_repo(name="md"), "--json"))
         bd = json.loads(self.where(self.beads_repo(), "--json"))
 
@@ -620,9 +623,11 @@ class WhereTests(Base):
             return ({k: b["plan"][k] for k in ("title", "short", "spec", "done", "total")},
                     [(p["label"], p["title"], p["status"], p["branch"], p["next"]) for p in b["phases"]],
                     {k: b["phase"][k] for k in ("label", "branch", "base", "next")},
-                    [h["title"] for h in b["human"]], s["protected"])
-        self.assertEqual(view(md)[:4], view(bd)[:4])
-        self.assertEqual(set(view(md)[4]), set(view(bd)[4]))
+                    [h["title"] for h in b["human"]], [i["title"] for i in b["in_progress"]], b["open_count"],
+                    s["protected"])
+        self.assertEqual(view(md)[:6], view(bd)[:6])
+        self.assertEqual(view(bd)[4:6], ([], 0))
+        self.assertEqual(set(view(md)[6]), set(view(bd)[6]))
 
     def test_state_md_you_marker(self):
         text = ("## Plan: Launch\n- [x] P1 Build | branch launch/build\n- [ ] P2 Merge PR #12 (you) | PR #12\n\n"

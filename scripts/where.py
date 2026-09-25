@@ -237,7 +237,9 @@ def empty_state():
 def beads_state(issues):
     """The beads adapter: the plan epic and its phases, in the shape a STATE.md plan has. Returns a dict or None.
 
-    "Waiting on you" = open or in-progress beads labelled `human`, like a STATE.md `(you)` line."""
+    "Waiting on you" = open or in-progress beads labelled `human`, like a STATE.md `(you)` line. As in STATE.md,
+    a plan epic's phases are not loose work: in progress and open tasks leave them out, and open tasks leave
+    out `human` beads."""
     if not issues:
         return None
     by_parent = {}
@@ -255,10 +257,12 @@ def beads_state(issues):
     plans = [e for e in open_epics if "plan" in labels(e)] or \
             [e for e in open_epics if any("phase" in labels(k) for k in by_parent.get(e["id"], []))]
 
+    phase_ids = {k["id"] for e in plans for k in phases_of(e["id"])}
+    loose = [i for i in issues if i.get("issue_type") != "epic" and i["id"] not in phase_ids]
     human = [i for i in issues if i.get("status") in ("open", "in_progress") and i.get("issue_type") != "epic"
              and "human" in labels(i)]
-    in_prog = [i for i in issues if i.get("status") == "in_progress" and i.get("issue_type") != "epic"]
-    ready = [i for i in issues if i.get("status") == "open" and i.get("issue_type") != "epic"]
+    in_prog = [i for i in loose if i.get("status") == "in_progress"]
+    ready = [i for i in loose if i.get("status") == "open" and "human" not in labels(i)]
 
     state = {**empty_state(), "human": [{"id": h["id"], "title": h.get("title", "")} for h in human],
              "in_progress": [{"id": i["id"], "title": i.get("title", "")} for i in in_prog], "open_count": len(ready)}
@@ -356,9 +360,9 @@ def md_plan(file, head, items, nxt):
 
 def state_md(top):
     """STATE.md (else NOW.md): its NEXT, its plan, and its other checkbox lines, anywhere outside code fences.
-    An open or in-progress line marked `(you)` waits on you. Any other [~] line that is not a phase is work in
-    progress, and any other open one counts as an open task. Their id is file:line, so the model can go
-    straight to it."""
+    An open or in-progress line marked `(you)` waits on you. A [~] line that is not a phase is work in progress,
+    `(you)` or not. An open line that is neither a phase nor `(you)` counts as an open task. Their id is
+    file:line, so the model can go straight to it."""
     for name in ("STATE.md", "NOW.md"):
         f = Path(top) / name
         if not f.is_file():
