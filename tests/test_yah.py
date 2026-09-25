@@ -816,7 +816,7 @@ class WhereTests(Base):
         plain = self.repo(name="plain")
         out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=plain)
         self.assertEqual(rc, 0, err)
-        self.assertEqual((json.loads(out)["store"], json.loads(out)["beads_dir"]),
+        self.assertEqual((json.loads(out)["store"], json.loads(out)["beads_source"]),
                          ({"kind": "STATE.md", "path": str(plain / "STATE.md"), "bd": None, "note": None}, None))
         repo = self.beads_repo()
         out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=repo)

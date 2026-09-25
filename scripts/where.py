@@ -230,20 +230,15 @@ def state_md(top, main_root=None):
     return None
 
 
-def merge(states):
-    """One plan state from its sources in priority order (STATE.md, then beads): the first plan wins, and (you)
-    lines, work in progress and open tasks add up. Returns (state or None, the first plan it hides or None, the
-    hidden plans' phases, whose bases stay protected: protection fails closed)."""
-    states = [s for s in states if s]
-    if not states:
-        return None, None, []
-    won = next((s for s in states if s["plan"]), states[0])
-    lost = [s for s in states if s["plan"] and s is not won]
-    state = dict(won, human=[h for s in states for h in s["human"]],
-                 in_progress=[i for s in states for i in s["in_progress"]],
-                 open_count=sum(s["open_count"] for s in states))
-    ignored = {k: lost[0]["plan"][k] for k in ("id", "title", "source")} if lost else None
-    return state, ignored, [v for s in lost for v in s["phases"]]
+def merge(md, bz):
+    """STATE.md's plan state and beads' as one, either may be None: a STATE.md plan wins over a beads epic, and
+    (you) lines, work in progress and open tasks add up, STATE.md's first."""
+    both = [s for s in (md, bz) if s]
+    if not both:
+        return None
+    won = md if md and (md["plan"] or not bz or not bz["plan"]) else bz
+    return dict(won, human=[h for s in both for h in s["human"]],
+                in_progress=[i for s in both for i in s["in_progress"]], open_count=sum(s["open_count"] for s in both))
 
 
 # ---------------------------------------------------------------- PRs
@@ -547,7 +542,10 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     bz = beads.read(top, main_root, use_bd)
     sm = state_md(top, main_root)
     md = {k: sm.pop(k) for k in empty_state()} if sm else None
-    state, ignored, hidden = merge([md, bz["state"]])
+    state = merge(md, bz["state"])
+    lost = bz["state"] if md and md["plan"] and bz["state"] and bz["state"]["plan"] else None  # a hidden beads epic
+    ignored = {k: lost["plan"][k] for k in ("id", "title", "source")} if lost else None
+    hidden = lost["phases"] if lost else []
     phases = (state or {}).get("phases") or []
     mine = {v.get("branch") for v in phases} - {"", None}
     # A phase's own branch (a merged lower phase's, say) is never a landing, even when a PR still targets it.
@@ -563,8 +561,8 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
         if infer and g["branch"] and g["branch"] not in trunkish else ([], [])
     plan, phase = (state or {}).get("plan") or {}, (state or {}).get("phase") or {}
     stamp = ""  # the commit NEXT was written at: the running phase's (a bead's own), or a plan-less STATE.md's
-    if infer and "next_sha" in phase:
-        stamp = phase["next_sha"]
+    if infer and phase and plan.get("source") == "beads":
+        stamp = phase.get("next_sha") or ""
     elif infer and sm and (phase or not plan):
         stamp = md_stamp(str(top), sm)
     cands = []  # with no upstream, BRANCH counts commits ahead of the phase base, else of the branch cut from
@@ -588,7 +586,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
         near, merged = [], []
     s = {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "state": state,
          "store": store(sm, main_root, plan, ignored, bz),
-         "ignored_plan": ignored, "beads_source": bz["source"], "beads_dir": bz["dir"], "state_md": sm, "prs": prs,
+         "ignored_plan": ignored, "beads_source": bz["source"], "state_md": sm, "prs": prs,
          "gh_tried": proc is not None, "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
          "bases": bases, "ancestors": near, "merged_in": merged, "next_stale": stale,
          "aliases": aliases(str(top), plan.get("spec")) if infer else []}
