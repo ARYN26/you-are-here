@@ -303,8 +303,7 @@ YOU_MARK = re.compile(r"\s*\(you\)\s*$", re.I)
 
 
 def md_line(ln):
-    """A checkbox line as (status, title, fields, you, top), or None. top: not indented. `(you)` may end the
-    title or the line."""
+    """A checkbox line as (status, title, fields, you, indent), or None. `(you)` may end the title or the line."""
     pm = CHECKBOX.match(ln)
     if not pm:
         return None
@@ -312,33 +311,37 @@ def md_line(ln):
     you = bool(YOU_MARK.search(rest))
     parts = [p.strip() for p in re.split(r"[|·]", YOU_MARK.sub("", rest))]
     you = you or bool(YOU_MARK.search(parts[0]))
-    return STATUS[pm.group(2).lower()], YOU_MARK.sub("", parts[0]).strip(), parts[1:], you, not pm.group(1)
+    return (STATUS[pm.group(2).lower()], YOU_MARK.sub("", parts[0]).strip(), parts[1:], you,
+            len(pm.group(1).expandtabs(4)))
 
 
-def md_items(text, heads):
-    """[(line number, the index in heads of its `## ` section or None, md_line)] for each checkbox line
-    outside code fences."""
-    starts = [text.count("\n", 0, m.start()) + 1 for m in heads]
-    out, fence = [], False
-    for n, ln in enumerate(text.split("\n"), 1):
+def md_scan(lines):
+    """The `## ` headings and checkbox lines outside code fences, so an example in a fence is never a plan.
+    heads: [(line number, heading)]. items: [(line number, the index in heads of its section or None, md_line)]."""
+    heads, items, fence = [], [], False
+    for n, ln in enumerate(lines, 1):
         if ln.lstrip().startswith(("```", "~~~")):
             fence = not fence
             continue
-        ml = None if fence else md_line(ln)
+        if fence:
+            continue
+        hm = re.match(r"## +(.+?)\s*$", ln)
+        if hm:
+            heads.append((n, hm.group(1)))
+            continue
+        ml = md_line(ln)
         if ml:
-            out.append((n, max((i for i, s in enumerate(starts) if s < n), default=None), ml))
-    return out
+            items.append((n, len(heads) - 1 if heads else None, ml))
+    return heads, items
 
 
 def md_plan(file, head, items, nxt):
-    """A `## Plan: Title (spec)` section as a plan: its unindented checkbox lines are the phases, with id
-    file:line. Indented lines under a phase are its sub-tasks, not phases."""
+    """A `## Plan: Title (spec)` section as a plan: its phase lines (the least indented checkbox lines, normally
+    unindented) with id file:line. Lines indented under a phase are its sub-tasks, not phases."""
     m = re.match(r"Plan:\s*(.*?)\s*(?:\(([^)]*)\))?$", head, re.I)
     title, spec = (m.group(1), m.group(2) or "") if m else (head, "")
     views = []
-    for n, (status, text, fields, _, top) in items:
-        if not top:
-            continue
+    for n, (status, text, fields, _, _) in items:
         lm = re.match(r"(P\d+)\b[\s:.-]*(.*)", text)
         label, name = (lm.group(1), lm.group(2)) if lm else (f"P{len(views) + 1}", text)
         v = {"id": f"{file}:{n}", "label": label, "title": name or text, "status": status,
@@ -368,15 +371,20 @@ def state_md(top):
         if not f.is_file():
             continue
         text = f.read_text(encoding="utf-8", errors="replace")
-        heads = list(re.finditer(r"^## +(.+?)\s*$", text, re.M))
+        lines = text.split("\n")
+        heads, items = md_scan(lines)
 
         def body(i):
-            return text[heads[i].end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
+            return "\n".join(lines[heads[i][0]:heads[i + 1][0] - 1 if i + 1 < len(heads) else len(lines)])
 
-        dated = [i for i, m in enumerate(heads) if re.match(r"\d{4}-\d{2}-\d{2}", m.group(1))]
-        plans = [i for i, m in enumerate(heads) if re.match(r"Plan:", m.group(1), re.I)]
-        items = md_items(text, heads)
-        rest = [(n, ml) for n, sec, ml in items if not (sec in plans and ml[4])]  # not a phase line
+        dated = [i for i, (_, h) in enumerate(heads) if re.match(r"\d{4}-\d{2}-\d{2}", h)]
+        plans = [i for i, (_, h) in enumerate(heads) if re.match(r"Plan:", h, re.I)]
+        lead = {}  # a plan section's phase indent: its least indented checkbox lines are the phases
+        for _, sec, ml in items:
+            if sec in plans:
+                lead[sec] = min(lead.get(sec, ml[4]), ml[4])
+        phase_lines = {n for n, sec, ml in items if sec in lead and ml[4] == lead[sec]}
+        rest = [(n, ml) for n, _, ml in items if n not in phase_lines]
         out: dict = {"file": name, "head": "", "next": "", "at": "", "plan": None,
                      "human": [{"id": f"{name}:{n}", "title": ml[1]} for n, _, ml in items
                                if ml[0] != "closed" and ml[3]],
@@ -384,18 +392,19 @@ def state_md(top):
                                      if ml[0] == "in_progress"],
                      "open_count": sum(1 for _, ml in rest if ml[0] == "open" and not ml[3])}
         if dated:
-            i = max(dated, key=lambda j: heads[j].group(1)[:10])  # the newest date, whatever the order
+            i = max(dated, key=lambda j: heads[j][1][:10])  # the newest date, whatever the order
             nxt = re.search(r"^- Next:\s*(.+(?:\n(?!- )\s+.+)*)", body(i), re.M)
             at = re.search(r"^- At:\s*(" + SHA.pattern + r")\b", body(i), re.M)  # the commit NEXT was written at
-            out.update(head=heads[i].group(1), next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)),
+            out.update(head=heads[i][1], next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)),
                        at=at.group(1) if at else "")
         elif not plans:
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
-            out["next"] = lines[0] if lines else ""
+            plain = [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+            out["next"] = plain[0] if plain else ""
         # The plan with a phase in progress, else one with an open phase, else the first. A finished plan
         # left above the next one does not hide it.
-        parsed = [p for p in (md_plan(name, heads[i].group(1), [(n, ml) for n, sec, ml in items if sec == i],
-                                      out["next"]) for i in plans) if p]
+        parsed = [p for p in (md_plan(name, heads[i][1], [(n, ml) for n, sec, ml in items
+                                                           if sec == i and n in phase_lines], out["next"])
+                              for i in plans) if p]
         out["plan"] = next((p for p in parsed if p["phase"]), None) or \
             next((p for p in parsed if p["next_phase"]), None) or (parsed[0] if parsed else None)
         return out
@@ -701,20 +710,23 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     issues, source = load_issues(top, main_root, use_bd)
     state = beads_state(issues) if issues is not None else None
     sm = state_md(top)
-    ignored = None  # a beads plan epic a STATE.md plan hides
+    ignored, hidden = None, []  # a beads plan epic a STATE.md plan hides, and its phases
     if sm:
         md = {k: sm.pop(k) for k in ("plan", "human", "in_progress", "open_count")}
         state = state or empty_state()
         if md["plan"]:  # STATE.md wins over a beads plan epic
             if state["plan"]:
                 ignored = {"id": state["plan"]["id"], "title": state["plan"]["title"], "source": "beads"}
+                hidden = state["phases"]
             state = {**state, **md["plan"]}
         # (you) lines, work in progress and open tasks count from both sources, whichever holds the plan
         state = {**state, **{k: state[k] + md[k] for k in ("human", "in_progress", "open_count")}}
     phases = (state or {}).get("phases") or []
     mine = {v.get("branch") for v in phases} - {"", None}
     # A phase's own branch (a merged lower phase's, say) is never a landing, even when a PR still targets it.
+    # The hidden epic's bases stay protected too: protection fails closed.
     bases = phase_bases(phases)
+    bases += [b for b in phase_bases(hidden) if b not in bases and b not in mine]
     cached = [b for b in (read_json(where_cache_path(main_root), {}) or {}).get("landing") or [] if b not in mine]
     # "Cut from" only means something on a work branch: on main, a branch merged with --no-ff is an ancestor too.
     # Checked against the cached landing here so the git walk overlaps gh, and against the live one below.

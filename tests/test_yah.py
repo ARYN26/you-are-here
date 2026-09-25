@@ -533,6 +533,17 @@ class WhereTests(Base):
                          ("#12", "checkout/payment", "checkout/cart", "STATE.md"))
         self.assertEqual((b["plan"]["id"], b["in_progress"], b["open_count"]), ("STATE.md", [], 0))
 
+    def test_state_md_fenced_plan_and_indented_phases(self):
+        w = load_where()
+        fenced = "## Follow-ups\n```\n## Plan: Example\n- [ ] P1 fake\n```\n- [ ] real task\n"
+        sm = w.state_md(self.repo({"STATE.md": fenced}))
+        self.assertEqual((sm["plan"], sm["open_count"]), (None, 1))  # a `## Plan:` in a fence is an example
+        indented = "## Plan: X\n  - [~] P1 A\n    - [ ] sub\n  - [ ] P2 B\n"
+        sm = w.state_md(self.repo({"STATE.md": indented}, name="shop2"))
+        self.assertEqual([(p["label"], p["status"]) for p in sm["plan"]["phases"]],
+                         [("P1", "in_progress"), ("P2", "open")])
+        self.assertEqual(sm["open_count"], 1)
+
     def test_state_md_plan_without_running_phase(self):
         text = "## Plan: Emails\n- [x] P1 Templates\n- [ ] P2 Sending\n\n## 2026-09-23\n- Next: Pick a mail provider.\n"
         out = self.where(self.repo({"STATE.md": text}))
