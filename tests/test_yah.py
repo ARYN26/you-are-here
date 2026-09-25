@@ -59,6 +59,10 @@ STATE_YOU = STATE_PLAN.replace("- [ ] P3 Emails", "- [ ] P3 Emails\n\n## Follow-
 STATE_DATED = "# Notes\n\n## 2026-09-20\n- Next: Old.\n\n## 2026-09-23\n- Next: Ship the login fix,\n  then tag v1.2.\n"
 
 
+def jsonl(items):
+    return "\n".join(json.dumps(i) for i in items) + "\n"
+
+
 def load_where():
     spec = importlib.util.spec_from_file_location("yah_where", SCRIPTS / "where.py")
     mod = importlib.util.module_from_spec(spec)
@@ -108,8 +112,8 @@ class Base(unittest.TestCase):
         self.git(r, "commit", "-q", "--allow-empty", "-m", "init")
         return r
 
-    def beads_repo(self, branch="checkout/payment"):
-        return self.repo({".beads/issues.jsonl": "\n".join(json.dumps(b) for b in BEADS) + "\n"}, branch)
+    def beads_repo(self, branch="checkout/payment", name="shop"):
+        return self.repo({".beads/issues.jsonl": jsonl(BEADS)}, branch, name)
 
     def state_repo(self, text=STATE_YOU, branch="checkout/payment", name="shop"):
         return self.repo({"STATE.md": text}, branch, name)
@@ -189,12 +193,11 @@ class StatuslineTests(Base):
         self.assertIn(f"{AMBER}60k{RST}", self.line(60_000))
 
     def test_where_cache_shows_plan_phase_and_for_you(self):
-        for repo in (self.state_repo(name="md"), self.beads_repo()):
-            with self.subTest(repo=repo.name):
-                self.where(repo)
-                out = self.line(cwd=repo, pr={"number": 8})
-                for want in ("checkout/payment", "PR#8", "CHECKOUT P2/3", "2 for you"):
-                    self.assertIn(want, out)
+        repo = self.state_repo()  # the cache is the same for beads: test_state_md_matches_beads
+        self.where(repo)
+        out = self.line(cwd=repo, pr={"number": 8})
+        for want in ("checkout/payment", "PR#8", "CHECKOUT P2/3", "2 for you"):
+            self.assertIn(want, out)
 
     def test_timing(self):
         repo = self.state_repo()
@@ -309,12 +312,11 @@ class WhereTests(Base):
 
     def stamp_beads(self, repo, sha):
         beads = [dict(b, metadata=dict(b["metadata"], next_sha=sha)) if b["id"] == "yah-3" else b for b in BEADS]
-        (repo / ".beads" / "issues.jsonl").write_text("\n".join(json.dumps(b) for b in beads) + "\n", "utf-8")
+        (repo / ".beads" / "issues.jsonl").write_text(jsonl(beads), "utf-8")
 
-    def test_stale_next_from_beads_counts_only_the_phase_branch(self):
-        repo = self.beads_repo(branch="checkout/cart")  # NEXT written on the base, before the phase branch
-        self.stamp_beads(repo, self.head(repo))
-        self.git(repo, "commit", "-qam", "plan")  # base commits after the stamp never count
+    def check_only_the_phase_branch_counts(self, repo):
+        """NEXT was stamped on checkout/cart, the base: base commits after it never count, while commits on the
+        phase branch do, even from off it. Leaves the repo on the phase branch, 2 commits past the stamp."""
         self.git(repo, "checkout", "-q", "-b", "checkout/payment")
         brief = self.where(repo, "--brief")
         self.assertNotIn("predates", brief)
@@ -334,6 +336,12 @@ class WhereTests(Base):
         self.git(repo, "checkout", "-q", "checkout/cart")  # off the phase branch: still counts the phase branch
         self.assertIn(warn, self.where(repo, "--brief"))
         self.git(repo, "checkout", "-q", "checkout/payment")
+
+    def test_stale_next_from_beads_counts_only_the_phase_branch(self):
+        repo = self.beads_repo(branch="checkout/cart")
+        self.stamp_beads(repo, self.head(repo))
+        self.git(repo, "commit", "-qam", "plan")  # a base commit after the stamp
+        self.check_only_the_phase_branch_counts(repo)
         self.stamp_beads(repo, self.head(repo)[:7])  # wrap re-stamps after its WIP commit
         self.assertNotIn("predates", self.where(repo, "--brief"))
         for bad in ("--output=x", "HEAD", "zzzzzzz", ""):  # never passed to git as an option or a ref
@@ -342,22 +350,8 @@ class WhereTests(Base):
 
     def test_stale_next_from_state_md_counts_only_the_phase_branch(self):
         repo = self.state_repo(STATE_PLAN, branch="checkout/cart")  # tracked: its last commit is the stamp
-        self.git(repo, "commit", "-q", "--allow-empty", "-m", "base work")  # base commits after the stamp never count
-        self.git(repo, "checkout", "-q", "-b", "checkout/payment")
-        brief = self.where(repo, "--brief")
-        self.assertNotIn("predates", brief)
-        self.assertIn("branch checkout/payment (clean, 0 ahead of checkout/cart, no upstream)", brief)
-        for i in (1, 2):
-            self.git(repo, "commit", "-q", "--allow-empty", "-m", f"work {i}")
-        warn = "NEXT predates 2 commits on checkout/payment: /yah:wrap first"
-        brief = self.where(repo, "--brief").splitlines()
-        self.assertEqual(brief[2], f"NEXT Wire the Stripe element into PaymentForm.tsx, then run the e2e test.  ! {warn}")
-        full = self.where(repo).splitlines()
-        self.assertEqual(full[full.index("NEXT    Wire the Stripe element into PaymentForm.tsx, then run the e2e test.") + 1],
-                         f"!       {warn}")
-        self.git(repo, "checkout", "-q", "checkout/cart")  # off the phase branch: still counts the phase branch
-        self.assertIn(warn, self.where(repo, "--brief"))
-        self.git(repo, "checkout", "-q", "checkout/payment")
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "base work")  # a base commit after the stamp
+        self.check_only_the_phase_branch_counts(repo)
         (repo / "STATE.md").write_text(STATE_PLAN.replace("An older", "An old"), encoding="utf-8")
         self.git(repo, "commit", "-qam", "wrap")  # wrap commits the new NEXT
         self.assertNotIn("predates", self.where(repo, "--brief"))
@@ -400,30 +394,24 @@ class WhereTests(Base):
         self.assertEqual((s["next_stale"]["commits"], s["next_stale"]["branch"]), (1, "feat/a"))  # the work only
 
     def test_stale_next_when_the_phase_base_is_gone(self):
-        repo = self.beads_repo(branch="checkout/cart")
-        init = self.head(repo)
-        self.stamp_beads(repo, init)  # /yah:phases stamps every phase at plan time
-        self.git(repo, "commit", "-qam", "plan")
-        self.git(repo, "commit", "-q", "--allow-empty", "-m", "cart work")
-        self.git(repo, "checkout", "-q", "-b", "main", init)
-        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge P1", "checkout/cart")
-        self.git(repo, "checkout", "-q", "-b", "checkout/payment", "checkout/cart")
-        self.git(repo, "branch", "-q", "-D", "checkout/cart")  # merged and deleted: P1's commits are main's now
-        self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"])
-        self.git(repo, "commit", "-q", "--allow-empty", "-m", "pay work")
-        self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["commits"], 1)
-
-    def test_stale_next_from_state_md_when_the_phase_base_is_gone(self):
-        repo = self.state_repo(STATE_PLAN, branch="checkout/cart")
-        init = self.head(repo)  # STATE.md's last commit: the stamp
-        self.git(repo, "commit", "-q", "--allow-empty", "-m", "cart work")
-        self.git(repo, "checkout", "-q", "-b", "main", init)
-        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge P1", "checkout/cart")
-        self.git(repo, "checkout", "-q", "-b", "checkout/payment", "checkout/cart")
-        self.git(repo, "branch", "-q", "-D", "checkout/cart")  # merged and deleted: its work is main's now
-        self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"])
-        self.git(repo, "commit", "-q", "--allow-empty", "-m", "pay work")
-        self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["commits"], 1)
+        for src in ("beads", "STATE.md"):
+            with self.subTest(src):
+                if src == "beads":
+                    repo = self.beads_repo(branch="checkout/cart", name="bd")
+                    init = self.head(repo)
+                    self.stamp_beads(repo, init)  # /yah:phases stamps every phase at plan time
+                    self.git(repo, "commit", "-qam", "plan")
+                else:
+                    repo = self.state_repo(STATE_PLAN, branch="checkout/cart", name="md")
+                    init = self.head(repo)  # STATE.md's last commit: the stamp
+                self.git(repo, "commit", "-q", "--allow-empty", "-m", "cart work")
+                self.git(repo, "checkout", "-q", "-b", "main", init)
+                self.git(repo, "merge", "-q", "--no-ff", "-m", "merge P1", "checkout/cart")
+                self.git(repo, "checkout", "-q", "-b", "checkout/payment", "checkout/cart")
+                self.git(repo, "branch", "-q", "-D", "checkout/cart")  # merged and deleted: P1's work is main's now
+                self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"])
+                self.git(repo, "commit", "-q", "--allow-empty", "-m", "pay work")
+                self.assertEqual(json.loads(self.where(repo, "--json"))["next_stale"]["commits"], 1)
 
     def test_base_ahead_counts_past_a_stale_local_base(self):
         repo = self.repo(branch="main")
@@ -502,17 +490,16 @@ class WhereTests(Base):
 
     def test_brief_worst_case_is_six_lines(self):
         prod = {"prod": "main deploys on push. PRs only."}
-        self.config(projects={"md": prod, "shop": prod})
-        for repo in (self.state_repo(branch="main", name="md"), self.beads_repo(branch="main")):
-            with self.subTest(repo=repo.name):
-                brief = self.where(repo, "--brief").splitlines()
-                self.assertEqual(len(brief), 6)
-                self.assertTrue(brief[0].endswith("! phase branch is checkout/payment"))
-                self.assertEqual(brief[3], "2 waiting on you")
-                self.assertEqual(brief[4], "PROD main deploys on push. PRs only.")
-                full = self.where(repo)
-                self.assertIn("!       phase branch is checkout/payment, you are on main", full)
-                self.assertIn("PROD    main deploys on push. PRs only.", full)
+        self.config(projects={"shop": prod})
+        repo = self.state_repo(branch="main")  # the views are the same for beads: test_state_md_matches_beads
+        brief = self.where(repo, "--brief").splitlines()
+        self.assertEqual(len(brief), 6)
+        self.assertTrue(brief[0].endswith("! phase branch is checkout/payment"))
+        self.assertEqual(brief[3], "2 waiting on you")
+        self.assertEqual(brief[4], "PROD main deploys on push. PRs only.")
+        full = self.where(repo)
+        self.assertIn("!       phase branch is checkout/payment, you are on main", full)
+        self.assertIn("PROD    main deploys on push. PRs only.", full)
 
     def test_state_md_plan(self):
         repo = self.state_repo()
@@ -538,10 +525,11 @@ class WhereTests(Base):
     def test_state_md_fenced_plan_and_indented_phases(self):
         w = load_where()
         fenced = "## Follow-ups\n```\n## Plan: Example\n- [ ] P1 fake\n```\n- [ ] real task\n"
-        sm = w.state_md(self.repo({"STATE.md": fenced}))
-        self.assertEqual((sm["plan"], sm["open_count"]), (None, 1))  # a `## Plan:` in a fence is an example
-        indented = "## Plan: X\n  - [~] P1 A\n    - [ ] sub\n  - [ ] P2 B\n"
-        sm = w.state_md(self.repo({"STATE.md": indented}, name="shop2"))
+        (self.tmp / "STATE.md").write_text(fenced, encoding="utf-8")
+        sm = w.state_md(self.tmp)
+        self.assertEqual((sm["plan"], sm["open_count"], sm["next"]), (None, 1, ""))  # a fence is an example, not NEXT
+        (self.tmp / "STATE.md").write_text("## Plan: X\n  - [~] P1 A\n    - [ ] sub\n  - [ ] P2 B\n", encoding="utf-8")
+        sm = w.state_md(self.tmp)
         self.assertEqual([(p["label"], p["status"]) for p in sm["plan"]["phases"]],
                          [("P1", "in_progress"), ("P2", "open")])
         self.assertEqual(sm["open_count"], 1)
@@ -590,7 +578,7 @@ class WhereTests(Base):
         issues = [{"id": "x-1", "title": "Fix the flaky test", "issue_type": "task", "status": "in_progress"},
                   {"id": "x-2", "title": "Bump the deps", "issue_type": "task", "status": "open"},
                   {"id": "x-3", "title": "Rotate the keys", "issue_type": "task", "status": "open", "labels": ["human"]}]
-        repo = self.repo({".beads/issues.jsonl": "\n".join(json.dumps(i) for i in issues) + "\n"})
+        repo = self.repo({".beads/issues.jsonl": jsonl(issues)})
         full = self.where(repo)
         self.assertIn("DOING   x-1  Fix the flaky test", full)
         self.assertIn("TASKS   1 open, no plan (/yah:phases after a plan is approved)", full)  # a human bead is not
@@ -598,7 +586,7 @@ class WhereTests(Base):
         self.assertNotIn("BEADS", full)
         (repo / "STATE.md").write_text("## Follow-ups\n- [ ] Update the README\n", encoding="utf-8")
         self.assertIn("TASKS   2 open, no plan", self.where(repo))  # both sources count
-        (repo / ".beads" / "issues.jsonl").write_text(json.dumps(issues[0]) + "\n", encoding="utf-8")
+        (repo / ".beads" / "issues.jsonl").write_text(jsonl(issues[:1]), encoding="utf-8")
         (repo / "STATE.md").write_text("## Follow-ups\n- [x] Update the README\n", encoding="utf-8")
         self.assertNotIn("TASKS", self.where(repo))  # nothing open: no row
         planned = self.state_repo(STATE_PLAN + "\n## Follow-ups\n- [ ] Update the README\n", name="md")
@@ -1137,12 +1125,12 @@ class HookShellTests(Base):
 
     def check(self, path=None):
         start, prompt = (e["hooks"][0]["command"] for e in hook_commands())
-        for repo in (self.state_repo(name="md"), self.beads_repo()):
-            out, rc = self.sh(start, json.dumps({"hook_event_name": "SessionStart", "source": "startup",
-                                                 "cwd": str(repo)}), repo, path)
-            self.assertEqual(rc, 0)
-            self.assertTrue(out.startswith(f"[yah] {repo.name}  branch checkout/payment"), out)
-            self.assertIn("PLAN CHECKOUT 1/3 done  PHASE P2 Payment form", out)
+        repo = self.state_repo()
+        out, rc = self.sh(start, json.dumps({"hook_event_name": "SessionStart", "source": "startup",
+                                             "cwd": str(repo)}), repo, path)
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("[yah] shop  branch checkout/payment"), out)
+        self.assertIn("PLAN CHECKOUT 1/3 done  PHASE P2 Payment form", out)
         out, rc = self.sh(prompt, json.dumps({"session_id": "h1", "prompt": "hi",
                                               "transcript_path": self.transcript(210_000)}), repo, path)
         self.assertEqual(rc, 0)

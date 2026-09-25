@@ -10,7 +10,7 @@ Input: the plan file in `$ARGUMENTS`. Otherwise use the plan approved in this se
 
 `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
-Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh` and read its `beads_source` and `bd` fields. STATE.md is the default. Use **beads** only if the repo already uses it: `beads_source` is set (a `.beads/` at this repo's root), `bd` is a path, and neither STATE.md nor NOW.md has a `## Plan:` section (a STATE.md plan wins over a beads epic). Run beads commands as that path, quoted. Never set, export or follow `BEADS_DIR`. If `.beads/` exists but `bd` is null, tell the user `bd_note`, or that the bd CLI was not found, before using **STATE.md**.
+Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh` and read its `beads_source` and `bd` fields. STATE.md is the default. Use **beads** only if the repo already uses it: `beads_source` is set (a `.beads/` at this repo's root), `bd` is a path, and `state.plan` is null or from beads (a STATE.md plan wins over a beads epic). Run beads commands as that path, quoted. Never set, export or follow `BEADS_DIR`. If `.beads/` exists but `bd` is null, tell the user `bd_note`, or that the bd CLI was not found, before using **STATE.md**.
 
 ## STATE.md
 

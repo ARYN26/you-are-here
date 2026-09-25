@@ -131,9 +131,14 @@ def as_dict(v):
     return {}
 
 
+def repo_dirs(top, main_root):
+    """The worktree, then the main checkout: gitignored state (.beads, STATE.md) exists only where it was made."""
+    return list(dict.fromkeys((Path(top), Path(main_root or top))))
+
+
 def find_beads(top, main_root):
     """This repo's .beads dir (the worktree's, else the main checkout's), or None."""
-    return next((d / ".beads" for d in (Path(top), Path(main_root)) if (d / ".beads").is_dir()), None)
+    return next((d / ".beads" for d in repo_dirs(top, main_root) if (d / ".beads").is_dir()), None)
 
 
 def load_issues(top, main_root, use_bd):
@@ -216,16 +221,12 @@ def labels(issue):
     return set(issue.get("labels") or [])
 
 
-def pick_phase(state, views, nxt=None):
-    """The in_progress phase is current; with none running, the first unclosed one is next. STATE.md's one NEXT
-    (nxt) goes on that phase. A bead keeps its own notes: wrap writes them, and a run pinned to that phase reads them."""
+def pick_phase(state, views):
+    """The in_progress phase is current; with none running, the first unclosed one is next."""
     running = [v for v in views if v["status"] == "in_progress"]
     pending = [v for v in views if v["status"] != "closed"]
-    shown = running[0] if running else pending[0] if pending else None
-    if nxt is not None:
-        for v in views:
-            v["next"] = nxt if v is shown else ""
-    state.update(phases=views, phase=running[0] if running else None, next_phase=None if running else shown)
+    state.update(phases=views, phase=running[0] if running else None,
+                 next_phase=None if running else pending[0] if pending else None)
     return state
 
 
@@ -317,9 +318,10 @@ def md_line(ln):
 
 
 def md_scan(lines):
-    """The `## ` headings and checkbox lines outside code fences, so an example in a fence is never a plan.
-    heads: [(line number, heading)]. items: [(line number, the index in heads of its section or None, md_line)]."""
-    heads, items, fence = [], [], False
+    """The `## ` headings, checkbox lines and other text lines outside code fences, so an example in a fence is
+    never a plan or a NEXT. heads: [(line number, heading)]. items: [(line number, the index in heads of its section
+    or None, md_line)]. prose: the stripped lines that are neither, nor any other heading."""
+    heads, items, prose, fence = [], [], [], False
     for n, ln in enumerate(lines, 1):
         if ln.lstrip().startswith(("```", "~~~")):
             fence = not fence
@@ -333,7 +335,9 @@ def md_scan(lines):
         ml = md_line(ln)
         if ml:
             items.append((n, len(heads) - 1 if heads else None, ml))
-    return heads, items
+        elif ln.strip() and not ln.startswith("#"):
+            prose.append(ln.strip())
+    return heads, items, prose
 
 
 def md_plan(file, head, items, nxt):
@@ -357,9 +361,12 @@ def md_plan(file, head, items, nxt):
         views.append(v)
     if not views:
         return None
-    return pick_phase({"plan": {"id": file, "title": title, "source": file, "short": short_of(title), "spec": spec,
-                                "done": sum(1 for v in views if v["status"] == "closed"), "total": len(views)}},
-                      views, nxt)
+    s = pick_phase({"plan": {"id": file, "title": title, "source": file, "short": short_of(title), "spec": spec,
+                             "done": sum(1 for v in views if v["status"] == "closed"), "total": len(views)}}, views)
+    shown = s["phase"] or s["next_phase"]
+    if shown:  # the file's one NEXT goes on the phase it shows; a bead keeps its own notes
+        shown["next"] = nxt
+    return s
 
 
 def state_md(top, main_root=None):
@@ -368,13 +375,13 @@ def state_md(top, main_root=None):
     `(you)` or not. An open line that is neither a phase nor `(you)` counts as an open task. Their id is
     file:line, so the model can go straight to it. A linked worktree with neither file reads the main checkout's,
     as beads does: STATE.md is gitignored, so a new worktree never has one. `path` is the file wrap must edit."""
-    for f in (d / name for d in dict.fromkeys((Path(top), Path(main_root or top))) for name in ("STATE.md", "NOW.md")):
+    for f in (d / name for d in repo_dirs(top, main_root) for name in ("STATE.md", "NOW.md")):
         if not f.is_file():
             continue
         name = f.name
         text = f.read_text(encoding="utf-8", errors="replace")
         lines = text.split("\n")
-        heads, items = md_scan(lines)
+        heads, items, prose = md_scan(lines)
 
         def body(i):
             return "\n".join(lines[heads[i][0]:heads[i + 1][0] - 1 if i + 1 < len(heads) else len(lines)])
@@ -400,8 +407,7 @@ def state_md(top, main_root=None):
             out.update(head=heads[i][1], next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)),
                        at=at.group(1) if at else "")
         elif not plans:
-            plain = [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#") and not CHECKBOX.match(ln)]
-            out["next"] = plain[0] if plain else ""
+            out["next"] = prose[0] if prose else ""
         # The plan with a phase in progress, else one with an open phase, else the first. A finished plan
         # left above the next one does not hide it.
         parsed = [p for p in (md_plan(name, heads[i][1], [(n, ml) for n, sec, ml in items
