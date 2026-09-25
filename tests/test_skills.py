@@ -4,7 +4,9 @@
 
 Every skill and agent description is in the model's context on every turn, so these tests keep
 the listings short and the start, wrap and resume bodies to the rules the real-run test found.
+They also keep beads frozen: STATE.md is the plan state, and beads only a repo that already uses it.
 """
+import json
 import re
 import unittest
 from pathlib import Path
@@ -101,9 +103,11 @@ class StartTests(unittest.TestCase):
         self.assertIn("12 words or fewer", self.body)
         self.assertNotIn('recall --json "<task>"', self.body)  # the whole task text was the query
 
-    def test_no_bd_lookup_when_text_is_given(self):
-        self.assertIn("never run `bd show` or `which bd`", self.body)
+    def test_no_state_lookup_when_the_block_is_given(self):
+        self.assertIn("The `[yah]` block and any task text already in context are enough", self.body)
+        self.assertIn("never re-read STATE.md or run `bd show` or `which bd`", self.body)
         self.assertIn("where.py --json", self.body)
+        self.assertNotIn("Bead or task text", self.body)  # the old bd-only wording
 
     def test_negative_regression_guard(self):
         self.assertIn("negative regression guard", self.body)
@@ -150,10 +154,123 @@ class BeadsTests(unittest.TestCase):
             with self.subTest(skill=name):
                 text = body(name)
                 self.assertIn("no beads DB here", text)
-                self.assertIn("`beads` is non-null", text)
+                self.assertIn("STATE.md is the default. Use beads only if the repo already uses it", text)
+                self.assertIn("`beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path", text)
+                self.assertNotIn("`beads` is non-null", text)  # "state" is non-null for STATE.md repos too
                 self.assertIn("Never set, export or follow `BEADS_DIR`", text)
                 self.assertIn("never run bd against a database outside this repo", text)
                 self.assertNotRegex(text, r"(export|set)\s+BEADS_DIR\s*=")
+
+    def test_skills_read_the_state_key(self):
+        for name in ("wrap", "resume"):
+            with self.subTest(skill=name):
+                text = body(name)
+                self.assertIn("`state.phase`", text)
+                self.assertNotRegex(text, r"\bbeads\.(plan|phase|phases|next_phase)\b")
+
+    def test_wrap_writes_beads_only_for_a_beads_plan(self):
+        text = body("wrap")
+        self.assertIn("`beads_source` is set, `bd` is a path and `state.plan.source` is `beads`: use **2b**", text)
+        self.assertIn("no plan, no beads DB here", text)  # no plan goes to STATE.md, not an in_progress bead
+        self.assertNotIn("in_progress bead", text)
+        self.assertIn("`ignored_plan`", text)
+
+    def test_wrap_beads_matches_state_md(self):
+        text = body("wrap")
+        self.assertIn('--reason "PR #<N> open"`', text)
+        self.assertNotIn("checks <state>", text)  # no CI state in the close reason
+        self.assertNotIn("--parent", text)  # follow-ups are plain beads, like STATE.md's file-global list
+        self.assertIn('`bd create "<title>" --silent`', text)
+        self.assertIn("`-l human`", text)
+        self.assertIn("done-when in the plan file", text)  # both sources, not a bead description
+        self.assertIn("`spec_id`", text)
+        self.assertIn("Indented checkbox lines under a phase are its sub-tasks", text)
+
+    def test_phases_beads_is_frozen(self):
+        text = body("phases")
+        beads = text[text.index("## Beads"):]
+        for gone in ("--design", '"short"', "--id ", "--description", "bd dep", "Reparent", "--parent <phase-id>"):
+            self.assertNotIn(gone, text, gone)
+        for kept in ("--external-ref gh-<N>", 'bd close <id> --reason "PR #<N> open"', "`-l human`",
+                     "bd update <id> --claim", "--spec-id"):
+            self.assertIn(kept, beads, kept)
+        self.assertIn("Only the current phase gets `--notes", beads)
+        self.assertLess(text.index("## STATE.md"), text.index("## Beads (only if the repo already uses it)"))
+
+    def test_phases_documents_state_md_syntax(self):
+        text = body("phases")
+        self.assertIn("Phases are the unindented checkbox lines", text)
+        self.assertIn("exactly one top-level `[~]`", text)
+        self.assertIn("  - [ ] <sub-task>", text)
+        self.assertIn("not counted in done/total", text)
+        self.assertIn("shows it as DOING", text)
+        self.assertIn("a STATE.md plan wins over a beads epic", text)
+
+    def test_scout_names_state_md(self):
+        text = (ROOT / "agents/scout.md").read_text("utf-8")
+        self.assertIn("Plan state is in STATE.md", text)
+        self.assertLess(text.index("STATE.md"), text.index("bd show/list"))
+
+
+class DocsTests(unittest.TestCase):
+    def setUp(self):
+        self.readme = (ROOT / "README.md").read_text("utf-8")
+
+    def section(self, head):
+        """From the `## ` heading to the next one, skipping headings inside code blocks."""
+        lines = self.readme[self.readme.index(head):].splitlines()
+        out, fence = lines[:1], False
+        for ln in lines[1:]:
+            if ln.startswith("```"):
+                fence = not fence
+            elif ln.startswith("## ") and not fence:
+                break
+            out.append(ln)
+        return "\n".join(out)
+
+    def test_beads_detail_lives_in_one_section(self):
+        beads = self.section("## If you already use beads")
+        self.assertIn("`human`", beads)
+        self.assertIn("STATE.md wins", beads)
+        self.assertIn("ignored: STATE.md has a plan", beads)
+        self.assertIn("only in a repo with `.beads/`", beads)
+        self.assertNotIn("beads", self.section("## Plan state: STATE.md"))
+        self.assertNotIn("an open plan epic wins over STATE.md", self.readme)
+        self.assertNotIn("(or beads)", self.readme)  # unqualified: always "if you already use it"
+        self.assertNotIn("or in beads if the repo already uses it", self.readme)
+
+    def test_state_md_syntax_and_tasks_row(self):
+        state = self.section("## Plan state: STATE.md")
+        self.assertIn("  - [ ] Apple Pay button", state)
+        self.assertIn("Phases are the unindented checkbox lines", state)
+        self.assertIn("not counted in done/total", state)
+        self.assertIn("DOING", state)
+        self.assertIn("TASKS   <N> open, no plan (/yah:phases after a plan is approved)", state)
+        self.assertNotIn("no plan epic (/yah:phases", self.readme)  # the old beads-only BEADS row
+
+    def test_bd_runs_only_with_a_beads_dir(self):
+        self.assertNotIn("`bd list` when installed", self.readme)
+        self.assertNotIn("`bd` if installed", self.readme)
+        self.assertNotIn("`gh` and `bd` when installed", self.readme)
+        self.assertGreaterEqual(self.readme.count("only in a repo with `.beads/`"), 3)
+
+    def test_no_you_config_key(self):
+        config = self.section("## Config")
+        self.assertNotIn('"you"', config)
+        self.assertNotIn("| `you` |", config)
+        self.assertNotIn("assigned to you", self.readme)
+
+    def test_manifests(self):
+        plugin = json.loads((ROOT / ".claude-plugin/plugin.json").read_text("utf-8"))
+        market = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text("utf-8"))
+        for where, entry in (("plugin", plugin), ("marketplace", market["plugins"][0])):
+            with self.subTest(f=where):
+                kw = entry["keywords"]
+                self.assertIn("beads", kw)
+                self.assertIn("state-md", kw)
+                self.assertLess(kw.index("state-md"), kw.index("beads"))
+                self.assertFalse(entry["description"].lower().startswith("beads"))
+        self.assertFalse(market["metadata"]["description"].lower().startswith("beads"))
 
 
 if __name__ == "__main__":

@@ -8,5 +8,5 @@
   "homepage": "https://github.com/ARYN26/you-are-here",
   "repository": "https://github.com/ARYN26/you-are-here",
   "license": "MIT",
-  "keywords": ["statusline", "context", "usage-limits", "session-state", "beads", "handoff", "workflow", "cost", "memory", "autonomous"]
+  "keywords": ["statusline", "context", "usage-limits", "session-state", "state-md", "handoff", "workflow", "cost", "memory", "autonomous", "beads"]
 }
