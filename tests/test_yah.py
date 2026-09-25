@@ -842,6 +842,44 @@ class SetupTests(Base):
         shell = shutil.which("pwsh") or shutil.which("powershell")
         self.check_launcher([shell, "-NoProfile", "-NonInteractive", "-Command", script], repo)
 
+    def test_cmd_launcher_file(self):
+        shim = self.home / "bin" / "yah.cmd"
+        for _ in range(2):
+            out, err, rc = self.setup_py("--install-launcher", str(shim))
+            self.assertEqual(rc, 0, err)
+        self.assertIn("unchanged", out)
+        raw = shim.read_bytes()
+        self.assertTrue(raw.startswith(b"@rem >>> you-are-here >>>\r\n@echo off\r\n"), raw[:60])
+        self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"))  # CRLF only: cmd's goto can miss labels in LF files
+        self.assertIn(b'endlocal & cd /d "%YAH_D%" && claude %YAH_REST%\r\n', raw)
+        self.assertIn(b"\\where.py\" --path \"%~1\"", raw)
+        printed = self.setup_py("--launcher", "cmd")[0].replace("\r\n", "\n").strip()
+        self.assertEqual(printed, raw.decode("utf-8").replace("\r\n", "\n").strip())
+        foreign = self.home / "other" / "yah.cmd"
+        foreign.parent.mkdir()
+        foreign.write_bytes(b"@echo mine\r\n")
+        out, err, rc = self.setup_py("--install-launcher", str(foreign))
+        self.assertEqual(rc, 1)
+        self.assertIn("did not write it", err)
+        self.assertEqual(foreign.read_bytes(), b"@echo mine\r\n")
+        self.setup_py("--uninstall")
+        self.assertFalse(shim.exists())
+        self.assertEqual(foreign.read_bytes(), b"@echo mine\r\n")
+
+    @unittest.skipUnless(os.name == "nt", "needs cmd.exe")
+    def test_launcher_runs_in_cmd(self):
+        repo, shim = self.launcher_fixture("bin/yah.cmd")
+        (shim.parent / "claude.cmd").write_text("@echo claude %* in %CD%\r\n", encoding="utf-8")
+        driver = self.tmp / "drive.cmd"  # call, so each yah returns here; typed at a prompt it needs none
+        driver.write_text('@echo off\r\ncall yah shop --resume\r\necho after=%CD%\r\ncall yah run a "b c"\r\n'
+                          'call yah\r\necho rc=%errorlevel%\r\nset YAH_\r\n', encoding="utf-8")
+        self.env["PATH"] = str(shim.parent) + os.pathsep + self.env.get("PATH", "")
+        self.check_launcher([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(driver)], repo)
+        out = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(driver)], capture_output=True,
+                             env=self.env, timeout=120).stdout.decode("utf-8", "replace")
+        self.assertIn(f"after={repo}", out)  # the cd outlives yah, as in the other shells
+        self.assertNotIn("YAH_", out)  # setlocal kept yah's variables out of the window
+
     def test_rules_block(self):
         scripts = self.plugin_copy(self.tmp / "plugin", rules="# Rules\n- One task per session.\n")
         claude_md = self.cfg / "CLAUDE.md"
