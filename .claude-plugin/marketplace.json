@@ -19,7 +19,7 @@
       "homepage": "https://github.com/ARYN26/you-are-here",
       "repository": "https://github.com/ARYN26/you-are-here",
       "license": "MIT",
-      "keywords": ["statusline", "context", "usage-limits", "session-state", "beads", "handoff"],
+      "keywords": ["statusline", "context", "usage-limits", "session-state", "state-md", "handoff", "beads"],
       "category": "productivity"
     }
   ]

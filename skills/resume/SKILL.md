@@ -22,10 +22,10 @@ Rules for the whole run:
 
 ## 1. Orient
 
-Run `where.py --json`. Pick the phase: TARGET `P<n>` is the `beads.phases` entry with that `label`; none is `beads.phase`, else `beads.next_phase`. For `#<n>`, run `gh pr view <n> --json state,headRefName,baseRefName`; the phase is the entry whose `pr` is `#<n>` or `gh-<n>`, or whose `branch` is the PR's `headRefName`.
+Run `where.py --json`. Pick the phase: TARGET `P<n>` is the `state.phases` entry with that `label`; none is `state.phase`, else `state.next_phase`. For `#<n>`, run `gh pr view <n> --json state,headRefName,baseRefName`; the phase is the entry whose `pr` is `#<n>` or `gh-<n>`, or whose `branch` is the PR's `headRefName`.
 - From the phase take `label`, `title`, `branch`, `base`, `pr` and `next` (NEXT). An empty `next` means the first step toward `title`.
 - Forbidden branches: everything in `protected` (trunks, the PROD branch, and where open PRs land).
-- Use beads only when `beads` is non-null, `beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path; run beads commands as that path, quoted. Otherwise there is no beads DB here (or `bd_note` says why): /yah:wrap uses STATE.md. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
+- STATE.md is the default. Use beads only if the repo already uses it: `beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path; run beads commands as that path, quoted. Even then /yah:wrap writes beads only when `state.plan.source` is `beads`. With a STATE.md/NOW.md plan, no plan, an `ignored_plan`, or no beads DB here (`bd_note` may say why), it uses STATE.md. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
 
 Then run `brain.py recall --phase "<title>. <NEXT>"` and follow the notes it prints.
 

@@ -23,7 +23,7 @@ First  <at most one targeted search, then the edit>
 
 No `[yah]` block in context: write `Phase  unknown`, then run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --brief` right after the block.
 
-Bead or task text already in the prompt or context is enough: never run `bd show` or `which bd` for it. If bd is truly needed, run the `bd` path from `where.py --json`, quoted. Do not read `docs/`, `documents/`, plans or files over 200 lines to orient.
+The `[yah]` block and any task text already in context are enough: never re-read STATE.md or run `bd show` or `which bd` for them. If bd is truly needed, run the `bd` path from `where.py --json`, quoted. Do not read `docs/`, `documents/`, plans or files over 200 lines to orient.
 
 ## 2. Recall
 
