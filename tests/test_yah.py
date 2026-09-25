@@ -18,6 +18,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -456,7 +457,7 @@ class WhereTests(Base):
                   {"id": "x-2", "title": "Rotate the keys", "issue_type": "task", "status": "open", "assignee": "Sam"},
                   {"id": "x-3", "title": "Approve the copy", "issue_type": "task", "status": "in_progress",
                    "labels": ["human"]}]
-        self.assertEqual([i["id"] for i in w.beads_state(issues)["human"]], ["x-3"])
+        self.assertEqual([i["id"] for i in w.beads.beads_state(issues)["human"]], ["x-3"])
 
     def test_next_per_source(self):
         w = load_where()
@@ -464,7 +465,7 @@ class WhereTests(Base):
         kids = [{"id": f"x-{n}", "title": f"P{n} Step", "issue_type": "task", "status": st, "labels": ["phase"],
                  "parent": "x-0", "metadata": {"phase": n}, "notes": f"Do step {n}."}
                 for n, st in ((1, "closed"), (2, "open"), (3, "open"))]
-        s = w.beads_state([epic] + kids)  # each bead keeps the notes wrap wrote, so `yah run P3` resumes from its own
+        s = w.beads.beads_state([epic] + kids)  # each bead keeps the notes wrap wrote, so `yah run P3` resumes from its own
         self.assertEqual((s["next_phase"]["id"], [p["next"] for p in s["phases"]]),
                          ("x-2", ["Do step 1.", "Do step 2.", "Do step 3."]))
         text = "## Plan: Plan\n- [x] P1 Step\n- [ ] P2 Step\n- [ ] P3 Step\n\n## 2026-09-23\n- Next: Do step 2.\n"
@@ -530,7 +531,7 @@ class WhereTests(Base):
         self.assertEqual((sm["plan"], sm["open_count"], sm["next"]), (None, 1, ""))  # a fence is an example, not NEXT
         (self.tmp / "STATE.md").write_text("## Plan: X\n  - [~] P1 A\n    - [ ] sub\n  - [ ] P2 B\n", encoding="utf-8")
         sm = w.state_md(self.tmp)
-        self.assertEqual([(p["label"], p["status"]) for p in sm["plan"]["phases"]],
+        self.assertEqual([(p["label"], p["status"]) for p in sm["phases"]],
                          [("P1", "in_progress"), ("P2", "open")])
         self.assertEqual(sm["open_count"], 1)
 
@@ -602,7 +603,9 @@ class WhereTests(Base):
         self.assertEqual((s["state"]["plan"]["title"], s["state"]["plan"]["source"], s["state"]["phase"]["id"]),
                          ("Emails", "STATE.md", "STATE.md:2"))
         self.assertEqual(s["ignored_plan"], {"id": "yah-1", "title": "Checkout rewrite", "source": "beads"})
-        self.assertEqual([h["id"] for h in s["state"]["human"]], ["yah-5", "yah-6", "STATE.md:5"])  # both still count
+        self.assertEqual((s["store"]["kind"], s["store"]["path"]), ("STATE.md", str(repo / "STATE.md")))
+        self.assertIn("beads epic yah-1 ignored: STATE.md has a plan", s["store"]["note"])
+        self.assertEqual([h["id"] for h in s["state"]["human"]], ["STATE.md:5", "yah-5", "yah-6"])  # both count, STATE.md first
         full = self.where(repo).splitlines()
         self.assertEqual(full[1:4], ["PLAN    Emails  [0/1 done]  STATE.md  emails.md",
                                      "!       beads epic yah-1 ignored: STATE.md has a plan",
@@ -681,7 +684,19 @@ class WhereTests(Base):
         (repo / "STATE.md").write_text("## Follow-ups\n- [ ] Rotate the prod keys (you)\n", encoding="utf-8")
         s = json.loads(self.where(repo, "--json"))
         self.assertEqual((s["state"]["plan"]["source"], s["ignored_plan"]), ("beads", None))  # no STATE.md plan
-        self.assertEqual([h["id"] for h in s["state"]["human"]], ["yah-5", "yah-6", "STATE.md:2"])
+        self.assertEqual([h["id"] for h in s["state"]["human"]], ["STATE.md:2", "yah-5", "yah-6"])
+        self.assertEqual(s["store"], {"kind": "STATE.md", "path": str(repo / "STATE.md"), "bd": None,
+                                      "note": "bd was skipped (--no-bd)"})  # a beads plan, but no bd
+        w = load_where()
+        with mock.patch.dict(os.environ), mock.patch.object(w.beads, "find_tool", return_value=None):
+            os.environ.pop("BEADS_DIR", None)
+            bz = w.beads.read(repo, repo)
+        self.assertEqual((bz["source"], bz["bd"], bz["note"]), ("jsonl", None, "the bd CLI was not found"))
+        self.assertEqual(bz["state"]["plan"]["id"], "yah-1")
+        with mock.patch.dict(os.environ), mock.patch.object(w.beads, "find_tool", return_value=str(repo / "no-bd")):
+            os.environ.pop("BEADS_DIR", None)
+            bz = w.beads.read(repo, repo)  # a bd whose `bd list` fails here is not one the model may run
+        self.assertEqual((bz["source"], bz["bd"], bz["note"]), ("jsonl", None, "`bd list` failed here"))
 
     def test_state_md_you_without_plan(self):
         repo = self.repo({"STATE.md": STATE_DATED + "\n## Follow-ups\n- [ ] Rotate the test keys (you)\n"})
@@ -801,18 +816,20 @@ class WhereTests(Base):
         plain = self.repo(name="plain")
         out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=plain)
         self.assertEqual(rc, 0, err)
-        self.assertEqual((json.loads(out)["bd"], json.loads(out)["beads_dir"]), (None, None))
+        self.assertEqual((json.loads(out)["store"], json.loads(out)["beads_source"]),
+                         ({"kind": "STATE.md", "path": str(plain / "STATE.md"), "bd": None, "note": None}, None))
         repo = self.beads_repo()
         out, err, rc = self.py("where.py", "--no-gh", "--json", cwd=repo)
         s = json.loads(out)
         self.assertEqual(s["beads_source"], "bd", err)
         self.assertEqual(Path(s["state"]["in_progress"][0]["title"]), repo / ".beads")
-        self.assertIsNone(s["bd"])  # the model's own bd calls would inherit the foreign BEADS_DIR
-        self.assertIn("BEADS_DIR", s["bd_note"])
+        self.assertEqual((s["store"]["kind"], s["store"]["bd"]), ("STATE.md", None))  # the model's own bd calls would inherit the foreign BEADS_DIR
+        self.assertIn("BEADS_DIR", s["store"]["note"])
         del self.env["BEADS_DIR"]
         s = json.loads(self.py("where.py", "--no-gh", "--json", cwd=repo)[0])
-        self.assertTrue(Path(s["bd"]).name.startswith("bd"))
-        self.assertIsNone(s["bd_note"])
+        self.assertEqual(s["store"]["kind"], "beads")
+        self.assertTrue(Path(s["store"]["bd"]).name.startswith("bd"))
+        self.assertIsNone(s["store"]["note"])
 
     def test_same_named_repos_keep_separate_caches(self):
         (self.tmp / "a").mkdir()
@@ -1197,6 +1214,14 @@ class HookShellTests(Base):
 # ---------------------------------------------------------------- repo hygiene
 
 class RepoTests(unittest.TestCase):
+    def test_where_core_is_bd_free(self):
+        # beads.py is the only file that knows beads: where.py reads it through beads.read()
+        src = (SCRIPTS / "where.py").read_text("utf-8")
+        for gone in ("BEADS_DIR", 'find_tool("bd"', "def load_issues", "def beads_state", "parent-child",
+                     "bd update", "import shutil"):
+            self.assertNotIn(gone, src, gone)
+        self.assertIn("beads.read(", src)
+
     def test_python39_syntax(self):
         for f in list(SCRIPTS.glob("*.py")) + [Path(__file__)]:
             with self.subTest(f=f.name):

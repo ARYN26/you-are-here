@@ -49,10 +49,9 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import where  # noqa: E402
 from statusline import week_pace  # noqa: E402
-from yahlib import (config, data_dir, find_git, num, project_key, read_branch, read_json,  # noqa: E402
-                    utf8_stdout)
+from yahlib import (NO_WINDOW, config, data_dir, find_git, find_tool, num, project_key, read_branch,  # noqa: E402
+                    read_json, run, utf8_stdout)
 
-NO_WINDOW = where.NO_WINDOW
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
 KEEP_RUNS = 20
 TAG = re.compile(r"^\s*YAH-RESULT:\s*(.+?)\s*$", re.M)
@@ -228,7 +227,7 @@ def pr_base(r, s):
     for p in s.get("prs") or []:
         if isinstance(p, dict) and p.get("baseRefName") and (p.get("number") == r.pr or p.get("headRefName") == mine):
             return p["baseRefName"], f"the base of PR #{p.get('number')}"
-    ref = (where.run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], r.top, timeout=3) or "").strip()
+    ref = (run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], r.top, timeout=3) or "").strip()
     if ref.startswith("origin/"):
         return ref[7:], "origin/HEAD"
     return (r.prod, "prod in config.json") if r.prod else ("", "")
@@ -244,7 +243,7 @@ def refresh(r, s=None):
         r.label = (b.get("phase") or b.get("next_phase") or {}).get("label")
     r.phase = next((p for p in b.get("phases") or [] if p.get("label") == r.label), None) if r.label else None
     r.next = (r.phase or {}).get("next") or (s.get("state_md") or {}).get("next") or ""
-    r.head = (where.run(["git", "rev-parse", "--short", "HEAD"], r.top, timeout=5) or "").strip() or "?"
+    r.head = (run(["git", "rev-parse", "--short", "HEAD"], r.top, timeout=5) or "").strip() or "?"
     if not r.pr:
         r.pr = pr_from_where(s, r.phase)
 
@@ -590,7 +589,7 @@ def main():
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
     prod = prod_branch(str(pcfg.get("prod") or ""))
     branch = read_branch(git_dir) if git_dir else None
-    gh_path = where.find_tool("gh")
+    gh_path = find_tool("gh")
     # where.py's protected set covers a repo with no config.json: the plan's phase bases, where open PRs land
     # (or landed when gh last saw any), origin/HEAD and the branch HEAD was cut from, beside the trunks.
     s = where.collect(str(top), use_gh=bool(gh_path)) or {}

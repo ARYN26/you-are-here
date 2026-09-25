@@ -10,6 +10,7 @@ import re
 import sys
 from pathlib import Path
 
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 # tier -> (amber, wrap_soon, wrap_now). Starting points, not official numbers.
 TIERS = {"pro": (100_000, 120_000, 160_000), "max5": (120_000, 150_000, 200_000),
          "max20": (150_000, 200_000, 260_000), "api": (80_000, 100_000, 150_000)}
@@ -159,3 +160,59 @@ def where_cache_path(main_root):
     name = registered_key(main_root) or "{}-{}".format(
         Path(main_root).name.lower(), hashlib.sha1(norm(main_root).encode("utf-8")).hexdigest()[:8])
     return data_dir() / "where-{}.json".format(re.sub(r"[^\w.-]", "_", name))
+
+
+# ---------------------------------------------------------------- subprocess
+
+def run(cmd, cwd, timeout=10, env=None):
+    import subprocess  # here, not at the top: the statusline and prompt hooks import yahlib and never run one
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout, env=env,
+                           creationflags=NO_WINDOW)
+        if p.returncode != 0:
+            return None
+        return p.stdout.decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def find_tool(name, extra=()):
+    """PATH first, then where Homebrew and pipx/uv put binaries, then the `extra` dirs."""
+    import shutil
+    dirs = [Path.home() / ".local" / "bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin"), *extra]
+    return shutil.which(name) or shutil.which(name, path=os.pathsep.join(str(p) for p in dirs))
+
+
+# ---------------------------------------------------------------- plan state, the shape every source fills
+
+def repo_dirs(top, main_root):
+    """The worktree, then the main checkout: gitignored state (.beads, STATE.md) exists only where it was made."""
+    return list(dict.fromkeys((Path(top), Path(main_root or top))))
+
+
+def first_line(text):
+    for ln in (text or "").splitlines():
+        ln = ln.strip().lstrip("-* ").strip()
+        if ln:
+            return re.sub(r"^(NEXT|Next)\s*[:\-]\s*", "", ln)
+    return ""
+
+
+def short_of(title):
+    """A plan's statusline tag: its title's first word, upper case."""
+    return ((title or "").split() or ["PLAN"])[0].upper()[:8]
+
+
+def empty_state():
+    """The plan state with nothing in it, that each source fills."""
+    return {"human": [], "in_progress": [], "open_count": 0, "plan": None, "phase": None, "next_phase": None,
+            "phases": []}
+
+
+def pick_phase(state, views):
+    """The in_progress phase is current; with none running, the first unclosed one is next."""
+    running = [v for v in views if v["status"] == "in_progress"]
+    pending = [v for v in views if v["status"] != "closed"]
+    state.update(phases=views, phase=running[0] if running else None,
+                 next_phase=None if running else pending[0] if pending else None)
+    return state

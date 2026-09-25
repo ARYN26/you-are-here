@@ -10,11 +10,11 @@ Input: the plan file in `$ARGUMENTS`. Otherwise use the plan approved in this se
 
 `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
-Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh` and read its `beads_source` and `bd` fields. STATE.md is the default. Use **beads** only if the repo already uses it: `beads_source` is set (a `.beads/` at this repo's root), `bd` is a path, and `state.plan` is null or from beads (a STATE.md plan wins over a beads epic). Run beads commands as that path, quoted. Never set, export or follow `BEADS_DIR`. If `.beads/` exists but `bd` is null, tell the user `bd_note`, or that the bd CLI was not found, before using **STATE.md**.
+Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh` and read its `store`: it says where the plan is written, so never work that out yourself. `store.kind` is `STATE.md` (the default) or `beads` (a repo that already uses beads; a STATE.md plan wins over a beads epic). If `store.note` is set, tell the user first. Then follow only the section `store.kind` names. Never set, export or follow `BEADS_DIR`.
 
 ## STATE.md
 
-Edit the file at `state_md.path` from the JSON above (in a linked worktree, the main checkout's); with no `state_md`, create STATE.md at `main_root`. Keep any dated entries. If a `## Plan:` section already names this plan path, replace it; otherwise add one at the top:
+Edit the file at `store.path` from the JSON above (in a linked worktree, the main checkout's), or create it if it does not exist. Keep any dated entries. If a `## Plan:` section already names this plan path, replace it; otherwise add one at the top:
 
 ```markdown
 ## Plan: <plan name> (<plan path>)
@@ -37,6 +37,8 @@ A step only the user can do (a review, a merge, a console step) is its own line 
 `- At:` stamps NEXT so `/yah:where` can flag it once commits land after it; leave it out if the repo tracks STATE.md. Tell the user STATE.md is not committed unless they want it tracked; offer to add it to `.gitignore`.
 
 ## Beads (only if the repo already uses it)
+
+Run every `bd` below as `store.bd`, quoted.
 
 1. **Look for an existing epic:** `bd list --type epic --all --json --limit 0`. Match `spec_id` against the plan path. If one exists, update it (add missing phases, fix refs) instead of creating a duplicate.
 2. **Create the epic:** `bd create "<plan name>" -t epic -l plan --spec-id "<plan path>" --silent`

@@ -16,17 +16,19 @@ PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh
 
 `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
-Note `state.plan` (its `source` is `STATE.md`, `NOW.md` or `beads`, its `spec` the plan file), `state.phase` (label, branch, id), `beads_source`, `git.branch`, `git.dirty`, `state_md`, `protected`, `bd` and `next_stale`.
+Note `state.plan` (its `spec` is the plan file), `state.phase` (label, branch, id), `store`, `git.branch`, `git.dirty`, `protected` and `next_stale`.
 
 `next_stale` set means commits landed after NEXT was written, so it may already be done. Run `git log --oneline <next_stale.sha>..<next_stale.branch>` and write the new NEXT from where those commits leave off.
 
-STATE.md is the default. Use beads only if the repo already uses it: `beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path; run beads commands as that path, quoted. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
-- `beads_source` is set, `bd` is a path and `state.plan.source` is `beads`: use **2b**.
-- Anything else (a plan from STATE.md/NOW.md, no plan, no beads DB here, or `bd` null): use **2a**. If `.beads/` exists but `bd` is null, say why first: print `bd_note`, or say the bd CLI is missing. If `ignored_plan` is set, say that STATE.md's plan wins over that beads epic.
+`store` says where the plan is written; never work that out yourself. If `store.note` is set, tell the user first.
+- `store.kind` is `beads` and `state.plan` is set: use **2b**.
+- Otherwise use **2a**, STATE.md.
+
+Run every bd command in this skill as `store.bd`, quoted. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
 
 ## 2a. STATE.md: write today's entry
 
-Edit the file at `state_md.path`. In a linked worktree that is the main checkout's, which outlives the worktree. With no `state_md`, create STATE.md at `main_root`.
+Edit the file at `store.path`, or create it if it does not exist. In a linked worktree that is the main checkout's, which outlives the worktree.
 - Add a `## YYYY-MM-DD` entry for today (or rewrite today's), with `- Next: <NEXT line>` first and at most 3 short lines after it: what is done, what is half-done and where, any trap.
 - The NEXT line is what `/yah:where` prints as NEXT: one concrete action someone could start cold, at most 140 characters. Example: "Run make eval, then paste the table into PR #9".
 - In the `## Plan:` section, keep the phase lines (the outermost checkboxes) true: `[x]` done, exactly one `[~]` current, `[ ]` open, with `| branch X | base Y | PR #N` fields. Indented checkbox lines under a phase are its sub-tasks.
