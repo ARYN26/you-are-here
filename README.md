@@ -43,17 +43,18 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | Context guard | A UserPromptSubmit hook. It nudges once at the wrap mark, once at wrap now, once per session on a premium model, and once a day when weekly use runs ahead of pace. It never blocks. | One local Python run per prompt. A short message only when a nudge fires. |
 | Brain recall | A UserPromptSubmit hook. On a session's first prompt it injects the [brain](#the-brain) notes that match the prompt, the phase and your changed files. | 0 when the repo has no brain folder. Otherwise once per session, capped at about 2.5k tokens, usually a few hundred. Recall over 100 notes took about 80–130 ms. |
 | `/yah:where` | The full view in up to 15 lines: branch (with no upstream, how far ahead of its base), plan, phase, NEXT and whether commits have made it stale, what waits on you, the PR stack and the PROD warning. | Runs git, plus `gh` if installed, and `bd` only in a repo with `.beads/`. The output enters your context. |
+| `/yah:auto` | The launcher's first prompt, so a session starts without you typing. It reads the injected state and runs the step it calls for: continues NEXT through `/yah:start`, asks a `NEEDS-HUMAN` question, checks a PR that waits on you, fixes failing checks or review comments, tracks a newly approved plan with `/yah:phases`, sends a hard question to `/yah:deep` on any tier, and ends with `/yah:wrap`. With no plan it asks what to build; it never invents a task. | One turn to pick the step, then that step's own cost. Hidden from the model, so no listing cost. |
 | `/yah:start` | Starts a task: restates the task, phase and first step from the injected state before any tool call, runs one recall on the task's key nouns, allows at most one targeted search, then makes the edit. Offers to create a brain folder if there is none. | One turn plus the recall output. |
 | `/yah:wrap` | Ends a task. Rewrites NEXT in STATE.md, ticks off finished items, writes at most one brain note, commits WIP on the feature branch, stamps NEXT with that commit and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear". | One turn in your session. Writes in your repo. |
 | `/yah:phases` | Turns an approved plan into phases in STATE.md. | One turn. Writes in your repo. |
-| `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). | Fable usage. See the plan table. |
+| `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). Works on every tier: when the account cannot use Fable, Claude Code runs the agent on the session's model. | Fable usage. See the plan table. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
 | `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops. The merge is yours. See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
 | PostToolUse guard | The context guard again after each tool call, so wrap nudges reach a headless session, which has only one prompt. | Only inside `yah run` iterations: one local Python run per tool call. Interactive sessions never run it. |
 | Push guard | A PreToolUse hook on Bash and PowerShell that denies force pushes, pushes to protected branches and merges. See [Rails](#hands-free-runs-yah-run). | Only inside `yah run` iterations: one local Python run per Bash call. Interactive sessions never run it. |
 | Ultracode opt-in | Max 20x only, offered by `/yah:setup`: ultracode on in every session with workflows capped at medium size, plus a once-per-session rule for sizing workflows. See [Ultracode on Max 20x](#ultracode-on-max-20x). | About 80 tokens once per session. The spend is ultracode's own: xhigh effort and workflow agents. |
-| Skill and agent listing | The short descriptions Claude Code lists so the model knows these exist, each 92 characters or fewer. `/yah:resume` and `/yah:setup` are hidden from the model. | Measured in one clean A/B pair against a no-plugin session: +593 tokens per turn in total. Of that, the skill listing is about 125 tokens (493 characters), the agent listing about 75 (299 characters) and the SessionStart block about 125; the other ~270 were not attributed (likely wrapper text and noise). Since that run the SessionStart block gained its restate rule (104 characters, about 26 tokens) and the wrap description 7 characters. If you append RULES.md through setup, add about 320 tokens (about 1,270 characters) per turn. |
-| `/yah:setup` and the `yah` launcher | Sets the statusline and your tier. Optionally adds a `yah <project>` shell function that cds into a project and runs `claude`; `yah run` goes to the run driver. | Changes `statusLine` in settings.json, after a backup. Each step asks first. |
+| Skill and agent listing | The short descriptions Claude Code lists so the model knows these exist, each 92 characters or fewer. `/yah:auto`, `/yah:resume` and `/yah:setup` are hidden from the model. | Measured in one clean A/B pair against a no-plugin session: +593 tokens per turn in total. Of that, the skill listing is about 125 tokens (493 characters), the agent listing about 75 (299 characters) and the SessionStart block about 125; the other ~270 were not attributed (likely wrapper text and noise). Since that run the SessionStart block gained its restate rule (104 characters, about 26 tokens) and the wrap description 7 characters. If you append RULES.md through setup, add about 320 tokens (about 1,270 characters) per turn. |
+| `/yah:setup` and the `yah` launcher | Sets the statusline and your tier. Optionally adds a `yah <project>` shell function that cds into a project and starts `claude` on `/yah:auto`; `yah run` goes to the run driver. | Changes `statusLine` in settings.json, after a backup. Each step asks first. |
 
 ## Install
 
@@ -71,7 +72,7 @@ You can also run setup from a terminal (use `python` on Windows):
 python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --tier max5 --dry-run
 ```
 
-Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell` (prints the snippet), `--install-launcher RCFILE`, `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below) and `--yes` (no prompts).
+Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell|cmd` (prints the snippet), `--install-launcher RCFILE` (a `.cmd` path, or a folder on Windows, gets a whole `yah.cmd`), `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below) and `--yes` (no prompts).
 
 **Updating**
 
@@ -84,7 +85,7 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
 - **Claude Code:** tested with 2.1.280. `yah run` needs a version that supports `--permission-prompts`.
 - **macOS:** needs `python3` 3.9+, from the Xcode Command Line Tools or Homebrew. Without the Command Line Tools, `/usr/bin/python3` opens an install dialog, so setup times out its probe and tells you to run `xcode-select --install` or `brew install python`. zsh gets the launcher.
 - **Linux:** needs `python3` 3.9+. bash gets the launcher.
-- **Windows:** needs Python 3.9+ from python.org or winget, plus Git for Windows. Claude Code runs hooks in Git Bash there. Setup tries `python`, then `py -3`, then `python3`, because `python3` on Windows is often the Microsoft Store stub. PowerShell gets the launcher. Without Git Bash, Claude Code falls back to PowerShell for hooks, and yah's hooks cannot run there (the statusline still works). Setup warns when it cannot find Git Bash.
+- **Windows:** needs Python 3.9+ from python.org or winget, plus Git for Windows. Claude Code runs hooks in Git Bash there. Setup tries `python`, then `py -3`, then `python3`, because `python3` on Windows is often the Microsoft Store stub. PowerShell gets the launcher. cmd.exe loads no profile, so for cmd setup writes a `yah.cmd` into a folder on PATH instead (next to `claude` by default): `--install-launcher <folder>\yah.cmd`. After Ctrl+C in Claude, cmd may ask "Terminate batch job (Y/N)?"; that is cmd, not yah. Without Git Bash, Claude Code falls back to PowerShell for hooks, and yah's hooks cannot run there (the statusline still works). Setup warns when it cannot find Git Bash.
 - **Optional:** `gh` adds the PR lines, and `yah run` needs it to follow the PR. Plan state lives in a `STATE.md` file in the repo, so there is nothing to install (see [Plan state: STATE.md](#plan-state-statemd)). A repo that already uses beads can keep it (see [If you already use beads](#if-you-already-use-beads)).
 
 ## The daily loop
@@ -93,8 +94,8 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
    ```
    yah shop
    ```
-   It cds into the repo and runs `claude`. Run `yah` alone to list projects. If two repos share a folder name, `yah NAME` lists both and refuses; give one a key under `projects` in config.json. Starting from the home folder means project memory does not load. The SessionStart hook tells the model where you are.
-2. **Start the task:**
+   It cds into the repo and starts `claude` with `/yah:auto` as the first prompt, so there is nothing to type: it continues NEXT, asks a `NEEDS-HUMAN` question, checks a PR that waits on you, or, with no plan, asks what to build. `yah shop add Apple Pay to the payment form` hands it that task instead. Flags go straight to `claude` with no prompt, e.g. `yah shop --resume <id>`. Run `yah` alone to list projects. If two repos share a folder name, `yah NAME` lists both and refuses; give one a key under `projects` in config.json. Starting from the home folder means project memory does not load. The SessionStart hook tells the model where you are.
+2. **The step runs through the yah skills.** `/yah:auto` calls `/yah:start` for a task, `/yah:phases` when a new plan is approved, `/yah:deep` for a hard question and `/yah:wrap` at the end. You can call any of them yourself:
    ```
    /yah:start "add Apple Pay to the payment form"
    ```
@@ -105,7 +106,7 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
    /yah:wrap
    /clear
    ```
-5. **Resume.** The fresh session gets PLAN, PHASE and NEXT injected, so it starts on the next step without reading docs. If the statusline says "cache cold", `/clear` beats resuming the old session.
+5. **Resume.** The fresh session gets PLAN, PHASE and NEXT injected, so it starts on the next step without reading docs. After `/clear`, type `/yah:auto`; from a terminal, `yah shop` sends it for you. If the statusline says "cache cold", `/clear` beats resuming the old session.
 
 A new multi-phase plan was just approved? Run `/yah:phases` before its first phase. Want steps 2 to 5 repeated without you? See [`yah run`](#hands-free-runs-yah-run).
 
@@ -331,7 +332,7 @@ Windows has `python`. macOS and Linux fail on it instantly and fall through to `
 | `scripts/push_guard.py` | The PreToolUse push guard inside `yah run` |
 | `scripts/setup.py` | Setup and `--uninstall` |
 | `hooks/hooks.json` | SessionStart and UserPromptSubmit wiring |
-| `skills/*/SKILL.md` | `/yah:where`, `/yah:start`, `/yah:wrap`, `/yah:phases`, `/yah:deep`, `/yah:resume`, `/yah:setup` |
+| `skills/*/SKILL.md` | `/yah:auto`, `/yah:where`, `/yah:start`, `/yah:wrap`, `/yah:phases`, `/yah:deep`, `/yah:resume`, `/yah:setup` |
 | `agents/scout.md`, `agents/deep.md` | The two agents |
 | `RULES.md` | Optional CLAUDE.md snippet |
 
@@ -450,7 +451,7 @@ Undo setup first, while the script is still on disk. On Windows, use `python` in
 python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --uninstall
 ```
 
-This restores your previous statusline (or removes yah's if there was none), and removes the launcher and RULES.md blocks if setup added them. Then remove the plugin and the marketplace:
+This restores your previous statusline (or removes yah's if there was none), and removes the launcher and RULES.md blocks (and a `yah.cmd` it wrote) if setup added them. Then remove the plugin and the marketplace:
 
 ```
 /plugin uninstall yah@you-are-here

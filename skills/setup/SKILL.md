@@ -32,7 +32,7 @@ Only when the tier is `max20`, offer: "Turn ultracode on for every session? It r
 
 ## 4. Launcher (optional)
 
-Explain: `yah <project>` opens Claude Code in that project from any folder, so project hooks and memory load; `yah` alone lists projects. On yes, find the shell's rc file (`~/.zshrc`, `~/.bashrc`, `~/.config/fish/config.fish`, or on Windows the path printed by `powershell -NoProfile -Command '$PROFILE'`) and run `setup.py --install-launcher <rcfile>`. Tell the user to open a new terminal.
+Explain: `yah <project>` opens Claude Code in that project from any folder, so project hooks and memory load; `yah` alone lists projects. On yes, find the shell's rc file (`~/.zshrc`, `~/.bashrc`, `~/.config/fish/config.fish`, or on Windows the path printed by `powershell -NoProfile -Command '$PROFILE'`) and run `setup.py --install-launcher <rcfile>`. On Windows also run it with the `yah.cmd` path that setup printed, so `yah` works in cmd.exe too. Tell the user to open a new terminal.
 
 ## 5. Working rules (optional)
 
