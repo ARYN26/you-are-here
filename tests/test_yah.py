@@ -933,8 +933,11 @@ class SetupTests(Base):
         self.settings(self.SETTINGS)
         (self.home / ".bashrc").write_text("export A=1\n", encoding="utf-8")
         scripts = self.plugin_copy(self.tmp / "plugin", rules="# Rules\n")
+        (self.cfg / "plugins").mkdir()
+        (self.cfg / "plugins" / "known_marketplaces.json").write_text(
+            json.dumps({"you-are-here": {"source": {"source": "github", "repo": "ARYN26/you-are-here"}}}), "utf-8")
         before = self.snapshot()
-        for args in (["--tier", "max20", "--yes"], ["--install-launcher", str(self.home / ".bashrc")],
+        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--install-launcher", str(self.home / ".bashrc")],
                      ["--install-rules"], ["--uninstall"]):
             out, err, rc = self.setup_py("--dry-run", *args, scripts=scripts)
             self.assertEqual(rc, 0, err)
@@ -1005,6 +1008,88 @@ class SetupTests(Base):
         s = self.settings()
         self.assertNotIn("ultracode", s)
         self.assertEqual(s["workflowSizeGuideline"], "small")
+
+    GH = {"source": "github", "repo": "ARYN26/you-are-here"}
+
+    def known(self, **entries):
+        p = self.cfg / "plugins" / "known_marketplaces.json"
+        p.parent.mkdir(exist_ok=True)
+        p.write_text(json.dumps(entries), encoding="utf-8")
+        return p
+
+    def no_update_env(self):
+        for v in ("DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                  "FORCE_AUTOUPDATE_PLUGINS", "CLAUDE_CODE_PLUGIN_CACHE_DIR"):
+            self.env.pop(v, None)
+
+    def test_auto_update_opt_in_and_uninstall(self):
+        self.no_update_env()
+        other = {"source": {"source": "github", "repo": "someone/else"}}
+        original = dict(self.SETTINGS, statusLine={"type": "command", "command": "echo mine"},
+                        extraKnownMarketplaces={"other": other, "you-are-here": {"source": self.GH}})
+        self.settings(original)
+        known = self.known(**{"you-are-here": {"source": self.GH, "installLocation": "x"}})
+        known_before = known.read_bytes()
+        out, err, rc = self.setup_py("--auto-update", "--yes")  # --yes must not reach the statusline
+        self.assertEqual(rc, 0, err)
+        self.assertIn("autoupdate on for you-are-here", out)
+        self.assertNotIn("auto-update off", out)
+        s = self.settings()
+        self.assertEqual(s["extraKnownMarketplaces"], {"other": other,
+                                                       "you-are-here": {"source": self.GH, "autoUpdate": True}})
+        self.assertEqual({k: v for k, v in s.items() if k != "extraKnownMarketplaces"},
+                         {k: v for k, v in original.items() if k != "extraKnownMarketplaces"})
+        self.assertEqual(known.read_bytes(), known_before)  # Claude Code's own record is never written
+        self.assertIn("autoupdate unchanged (on for you-are-here)", self.setup_py("--auto-update")[0])
+        self.setup_py("--uninstall")
+        self.assertEqual(self.settings(), original)
+
+    def test_auto_update_adds_a_missing_entry_and_uninstall_removes_it(self):
+        self.no_update_env()
+        self.known(**{"you-are-here": {"source": self.GH, "autoUpdate": False}})
+        out, err, rc = self.setup_py("--auto-update", "--yes")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.settings(), {"extraKnownMarketplaces":  # no statusLine, no config.json
+                                           {"you-are-here": {"source": self.GH, "autoUpdate": True}}})
+        self.assertFalse((self.data / "config.json").exists())
+        self.setup_py("--uninstall")
+        self.assertEqual(self.settings(), {})
+
+    def test_auto_update_leaves_settings_alone_when_it_cannot_or_need_not_apply(self):
+        self.no_update_env()
+        for why, known, expect in (
+                ("not installed", {}, "not an installed marketplace"),
+                ("local", {"you-are-here": {"source": {"source": "directory", "path": "/src/yah"}}}, "loads in place"),
+                ("already on", {"you-are-here": {"source": self.GH, "autoUpdate": True}}, "autoupdate unchanged")):
+            with self.subTest(why):
+                self.settings(self.SETTINGS)
+                self.known(**known)
+                out, err, rc = self.setup_py("--auto-update", "--yes")
+                self.assertEqual(rc, 0, err)
+                self.assertIn(expect, out)
+                self.assertNotIn("extraKnownMarketplaces", self.settings())
+
+    def test_auto_update_warns_when_an_env_var_turns_updates_off(self):
+        self.no_update_env()
+        self.known(**{"you-are-here": {"source": self.GH}})
+        self.env["DISABLE_AUTOUPDATER"] = "0"  # a 0 turns nothing off
+        self.assertNotIn("auto-update off", self.setup_py("--auto-update", "--yes")[0])
+        self.env["DISABLE_AUTOUPDATER"] = "1"
+        self.assertIn("WARNING    DISABLE_AUTOUPDATER", self.setup_py("--auto-update", "--yes")[0])
+        self.env["FORCE_AUTOUPDATE_PLUGINS"] = "0"
+        self.assertIn("WARNING    DISABLE_AUTOUPDATER", self.setup_py("--auto-update", "--yes")[0])
+        self.env["FORCE_AUTOUPDATE_PLUGINS"] = "1"
+        self.assertNotIn("auto-update off", self.setup_py("--auto-update", "--yes")[0])
+
+    def test_auto_update_rerun_after_a_hand_edit_restores_the_latest_choice(self):
+        self.no_update_env()
+        self.known(**{"you-are-here": {"source": self.GH}})
+        self.settings({"extraKnownMarketplaces": {"you-are-here": {"source": self.GH}}})
+        self.setup_py("--auto-update")
+        self.settings({})  # the user deletes the entry by hand, then runs setup again
+        self.setup_py("--auto-update")
+        self.setup_py("--uninstall")
+        self.assertEqual(self.settings(), {})  # not a leftover {"source": ...} entry
 
     def test_launcher_block(self):
         rc_file = self.home / ".bashrc"

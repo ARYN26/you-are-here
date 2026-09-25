@@ -64,7 +64,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 /yah:setup
 ```
 
-A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers the `yah` launcher and offers to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md` (about 320 tokens on every turn). Each step needs your yes.
+A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers auto-update (see below), the `yah` launcher, and to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md` (about 320 tokens on every turn). Each step needs your yes.
 
 You can also run setup from a terminal (use `python` on Windows):
 
@@ -72,11 +72,11 @@ You can also run setup from a terminal (use `python` on Windows):
 python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --tier max5 --dry-run
 ```
 
-Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell|cmd` (prints the snippet), `--install-launcher RCFILE` (a `.cmd` path, or a folder on Windows, gets a whole `yah.cmd`), `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below) and `--yes` (no prompts).
+Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell|cmd` (prints the snippet), `--install-launcher RCFILE` (a `.cmd` path, or a folder on Windows, gets a whole `yah.cmd`), `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below), `--auto-update` (opt-in, runs on its own: turns on Claude Code's auto-update for yah's marketplace and changes nothing else) and `--yes` (no prompts).
 
 **Updating**
 
-yah sets no version number, so every commit to main counts as a new version. Claude Code does not auto-update third-party marketplaces unless you turn it on: `/plugin` → **Marketplaces** → `you-are-here` → **Enable auto-update**. Without that, update by hand with `claude plugin update yah@you-are-here` (or `/plugin` → **Installed** → yah → **Update now**), then run `/reload-plugins` or start a new session. The statusline and the launcher run from the marketplace clone, so they pick up the update too.
+yah sets no version number, so every commit to main counts as a new version. Claude Code does not auto-update third-party marketplaces unless you turn it on, and a plugin author cannot change that default. `/yah:setup` offers to turn it on for you (`setup.py --auto-update`), or do it yourself: `/plugin` → **Marketplaces** → `you-are-here` → **Enable auto-update**. Without that, update by hand with `claude plugin update yah@you-are-here` (or `/plugin` → **Installed** → yah → **Update now**), then run `/reload-plugins` or start a new session. The statusline and the launcher run from the marketplace clone, so they pick up the update too.
 
 Running a fork of yah, or another plugin with the same hooks? Disable it while yah is installed (`/plugin disable <name>`); otherwise every hook and skill listing runs twice.
 
@@ -308,6 +308,7 @@ The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own cont
 - `statusLine` in `settings.json`, after saving `settings.json.bak-yah-YYYYmmdd-HHMMSS`. The old value goes into `setup-state.json`.
 - `config.json` in the data folder (the tier, and `ultracode` if you opt in).
 - With `--ultracode` only: `ultracode` and `workflowSizeGuideline` in `settings.json`, after a backup. The old values go into `setup-state.json`.
+- With `--auto-update` only: `autoUpdate: true` on yah's `extraKnownMarketplaces` entry in `settings.json`, after a backup (the entry is added with the source Claude Code recorded if it is missing). The old value goes into `setup-state.json`.
 - Optionally, your shell rc (a block between `# >>> you-are-here >>>` and `# <<< you-are-here <<<`) and `~/.claude/CLAUDE.md` (RULES.md appended in a marked block). Each happens only after your yes. Setup never rewrites an rc file that isn't valid UTF-8; it prints the snippet for you to paste instead.
 
 **Hooks.** Claude Code runs hooks in `sh` on macOS and Linux and in Git Bash on Windows, so one POSIX command covers all three:
@@ -429,7 +430,7 @@ The official cost advice is `/clear` between tasks, because `/compact` is itself
 The notes live in your repo, so they are reviewed in PRs, diffed and grepped, and they open in Obsidian. Recall is local keyword overlap plus changed-file globs, once per session, with no extra process. The trade-off is that it misses notes whose words never come up; INDEX.md is the full list.
 
 **Does it change my settings?**
-Only `statusLine`, after a timestamped backup, with the old value recorded. If you already have a statusline, setup shows it and replaces it only after your yes. It never touches model, effort, permissions, hooks or env, except the two ultracode keys when you pass `--ultracode`. `--uninstall` puts the old values back.
+Only `statusLine`, after a timestamped backup, with the old value recorded. If you already have a statusline, setup shows it and replaces it only after your yes. It never touches model, effort, permissions, hooks or env, except the two ultracode keys when you pass `--ultracode` and yah's marketplace `autoUpdate` when you pass `--auto-update`. `--uninstall` puts the old values back.
 
 **Why Python?**
 Stdlib only, so there is nothing to install beyond Python itself. macOS ships `python3` 3.9 with the Xcode Command Line Tools, so the code avoids 3.10+ syntax. The same files run on macOS, Linux and Windows, and you can read all of them in one sitting.
