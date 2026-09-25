@@ -44,8 +44,8 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | Brain recall | A UserPromptSubmit hook. On a session's first prompt it injects the [brain](#the-brain) notes that match the prompt, the phase and your changed files. | 0 when the repo has no brain folder. Otherwise once per session, capped at about 2.5k tokens, usually a few hundred. Recall over 100 notes took about 80–130 ms. |
 | `/yah:where` | The full view in up to 15 lines: branch (with no upstream, how far ahead of its base), plan, phase, NEXT and whether commits have made it stale, what waits on you, the PR stack and the PROD warning. | Runs git, plus `gh` and `bd` if installed. The output enters your context. |
 | `/yah:start` | Starts a task: restates the task, phase and first step from the injected state before any tool call, runs one recall on the task's key nouns, allows at most one targeted search, then makes the edit. Offers to create a brain folder if there is none. | One turn plus the recall output. |
-| `/yah:wrap` | Ends a task. Rewrites NEXT, closes finished beads, writes at most one brain note, commits WIP on the feature branch, stamps NEXT with that commit and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear". | One turn in your session. Writes in your repo. |
-| `/yah:phases` | Turns an approved plan into phases, in beads or in STATE.md. | One turn. Writes in your repo. |
+| `/yah:wrap` | Ends a task. Rewrites NEXT in STATE.md (or beads), ticks off finished items, writes at most one brain note, commits WIP on the feature branch, stamps NEXT with that commit and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear". | One turn in your session. Writes in your repo. |
+| `/yah:phases` | Turns an approved plan into phases in STATE.md, or in beads if the repo already uses it. | One turn. Writes in your repo. |
 | `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). | Fable usage. See the plan table. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
 | `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops. The merge is yours. See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
@@ -85,7 +85,7 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
 - **macOS:** needs `python3` 3.9+, from the Xcode Command Line Tools or Homebrew. Without the Command Line Tools, `/usr/bin/python3` opens an install dialog, so setup times out its probe and tells you to run `xcode-select --install` or `brew install python`. zsh gets the launcher.
 - **Linux:** needs `python3` 3.9+. bash gets the launcher.
 - **Windows:** needs Python 3.9+ from python.org or winget, plus Git for Windows. Claude Code runs hooks in Git Bash there. Setup tries `python`, then `py -3`, then `python3`, because `python3` on Windows is often the Microsoft Store stub. PowerShell gets the launcher. Without Git Bash, Claude Code falls back to PowerShell for hooks, and yah's hooks cannot run there (the statusline still works). Setup warns when it cannot find Git Bash.
-- **Optional:** `gh` adds the PR lines, and `yah run` needs it to follow the PR. `bd` (beads) adds richer phase tracking. Without it, yah reads a `STATE.md` file (see below).
+- **Optional:** `gh` adds the PR lines, and `yah run` needs it to follow the PR. Plan state lives in a `STATE.md` file in the repo, so there is nothing to install (see [Plan state: STATE.md](#plan-state-statemd)). A repo that already uses beads (`bd`) can keep it.
 
 ## The daily loop
 
@@ -111,7 +111,7 @@ A new multi-phase plan was just approved? Run `/yah:phases` before its first pha
 
 ## The brain
 
-Plan state (beads or STATE.md) holds open work and is rewritten every session. Durable facts, such as "Vercel builds production only from main" or "the API rate-limits at 10 rps, batch writes", live nowhere, so each session rediscovers them. The brain is a folder of one-fact notes in your repo, `docs/brain` by default (`brain_dir` in config). It is plain markdown: no database, no embeddings, no MCP server. The folder opens as an Obsidian vault.
+Plan state (STATE.md, or beads) holds open work and is rewritten every session. Durable facts, such as "Vercel builds production only from main" or "the API rate-limits at 10 rps, batch writes", live nowhere, so each session rediscovers them. The brain is a folder of one-fact notes in your repo, `docs/brain` by default (`brain_dir` in config). It is plain markdown: no database, no embeddings, no MCP server. The folder opens as an Obsidian vault.
 
 **Start one** with `/yah:start "<task>"`. If the repo has no brain folder, it says so once and offers `brain.py init`, which creates the folder with `README.md`, `_pending.md` and `INDEX.md`. It never creates one unasked. Every brain feature stays silent in a repo without the folder.
 
@@ -322,7 +322,7 @@ Windows has `python`. macOS and Linux fail on it instantly and fall through to `
 | File | Role |
 |---|---|
 | `scripts/yahlib.py` | Shared helpers: data folder, config and tier presets, git lookup, JSON io |
-| `scripts/where.py` | Builds the where view from git, beads or STATE.md, and gh |
+| `scripts/where.py` | Builds the where view from git, STATE.md or beads, and gh |
 | `scripts/statusline.py` | The statusline. Never runs git, gh or bd |
 | `scripts/context_guard.py` | The nudges: UserPromptSubmit, and PostToolUse inside `yah run` |
 | `scripts/brain.py`, `scripts/recall_hook.py` | The brain (recall, find, new, index, init, pending) and first-prompt recall |
@@ -334,9 +334,9 @@ Windows has `python`. macOS and Linux fail on it instantly and fall through to `
 | `agents/scout.md`, `agents/deep.md` | The two agents |
 | `RULES.md` | Optional CLAUDE.md snippet |
 
-## Without beads
+## Plan state: STATE.md
 
-where.py reads `STATE.md` or `NOW.md` at the repo root. If the repo has a beads plan epic, beads wins.
+yah keeps plan state in `STATE.md` (or `NOW.md`) at the repo root: plain markdown, nothing to install, and git is its history. `/yah:phases` writes the plan section and `/yah:wrap` keeps it true.
 
 ```markdown
 ## Plan: Checkout rewrite (docs/plans/checkout.md)
@@ -344,15 +344,23 @@ where.py reads `STATE.md` or `NOW.md` at the repo root. If the repo has a beads 
 - [~] P2 Payment form | branch checkout/payment | base checkout/cart | PR #12
 - [ ] P3 Emails
 
+## Follow-ups
+- [ ] Approve the payment copy (you)
+- [ ] Flaky e2e test on Safari
+
 ## 2026-09-23
 - Next: Wire the Stripe element into PaymentForm.tsx, then run the e2e test.
 ```
 
 - `[x]` is closed, `[~]` or `[>]` is in progress, and `[ ]` is open.
 - Fields are `branch X`, `base X` and `PR #N`, separated by `|` or `·`. The label is `P<n>`.
+- With several `## Plan:` sections, yah follows the one with a phase in progress, else the first with an open phase. A finished plan can stay below the next one.
+- An open checkbox line that ends in `(you)`, after the title or after the fields, waits on you wherever it is in the file (code blocks aside), even when beads holds the plan: `/yah:where` lists it as `STATE.md:<line>` and the statusline counts it. Follow-ups go under `## Follow-ups` as checkbox lines, not prose.
 - The current phase's NEXT is the `- Next:` line of the newest dated entry. An untracked STATE.md stamps it with a `- At: <sha>` line under it, which `/yah:wrap` writes; a tracked one is stamped by its own last non-merge commit on the branch, so merging the base does not restamp it. Merge commits never count as work NEXT predates. If the phase base is gone (merged and deleted), commits on any other branch are left out instead.
 - Dated entries without a plan section still show as STATE and NEXT.
 - `/yah:wrap` keeps only the 5 newest dated entries.
+
+**A repo that already uses beads** can keep it. With `.beads/` at the repo root and `bd` found, `/yah:phases` and `/yah:wrap` write to beads, and an open plan epic wins over STATE.md. They run `bd` by the full path where.py finds: on PATH, or where Homebrew, pipx and the Windows installer put it. A bead labelled `human`, or an open one assigned to you, waits on you. yah itself never needs beads.
 
 ## Config
 
@@ -385,7 +393,7 @@ where.py reads `STATE.md` or `NOW.md` at the repo root. If the repo has a beads 
 | `path` | Where `yah <project>` goes. |
 | `prod` | The warning shown as the PROD line. `yah run` also denies pushes to the branch it names (the first `backticked` word, else the first word). Without it, where.py infers the branch open PRs land on, shows it as PROD when it is not an ordinary trunk, and `/yah:wrap` and `yah run` protect it. |
 | `trunks` | Long-lived branches, never treated as stacking targets. Defaults: main, master, develop, dev. |
-| `you` | Names whose open, unclaimed beads count as "waiting on you". `bd update --claim` assigns your name, so a claimed bead is the work itself, and so is a phase bead; label one `human` to make it wait on you. Defaults to `git config user.name`. |
+| `you` | Names whose open, unclaimed beads count as "waiting on you". `bd update --claim` assigns your name, so a claimed bead is the work itself, and so is a phase bead; label one `human` to make it wait on you. Defaults to `git config user.name`. In STATE.md, end a line with `(you)` instead. |
 
 ## FAQ
 
@@ -398,7 +406,7 @@ where.py reads `STATE.md` or `NOW.md` at the repo root. If the repo has a beads 
 - **"$2,600 in a week is a you problem."** Yes. The fix it argues for is free: write NEXT down, `/clear`, one task per session.
 
 **Why not just `/compact`?**
-The official cost advice is `/clear` between tasks, because `/compact` is itself a large request. The author's costliest session auto-compacted 6 times and kept going. `/yah:wrap` writes what the next session needs (NEXT, the PR, the phase) into beads or STATE.md, and the SessionStart hook injects it after `/clear`.
+The official cost advice is `/clear` between tasks, because `/compact` is itself a large request. The author's costliest session auto-compacted 6 times and kept going. `/yah:wrap` writes what the next session needs (NEXT, the PR, the phase) into STATE.md (or beads), and the SessionStart hook injects it after `/clear`.
 
 **Why plain markdown for the brain, not a vector store or a memory server?**
 The notes live in your repo, so they are reviewed in PRs, diffed and grepped, and they open in Obsidian. Recall is local keyword overlap plus changed-file globs, once per session, with no extra process. The trade-off is that it misses notes whose words never come up; INDEX.md is the full list.
