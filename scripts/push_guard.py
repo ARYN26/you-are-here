@@ -18,8 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from where import run  # noqa: E402
-from yahlib import utf8_stdout  # noqa: E402
+from yahlib import run, utf8_stdout  # noqa: E402
 
 PUNCT = "();<>|&\n`"
 WRAPPERS = {"env", "command", "builtin", "exec", "nohup", "time", "sudo", "xargs", "{", "!", "if", "then", "else",

@@ -321,8 +321,9 @@ Windows has `python`. macOS and Linux fail on it instantly and fall through to `
 
 | File | Role |
 |---|---|
-| `scripts/yahlib.py` | Shared helpers: data folder, config and tier presets, git lookup, JSON io |
-| `scripts/where.py` | Builds the where view from git, STATE.md (or beads, if you already use it) and gh |
+| `scripts/yahlib.py` | Shared helpers: data folder, config and tier presets, git lookup, JSON io, the plan-state shape |
+| `scripts/where.py` | Builds the where view from git, STATE.md and gh, and tells `/yah:phases` and `/yah:wrap` where the plan is written |
+| `scripts/beads.py` | The beads adapter, only for a repo that already uses beads: reads `.beads/` into the same shape as STATE.md |
 | `scripts/statusline.py` | The statusline. Never runs git, gh or bd |
 | `scripts/context_guard.py` | The nudges: UserPromptSubmit, and PostToolUse inside `yah run` |
 | `scripts/brain.py`, `scripts/recall_hook.py` | The brain (recall, find, new, index, init, pending) and first-prompt recall |

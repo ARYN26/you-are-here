@@ -159,16 +159,21 @@ class BeadsTests(unittest.TestCase):
         for name in ("wrap", "resume"):
             with self.subTest(skill=name):
                 text = body(name)
-                self.assertIn("no beads DB here", text)
-                self.assertIn("STATE.md is the default. Use beads only if the repo already uses it", text)
-                self.assertIn("`beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path", text)
-                self.assertNotIn("`beads` is non-null", text)  # "state" is non-null for STATE.md repos too
+                self.assertIn("`store`", text)
+                self.assertIn("`store.bd`, quoted", text)
                 self.assertIn("Never set, export or follow `BEADS_DIR`", text)
                 self.assertIn("never run bd against a database outside this repo", text)
                 self.assertNotRegex(text, r"(export|set)\s+BEADS_DIR\s*=")
-                # same 2a/2b choice in both: beads only for a beads plan
-                self.assertIn("`state.plan.source` is `beads`", text)
-                self.assertIn("`ignored_plan`", text)
+
+    def test_skills_read_store_instead_of_restating_the_beads_rule(self):
+        # where.py's `store` names where the plan is written; no skill re-derives it from the beads fields
+        for name in ("wrap", "resume", "phases", "start"):
+            with self.subTest(skill=name):
+                text = body(name)
+                self.assertIn("`store", text)
+                for gone in ("`beads_source`", "`bd_note`", "`bd` is a path", "`state.plan.source` is `beads`",
+                             "`ignored_plan`", "`state_md.path`", "no beads DB here"):
+                    self.assertNotIn(gone, text, gone)
 
     def test_skills_read_the_state_key(self):
         for name in ("wrap", "resume"):
@@ -179,10 +184,11 @@ class BeadsTests(unittest.TestCase):
 
     def test_wrap_writes_beads_only_for_a_beads_plan(self):
         text = body("wrap")
-        self.assertIn("`beads_source` is set, `bd` is a path and `state.plan.source` is `beads`: use **2b**", text)
-        self.assertIn("no plan, no beads DB here", text)  # no plan goes to STATE.md, not an in_progress bead
+        self.assertIn("`store.kind` is `beads` and `state.plan` is set: use **2b**", text)
+        self.assertIn("Otherwise use **2a**", text)  # no plan goes to STATE.md, not an in_progress bead
         self.assertNotIn("in_progress bead", text)
-        self.assertIn("`ignored_plan`", text)
+        self.assertIn("If `store.note` is set, tell the user first", text)  # why bd is off, or an ignored epic
+        self.assertIn("Run every bd command in this skill as `store.bd`, quoted", text)  # steps 4 and 6 too
 
     def test_wrap_beads_matches_state_md(self):
         text = body("wrap")
@@ -214,13 +220,16 @@ class BeadsTests(unittest.TestCase):
         self.assertIn("not counted in done/total", text)
         self.assertIn("shows it as DOING", text)
         self.assertIn("a STATE.md plan wins over a beads epic", text)
+        self.assertIn("If `store.note` is set, tell the user first", text)
+        self.assertIn("Run every `bd` below as `store.bd`, quoted", text)
+        self.assertIn("follow only the section `store.kind` names", text)  # not Beads because .beads/ exists
 
     def test_wrap_writes_the_file_where_read_and_trims_it(self):
         text = body("wrap")
-        for want in ("`state_md.path`", "create STATE.md at `main_root`", "Delete finished ones",
+        for want in ("`store.path`", "create it if it does not exist", "Delete finished ones",
                      "Delete a `## Plan:` section whose phases are all `[x]` once none of their PRs is open"):
             self.assertIn(want, text, want)
-        self.assertIn("`state_md.path`", body("phases"))
+        self.assertIn("`store.path`", body("phases"))
 
     def test_scout_names_state_md(self):
         text = (ROOT / "agents/scout.md").read_text("utf-8")
