@@ -374,7 +374,7 @@ def uninstall(sdir, state, state_file, dry, say):
     for key, marks, what in (("launchers", LAUNCH, "launcher"), ("rules", RULES, "rules")):
         for f in map(Path, state.get(key, [])):
             cmd = key == "launchers" and shell_for(f) == "cmd"
-            if edit_block(f, None, CMD_LAUNCH if cmd else marks, dry, say, what) and cmd and not dry \
+            if edit_block(f, None, marks_for("cmd") if cmd else marks, dry, say, what) and cmd and not dry \
                     and not f.read_bytes().strip():
                 f.unlink()  # the whole yah.cmd was the launcher
     if state_file.exists() and not dry:
@@ -427,8 +427,13 @@ def main():
         if rc.is_dir() and os.name == "nt":
             rc = rc / "yah.cmd"
         shell = a.launcher or shell_for(rc)
+        if (shell == "cmd") != (shell_for(rc) == "cmd"):  # uninstall finds the markers by the file's extension
+            print(f"[yah] a cmd launcher needs a .cmd or .bat path, and only a cmd launcher may use one: {rc}",
+                  file=sys.stderr)
+            return 1
         if shell == "cmd":
-            if rc.is_file() and CMD_LAUNCH[0].encode() not in rc.read_bytes() and rc.read_bytes().strip():
+            raw = rc.read_bytes() if rc.is_file() else b""
+            if raw.strip() and CMD_LAUNCH[0].encode() not in raw:
                 print(f"[yah] {rc} exists and yah did not write it, so it was left as is. "
                       "Delete it or pick another path.", file=sys.stderr)
                 return 1

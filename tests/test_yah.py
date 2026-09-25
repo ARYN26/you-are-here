@@ -829,6 +829,7 @@ class SetupTests(Base):
         self.assertIn("RUN ['a', 'b c']", out, err)
         self.assertIn("rc=1", out, err)
         self.assertIn("usage: yah <project>", err)
+        return out
 
     @unittest.skipIf(os.name == "nt" or not shutil.which("bash"), "needs POSIX bash")
     def test_launcher_runs_in_bash(self):
@@ -866,6 +867,8 @@ class SetupTests(Base):
         self.assertEqual(rc, 1)
         self.assertIn("did not write it", err)
         self.assertEqual(foreign.read_bytes(), b"@echo mine\r\n")
+        self.assertEqual(self.setup_py("--launcher", "bash", "--install-launcher", str(foreign))[2], 1)
+        self.assertEqual(self.setup_py("--launcher", "cmd", "--install-launcher", str(self.home / "yah"))[2], 1)
         self.setup_py("--uninstall")
         self.assertFalse(shim.exists())
         self.assertEqual(foreign.read_bytes(), b"@echo mine\r\n")
@@ -879,9 +882,7 @@ class SetupTests(Base):
                           'call yah shop add pay\r\ncall yah run a "b c"\r\ncall yah\r\necho rc=%errorlevel%\r\n'
                           'set YAH_\r\n', encoding="utf-8")
         self.env["PATH"] = str(shim.parent) + os.pathsep + self.env.get("PATH", "")
-        self.check_launcher([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(driver)], repo)
-        out = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(driver)], capture_output=True,
-                             env=self.env, timeout=120).stdout.decode("utf-8", "replace")
+        out = self.check_launcher([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(driver)], repo)
         self.assertIn(f"after={repo}", out)  # the cd outlives yah, as in the other shells
         self.assertNotIn("YAH_", out)  # setlocal kept yah's variables out of the window
 
