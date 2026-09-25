@@ -183,8 +183,9 @@ def on_path(folder):
 
 
 def snippet(shell, py, sdir):
-    """`yah <project> [claude args]` cds into the project and runs claude; `yah` alone lists projects;
-    `yah run <args>` hands off to scripts/run.py."""
+    """`yah <project>` cds into the project and runs claude with /yah:auto as the first prompt, so the session
+    starts on its own; `yah <project> <task words>` hands /yah:auto the task; `yah <project> -flags...` passes
+    the flags to claude and sends no prompt. `yah` alone lists projects; `yah run <args>` runs scripts/run.py."""
     pyc = " ".join(f'"{x}"' if " " in x else x for x in py)
     where, run = f'"{sdir}/where.py"', f'"{sdir}/run.py"'
     if shell == "powershell":
@@ -194,7 +195,8 @@ def snippet(shell, py, sdir):
                 f"  $d = & {pyc} {where} --path \"$($args[0])\"",
                 "  if ($LASTEXITCODE -ne 0 -or -not $d) { return }",
                 "  Set-Location $d",
-                "  claude @rest",
+                "  if ($rest.Count -and \"$($rest[0])\".StartsWith('-')) { claude @rest; return }",
+                "  claude ((@('/yah:auto') + $rest) -join ' ')",
                 "}"]
     elif shell == "fish":
         body = ["function yah",
@@ -203,7 +205,12 @@ def snippet(shell, py, sdir):
                 "        return",
                 "    end",
                 f"    set -l d ({pyc} {where} --path \"$argv[1]\"); or return 1",
-                "    cd $d; and claude $argv[2..-1]",
+                "    set -l rest $argv[2..-1]",
+                "    if string match -q -- '-*' \"$rest[1]\"",
+                "        cd $d; and claude $rest",
+                "    else",
+                "        cd $d; and claude (string join ' ' /yah:auto $rest)",
+                "    end",
                 "end"]
     elif shell == "cmd":
         # cmd.exe loads no profile, so this is a whole yah.cmd on PATH. setlocal keeps its variables out of
@@ -214,16 +221,23 @@ def snippet(shell, py, sdir):
         pyw = " ".join(f'"{win(x)}"' if " " in x else win(x) for x in py)
         find = f'call {pyw} "{win(sdir)}\\where.py" --path "%~1"'
         body = ["@echo off",
-                "rem yah PROJECT [claude args] cds into the project and runs claude; yah alone lists projects;",
-                "rem yah run ARGS hands off to run.py. Written by yah's setup.py; setup.py --uninstall deletes it.",
+                "rem yah PROJECT [task words] cds into the project and starts claude on /yah:auto; flags after",
+                "rem PROJECT go to claude with no prompt; yah alone lists projects; yah run ARGS runs run.py.",
+                "rem Written by yah's setup.py; setup.py --uninstall deletes it.",
                 "setlocal",
                 'set "YAH_ALL=%*"',
                 'set "YAH_REST="',
+                'set "YAH_A2=x%~2"',
                 'if not "%~1"=="" call set "YAH_REST=%%YAH_ALL:*%1=%%"',
                 'if /i "%~1"=="run" goto yah_run',
                 'set "YAH_D="',
                 f'for /f "usebackq delims=" %%D in (`{find}`) do set "YAH_D=%%D"',
                 "if not defined YAH_D exit /b 1",
+                'if "%YAH_A2:~0,2%"=="x-" goto yah_flags',
+                'if defined YAH_REST set "YAH_REST=%YAH_REST:"=%"',
+                'endlocal & cd /d "%YAH_D%" && claude "/yah:auto%YAH_REST%"',
+                "goto :eof",
+                ":yah_flags",
                 'endlocal & cd /d "%YAH_D%" && claude %YAH_REST%',
                 "goto :eof",
                 ":yah_run",
@@ -234,7 +248,10 @@ def snippet(shell, py, sdir):
                 "  local d",
                 f"  d=\"$({pyc} {where} --path \"$1\")\" || return 1",
                 "  shift",
-                "  cd \"$d\" && claude \"$@\"",
+                "  case \"$1\" in",
+                "    -*) cd \"$d\" && claude \"$@\" ;;",
+                "    *) cd \"$d\" && claude \"/yah:auto${*:+ $*}\" ;;",
+                "  esac",
                 "}"]
     marks = marks_for(shell)
     return "\n".join([marks[0], *body, marks[1]])
