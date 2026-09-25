@@ -887,7 +887,7 @@ def print_path(name):
         print(hits[0])
         return
     msg = [f"yah: '{name}' matches {len(hits)} repos; cd into one, or name them in config.json:" if len(hits) > 1
-           else f"yah: no project named '{name}'. Projects:" if name else "usage: yah <project> [claude args]. Projects:"]
+           else f"yah: no project named '{name}'. Projects:" if name else "usage: yah <project> [task words | -claude flags]. Projects:"]
     msg += [f"  {k:<14} {p}" for k, p in projects] or \
         ["  none yet: start Claude Code in a git repo once, or add projects to config.json"]
     print("\n".join(msg), file=sys.stderr)

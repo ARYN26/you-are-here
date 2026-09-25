@@ -822,23 +822,27 @@ class SetupTests(Base):
     def check_launcher(self, argv, repo):
         p = subprocess.run(argv, capture_output=True, env=self.env, timeout=120)
         out, err = p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
-        self.assertIn(f"claude --resume in {repo}", out, err)
+        out = out.replace('"', "")  # cmd's stand-in claude echoes the quotes around the prompt
+        self.assertIn(f"claude --resume in {repo}", out, err)  # flags go to claude, with no prompt
+        self.assertIn(f"claude /yah:auto in {repo}", out, err)  # no words: the session starts on /yah:auto
+        self.assertIn(f"claude /yah:auto add pay in {repo}", out, err)  # words: /yah:auto gets them as the task
         self.assertIn("RUN ['a', 'b c']", out, err)
         self.assertIn("rc=1", out, err)
         self.assertIn("usage: yah <project>", err)
+        return out
 
     @unittest.skipIf(os.name == "nt" or not shutil.which("bash"), "needs POSIX bash")
     def test_launcher_runs_in_bash(self):
         repo, rc_file = self.launcher_fixture(".bashrc")
         script = (f'claude() {{ echo "claude $* in $PWD"; }}; . "{rc_file}"; '
-                  'yah shop --resume; yah run a "b c"; yah; echo "rc=$?"')
+                  'yah shop --resume; yah shop; yah shop add pay; yah run a "b c"; yah; echo "rc=$?"')
         self.check_launcher(["bash", "-c", script], repo)
 
     @unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "needs PowerShell")
     def test_launcher_runs_in_powershell(self):
         repo, rc_file = self.launcher_fixture("profile.ps1")
         script = (f"function claude {{ \"claude $args in $((Get-Location).Path)\" }}; . '{rc_file}'; "
-                  "yah shop --resume; yah run a 'b c'; yah; \"rc=$LASTEXITCODE\"")
+                  "yah shop --resume; yah shop; yah shop add pay; yah run a 'b c'; yah; \"rc=$LASTEXITCODE\"")
         shell = shutil.which("pwsh") or shutil.which("powershell")
         self.check_launcher([shell, "-NoProfile", "-NonInteractive", "-Command", script], repo)
 
@@ -852,6 +856,7 @@ class SetupTests(Base):
         self.assertTrue(raw.startswith(b"@rem >>> you-are-here >>>\r\n@echo off\r\n"), raw[:60])
         self.assertEqual(raw.count(b"\n"), raw.count(b"\r\n"))  # CRLF only: cmd's goto can miss labels in LF files
         self.assertIn(b'endlocal & cd /d "%YAH_D%" && claude %YAH_REST%\r\n', raw)
+        self.assertIn(b'endlocal & cd /d "%YAH_D%" && claude "/yah:auto%YAH_REST%"\r\n', raw)
         self.assertIn(b"\\where.py\" --path \"%~1\"", raw)
         printed = self.setup_py("--launcher", "cmd")[0].replace("\r\n", "\n").strip()
         self.assertEqual(printed, raw.decode("utf-8").replace("\r\n", "\n").strip())
@@ -862,6 +867,8 @@ class SetupTests(Base):
         self.assertEqual(rc, 1)
         self.assertIn("did not write it", err)
         self.assertEqual(foreign.read_bytes(), b"@echo mine\r\n")
+        self.assertEqual(self.setup_py("--launcher", "bash", "--install-launcher", str(foreign))[2], 1)
+        self.assertEqual(self.setup_py("--launcher", "cmd", "--install-launcher", str(self.home / "yah"))[2], 1)
         self.setup_py("--uninstall")
         self.assertFalse(shim.exists())
         self.assertEqual(foreign.read_bytes(), b"@echo mine\r\n")
@@ -871,12 +878,11 @@ class SetupTests(Base):
         repo, shim = self.launcher_fixture("bin/yah.cmd")
         (shim.parent / "claude.cmd").write_text("@echo claude %* in %CD%\r\n", encoding="utf-8")
         driver = self.tmp / "drive.cmd"  # call, so each yah returns here; typed at a prompt it needs none
-        driver.write_text('@echo off\r\ncall yah shop --resume\r\necho after=%CD%\r\ncall yah run a "b c"\r\n'
-                          'call yah\r\necho rc=%errorlevel%\r\nset YAH_\r\n', encoding="utf-8")
+        driver.write_text('@echo off\r\ncall yah shop --resume\r\necho after=%CD%\r\ncall yah shop\r\n'
+                          'call yah shop add pay\r\ncall yah run a "b c"\r\ncall yah\r\necho rc=%errorlevel%\r\n'
+                          'set YAH_\r\n', encoding="utf-8")
         self.env["PATH"] = str(shim.parent) + os.pathsep + self.env.get("PATH", "")
-        self.check_launcher([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(driver)], repo)
-        out = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(driver)], capture_output=True,
-                             env=self.env, timeout=120).stdout.decode("utf-8", "replace")
+        out = self.check_launcher([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(driver)], repo)
         self.assertIn(f"after={repo}", out)  # the cd outlives yah, as in the other shells
         self.assertNotIn("YAH_", out)  # setlocal kept yah's variables out of the window
 
