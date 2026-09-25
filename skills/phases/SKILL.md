@@ -19,7 +19,8 @@ Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh` and read it
    `bd create "<plan name>" -t epic -l plan --spec-id "<plan path>" --metadata '{"short":"<tag of 8 chars or fewer, e.g. CHECKOUT>"}' --design "<the plan's ground rules and traps, 12 lines or fewer>" --silent`
    If the repo names epics by slug, look at existing ids and pass `--id <prefix>-<slug>`.
 3. **One child per phase, in order:**
-   `bd create "<phase title>" --parent <epic> -l phase --metadata '{"phase":<n>,"branch":"<branch>","base":"<PR base branch>"}' --description "<goal; done when ...; 4 lines or fewer>" --notes "<NEXT: the first concrete action>" --silent`
+   `bd create "<phase title>" --parent <epic> -l phase --metadata '{"phase":<n>,"branch":"<branch>","base":"<PR base branch>","next_sha":"<HEAD>"}' --description "<goal; done when ...; 4 lines or fewer>" --notes "<NEXT: the first concrete action>" --silent`
+   - `<HEAD>` is `git rev-parse HEAD`, run once. It stamps NEXT so `/yah:where` can flag it once the phase branch has commits NEXT predates.
    - Already shipped as a PR: add `--external-ref gh-<N>`, then `bd close <id> --reason "PR #<N> open"`.
    - Order: `bd dep add <phase n+1> <phase n>`.
    - A step only the user can do (a review, a merge, a console step) is its own child with `-l human` and a title that starts with a verb.
@@ -38,9 +39,10 @@ Edit STATE.md at the repo root (create it if missing; keep any dated entries). R
 
 ## <today, YYYY-MM-DD>
 - Next: <the first concrete action of the current phase>
+- At: <git rev-parse --short HEAD>
 ```
 
-`[x]` done, `[~]` current (exactly one), `[ ]` open. Fields are optional and separated by `|`. Tell the user STATE.md is not committed unless they want it tracked; offer to add it to `.gitignore`.
+`[x]` done, `[~]` current (exactly one), `[ ]` open. Fields are optional and separated by `|`. `- At:` stamps NEXT so `/yah:where` can flag it once commits land after it; leave it out if the repo tracks STATE.md. Tell the user STATE.md is not committed unless they want it tracked; offer to add it to `.gitignore`.
 
 ## Check the result
 

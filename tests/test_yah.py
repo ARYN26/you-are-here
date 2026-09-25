@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 GREEN, AMBER, RED, RST = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 WEEK = 7 * 86400
-FOOTER = "This is the current state. Do not read docs to orient; /yah:where shows the full view."
+FOOTER = ("This is the current state. Do not read docs to orient; /yah:where shows the full view. "
+          "Reply first with one line (phase, NEXT, what waits on the user), before any tool call or branch change.")
 PREMIUM = ("On Max plans Fable can use up to half of the weekly cap (it has its own usage bar); "
            "on Pro it needs extra-usage credits.")
 
@@ -33,6 +34,7 @@ BEADS = [
     {"id": "yah-2", "title": "P1 Cart API", "issue_type": "task", "status": "closed", "labels": ["phase"],
      "parent": "yah-1", "metadata": {"phase": 1, "branch": "checkout/cart", "base": "main"}, "external_ref": "gh-12"},
     {"id": "yah-3", "title": "P2 Payment form", "issue_type": "task", "status": "in_progress", "labels": ["phase"],
+     "assignee": "Sam",  # a claimed phase is the work itself, never "waiting on you"
      "parent": "yah-1", "metadata": {"phase": 2, "branch": "checkout/payment", "base": "checkout/cart"},
      "notes": "Wire the Stripe element into PaymentForm.tsx, then run the e2e test.\nCart API is merged."},
     {"id": "yah-4", "title": "P3 Emails", "issue_type": "task", "status": "open", "labels": ["phase"],
@@ -87,6 +89,10 @@ class Base(unittest.TestCase):
 
     def git(self, repo, *args):
         subprocess.run(["git", *args], cwd=str(repo), env=self.env, check=True, capture_output=True)
+
+    def head(self, repo):
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), env=self.env, check=True,
+                              capture_output=True).stdout.decode().strip()
 
     def repo(self, files=None, branch="main", name="shop"):
         r = self.tmp / name
@@ -284,8 +290,80 @@ class WhereTests(Base):
                      "NEXT    Wire the Stripe element", "YOU     yah-5  Approve the payment copy",
                      "        yah-6  Rotate the Stripe test keys"):
             self.assertTrue(any(ln.startswith(want) for ln in full), want)
+        self.assertFalse(any("yah-3" in ln for ln in full if not ln.startswith("PHASE")), full)  # not in YOU
         s = json.loads(self.where(repo, "--json"))
         self.assertEqual((s["beads"]["plan"]["source"], s["beads"]["phase"]["base"]), ("beads", "checkout/cart"))
+        self.assertEqual([h["id"] for h in s["beads"]["human"]], ["yah-5", "yah-6"])
+        self.assertIsNone(s["next_stale"])  # no stamp, no flag
+        self.assertNotIn("predates", "\n".join(brief + full))
+
+    def stamp_beads(self, repo, sha):
+        beads = [dict(b, metadata=dict(b["metadata"], next_sha=sha)) if b["id"] == "yah-3" else b for b in BEADS]
+        (repo / ".beads" / "issues.jsonl").write_text("\n".join(json.dumps(b) for b in beads) + "\n", "utf-8")
+
+    def test_stale_next_from_beads_counts_only_the_phase_branch(self):
+        repo = self.beads_repo(branch="checkout/cart")  # NEXT written on the base, before the phase branch
+        self.stamp_beads(repo, self.head(repo))
+        self.git(repo, "commit", "-qam", "plan")  # base commits after the stamp never count
+        self.git(repo, "checkout", "-q", "-b", "checkout/payment")
+        brief = self.where(repo, "--brief")
+        self.assertNotIn("predates", brief)
+        self.assertIn("branch checkout/payment (clean, 0 ahead of checkout/cart, no upstream)", brief)
+        for i in (1, 2):
+            self.git(repo, "commit", "-q", "--allow-empty", "-m", f"work {i}")
+        warn = "NEXT predates 2 commits on checkout/payment: /yah:wrap first"
+        brief = self.where(repo, "--brief").splitlines()
+        self.assertLessEqual(len(brief), 6)
+        self.assertEqual(brief[2], f"NEXT Wire the Stripe element into PaymentForm.tsx, then run the e2e test.  ! {warn}")
+        self.assertIn("(clean, 2 ahead of checkout/cart, no upstream)", brief[0])
+        full = self.where(repo).splitlines()
+        self.assertEqual(full[full.index("NEXT    Wire the Stripe element into PaymentForm.tsx, then run the e2e test.") + 1],
+                         f"!       {warn}")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual((s["next_stale"]["commits"], s["next_stale"]["branch"]), (2, "checkout/payment"))
+        self.git(repo, "checkout", "-q", "checkout/cart")  # off the phase branch: still counts the phase branch
+        self.assertIn(warn, self.where(repo, "--brief"))
+        self.git(repo, "checkout", "-q", "checkout/payment")
+        self.stamp_beads(repo, self.head(repo)[:7])  # wrap re-stamps after its WIP commit
+        self.assertNotIn("predates", self.where(repo, "--brief"))
+        for bad in ("--output=x", "HEAD", "zzzzzzz", ""):  # never passed to git as an option or a ref
+            self.stamp_beads(repo, bad)
+            self.assertIsNone(json.loads(self.where(repo, "--json"))["next_stale"], bad)
+
+    def test_stale_next_from_state_md(self):
+        repo = self.repo({"STATE.md": STATE_DATED})  # tracked: its own last commit is the stamp
+        self.assertNotIn("predates", self.where(repo, "--brief"))
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
+        brief = self.where(repo, "--brief")
+        self.assertIn("NEXT Ship the login fix, then tag v1.2.  ! NEXT predates 1 commit on main: /yah:wrap first", brief)
+        self.assertIn("!       NEXT predates 1 commit on main", self.where(repo))
+        (repo / "STATE.md").write_text(STATE_DATED.replace("Ship", "Now ship"), encoding="utf-8")
+        self.assertNotIn("predates", self.where(repo, "--brief"))  # being rewritten: not stale
+        other = self.repo(name="blog", branch="checkout/payment")  # untracked: the `- At:` line wrap writes
+        sha = self.head(other)
+        text = STATE_PLAN.replace("then run the e2e test.", "then run the e2e test.\n- At: " + sha[:9])
+        (other / "STATE.md").write_text(text, encoding="utf-8")
+        self.assertNotIn("predates", self.where(other, "--brief"))
+        self.git(other, "commit", "-q", "--allow-empty", "-m", "work")
+        self.assertIn("! NEXT predates 1 commit on checkout/payment: /yah:wrap first", self.where(other, "--brief"))
+        self.assertIn("PaymentForm.tsx, then run the e2e test.  !", self.where(other, "--brief"))  # At: is not NEXT
+        (other / "STATE.md").write_text(text.replace("- [~] P2", "- [ ] P2"), encoding="utf-8")
+        self.assertNotIn("predates", self.where(other, "--brief"))  # no running phase: nothing to be stale
+
+    def test_footer_maps_other_plugins_skill_names(self):
+        repo = self.repo({"CLAUDE.md": "End each step with /acme:wrap; start with `/acme:where`.\n"
+                                       "Not these: https://x.io/acme:start, /yah:wrap, /acme:build.\n",
+                          "plans/p.md": "Then run /acme:phases.\n",
+                          "STATE.md": "## Plan: P (plans/p.md)\n- [~] P1 Go\n"}, branch="feat/a")
+        self.assertEqual(self.where(repo, "--brief").splitlines()[-1],
+                         FOOTER + " The plan or CLAUDE.md says /acme:where, /acme:wrap, /acme:phases; unless those "
+                                  "skills are listed, use /yah:where, /yah:wrap, /yah:phases.")
+        (self.cfg / "CLAUDE.md").write_text("Hard bugs: /zed:deep.\n", encoding="utf-8")  # the user's own
+        self.assertIn("/acme:phases, /zed:deep; unless", self.where(repo, "--brief"))
+        self.assertNotIn("The plan or CLAUDE.md", self.where(repo))  # the full view has no footer
+        self.assertEqual(self.where(self.repo(name="plain"), "--brief").splitlines()[-1],
+                         FOOTER + " The plan or CLAUDE.md says /zed:deep; unless those skills are listed, "
+                                  "use /yah:deep.")
 
     def test_you_from_config_beats_git_user_name(self):
         self.config(projects={"shop": {"you": ["Nobody"]}})
@@ -377,6 +455,16 @@ class WhereTests(Base):
                       "set prod in config.json", self.where(repo))
         self.git(repo, "commit", "-q", "--allow-empty", "-m", "work")
         self.assertEqual(json.loads(self.where(repo, "--json"))["ancestors"], ["aryan_dev"])
+        self.git(repo, "checkout", "-q", "-b", "docs/y", "aryan_dev")  # a docs PR branch, merged into this one
+        self.git(repo, "commit", "-q", "--allow-empty", "-m", "docs")
+        self.git(repo, "checkout", "-q", "feat/x")
+        self.git(repo, "merge", "-q", "--no-ff", "-m", "merge docs/y", "docs/y")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["ancestors"], ["aryan_dev"])  # docs/y is only a second parent, and nearer by B..HEAD
+        self.assertNotIn("docs/y", s["protected"])
+        self.assertIn("aryan_dev", s["protected"])
+        self.assertEqual((s["git"]["base"], s["git"]["base_ahead"]), ("aryan_dev", 2))  # work + the merge
+        self.assertIn("BRANCH  feat/x  clean, 2 ahead of aryan_dev, no upstream", self.where(repo))
         (repo / "STATE.md").write_text("## Plan: X\n- [~] P1 Fix | branch feat/x | base staging\n", encoding="utf-8")
         s = json.loads(self.where(repo, "--json"))
         self.assertEqual(s["bases"], ["staging"])

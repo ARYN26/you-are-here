@@ -4,8 +4,8 @@ brain notes that match the prompt (brain.py recall, run in-process). Never block
   - once per session: recall-<session>.flag in the data dir marks that recall ran
   - /yah:start and /yah:resume recall themselves: they use up the session's recall and inject nothing
   - any other prompt starting with "/" injects nothing and leaves recall for the first real prompt
-  - no brain folder in the repo: nothing, and no git calls
-  - recall-*.flag files older than 3 days are deleted
+  - no brain folder in the repo: nothing, no git calls, and the session's recall is not used up
+  - recall-*.flag files older than 3 days are deleted when a flag is written
 """
 import json
 import os
@@ -15,18 +15,19 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import config, data_dir, utf8_stdout  # noqa: E402
+from yahlib import config, data_dir, find_git, utf8_stdout  # noqa: E402
 
 MAX_AGE = 3 * 86400
 OWN_RECALL = ("/yah:start", "/yah:resume")
 
 
-def first_prompt(sid):
-    """True the first time a session is seen: write its flag and sweep old flags."""
-    d = data_dir()
-    flag = d / "recall-{}.flag".format(re.sub(r"[^\w.-]", "_", sid))
-    if flag.exists():
-        return False
+def flag_path(sid):
+    return data_dir() / "recall-{}.flag".format(re.sub(r"[^\w.-]", "_", sid))
+
+
+def use_up(flag):
+    """Mark the session's recall as used and sweep old flags."""
+    d = flag.parent
     d.mkdir(parents=True, exist_ok=True)
     flag.write_bytes(b"")
     cutoff = time.time() - MAX_AGE
@@ -36,7 +37,6 @@ def first_prompt(sid):
                 f.unlink()
         except OSError:
             pass
-    return True
 
 
 def main():
@@ -49,10 +49,18 @@ def main():
     slash = prompt.split()[0] if prompt.startswith("/") else ""
     if slash and slash not in OWN_RECALL:
         return
-    if not first_prompt(str(d.get("session_id") or "nosession")) or slash:
+    flag = flag_path(str(d.get("session_id") or "nosession"))
+    if flag.exists():
+        return
+    cwd = d.get("cwd") or os.getcwd()
+    top = find_git(cwd)[0]
+    if top is None or not (Path(top) / config()["brain_dir"]).is_dir():  # keep the recall for a brain made later
+        return
+    use_up(flag)
+    if slash:
         return
     import brain
-    r = brain.recall(d.get("cwd") or os.getcwd(), prompt)
+    r = brain.recall(cwd, prompt)
     block = brain.render(r, int(config()["recall_max_chars"]))
     if block:
         n = len(r["matches"])

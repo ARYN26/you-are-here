@@ -1,6 +1,6 @@
 ---
 name: wrap
-description: End a task - save NEXT, commit WIP, open the PR when a phase is done. Use on "wrap".
+description: Save NEXT, commit WIP, open the PR when a phase is done. Use when a task ends or on "wrap".
 argument-hint: "[what got done]"
 ---
 
@@ -16,7 +16,9 @@ PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh
 
 `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
-Note `beads.plan` (its `source` is `beads`, `STATE.md` or `NOW.md`), `beads.phase` (label, branch, id), `beads_source`, `git.branch`, `git.dirty`, `state_md`, `protected` and `bd`.
+Note `beads.plan` (its `source` is `beads`, `STATE.md` or `NOW.md`), `beads.phase` (label, branch, id), `beads_source`, `git.branch`, `git.dirty`, `state_md`, `protected`, `bd` and `next_stale`.
+
+`next_stale` set means commits landed after NEXT was written, so it may already be done. Run `git log --oneline <next_stale.sha>..<next_stale.branch>` and write the new NEXT from where those commits leave off.
 
 Use beads only when `beads` is non-null, `beads_source` is set (a `.beads/` at this repo's root) and `bd` is a path; run beads commands as that path, quoted. Otherwise say "no beads DB here" (or print `bd_note` when set; with `.beads/`, `bd` null and no note, the bd CLI is missing) and use **2b**. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
 - Plan from beads, or no plan but an in_progress bead: use **2a** (treat that bead as the phase).
@@ -55,12 +57,16 @@ The source must be evidence: a PR, commit sha, issue, URL, `path/to/file:line`, 
 
 Stage what brain.py wrote (the note and INDEX.md, or `_pending.md`) with the WIP commit.
 
-## 4. Commit work in progress
+## 4. Commit work in progress, then stamp NEXT
 
-Only if `git.dirty` > 0 or step 3 wrote a note.
+Commit only if `git.dirty` > 0, step 3 wrote a note, or step 2b changed a STATE.md the repo tracks.
 - Never commit on a branch in `protected` (trunks, the PROD branch, and where open PRs land). If you are on one, stop and tell the user.
 - Run `git status`, then stage files by name. Never stage `.env*`, credentials, or large generated files the repo does not already track. Stage STATE.md only if the repo already tracks it.
 - `git commit -m "wip(<phase label>): <what>"`. Do not push unless step 6 applies.
+
+Always stamp NEXT with the commit it was written at, so `/yah:where` flags it once later commits make it stale:
+- Beads: `bd update <phase-id> --set-metadata next_sha=$(git rev-parse HEAD)`.
+- STATE.md or NOW.md the repo does not track: put `- At: <git rev-parse --short HEAD>` right under `- Next:`. A tracked one needs no stamp; its own commit is the stamp.
 
 ## 5. Memory
 
@@ -75,7 +81,7 @@ The phase's done-when is met and the tests pass.
 2. Push the feature branch. Never push a branch in `protected`.
 3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body.
 4. Record it. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open, checks <state>"`. STATE.md: mark the phase `[x]` and add `| PR #<N>`.
-5. Claim the next phase and give it a NEXT line. Beads: `bd update <next-id> --claim`. STATE.md: mark it `[~]`.
+5. Claim the next phase and give it a NEXT line, stamped as in step 4. Beads: `bd update <next-id> --claim`. STATE.md: mark it `[~]`.
 
 Merging is always the user's.
 

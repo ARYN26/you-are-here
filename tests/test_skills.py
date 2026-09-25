@@ -71,7 +71,7 @@ class DescriptionTests(unittest.TestCase):
     def test_trigger_words_kept(self):
         want = {
             ROOT / "skills/where/SKILL.md": ["where am I", "what's next"],
-            ROOT / "skills/wrap/SKILL.md": ["wrap"],
+            ROOT / "skills/wrap/SKILL.md": ["wrap", "when a task ends"],
             ROOT / "skills/deep/SKILL.md": ['"deep"', "two attempts"],
             ROOT / "skills/phases/SKILL.md": ["approved"],
             ROOT / "skills/start/SKILL.md": ["/yah:start"],
@@ -127,6 +127,21 @@ class RunnerTests(unittest.TestCase):
                 self.assertNotIn("keep whichever works", text)
                 if "`PY` is" in text:
                     self.assertIn("`py -3` only if both fail", text)
+
+
+class StampTests(unittest.TestCase):
+    def test_wrap_stamps_next_and_reads_the_stale_flag(self):
+        text = body("wrap")
+        self.assertIn("--set-metadata next_sha=$(git rev-parse HEAD)", text)
+        self.assertIn("- At: <git rev-parse --short HEAD>", text)
+        self.assertIn("Always stamp NEXT", text)  # not under the commit-only-if-dirty condition
+        self.assertIn("next_stale", text)
+        self.assertIn("stamped as in step 4", text)  # the next phase's NEXT too
+
+    def test_phases_stamps_next(self):
+        text = body("phases")
+        self.assertIn('"next_sha":"<HEAD>"', text)
+        self.assertIn("- At: <git rev-parse --short HEAD>", text)
 
 
 class BeadsTests(unittest.TestCase):

@@ -447,9 +447,14 @@ class HookTests(Base):
         old = self.data / "recall-old.flag"
         old.write_bytes(b"")
         os.utime(old, (time.time() - 4 * 86400,) * 2)
-        self.assertEqual(self.hook("s1", "deploy to vercel", repo), "")
-        self.assertFalse(old.exists())
+        self.assertEqual(self.hook("s1", "did this command work?", repo), "")
+        self.assertFalse((self.data / "recall-s1.flag").exists())  # no brain: the session keeps its recall
         self.assertEqual(self.hook("s2", "deploy", self.home), "")
+        self.assertFalse((self.data / "recall-s2.flag").exists())
+        self.assertEqual(self.bp(repo, "init")[2], 0)  # a brain made later in the session
+        self.hook("s1", "continue", repo)
+        self.assertTrue((self.data / "recall-s1.flag").exists())
+        self.assertFalse(old.exists())  # swept when a flag is written
 
 
 if __name__ == "__main__":

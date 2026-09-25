@@ -30,12 +30,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import (config, data_dir, find_git, norm, project_key, read_branch,  # noqa: E402
+from yahlib import (claude_dir, config, data_dir, find_git, norm, project_key, read_branch,  # noqa: E402
                     read_json, utf8_stdout, where_cache_path, write_json)
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 PR_FIELDS = "number,title,headRefName,baseRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt"
-FOOTER = "This is the current state. Do not read docs to orient; /yah:where shows the full view."
+FOOTER = ("This is the current state. Do not read docs to orient; /yah:where shows the full view. "
+          "Reply first with one line (phase, NEXT, what waits on the user), before any tool call or branch change.")
+SKILLS = ("where", "wrap", "start", "phases", "deep")
+ALIAS = re.compile(r"(?<![\w/:])/([a-z][\w-]*):(" + "|".join(SKILLS) + r")\b")
+SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 
 
 # ---------------------------------------------------------------- subprocess
@@ -89,7 +93,7 @@ def finish_gh(proc):
 
 def git_state(top):
     out = run(["git", "status", "--porcelain=v1", "-b"], top, timeout=5)
-    st = {"branch": None, "dirty": 0, "ahead": 0, "behind": 0, "upstream": None}
+    st = {"branch": None, "dirty": 0, "ahead": 0, "behind": 0, "upstream": None, "base": None, "base_ahead": None}
     if out is None:
         return st
     lines = out.splitlines()
@@ -223,7 +227,8 @@ def beads_state(issues, you=()):
     """Pick the plan epic and its phases. Returns a dict or None.
 
     "Waiting on you" = open (not blocked) beads labelled `human` or assigned to a
-    name in `you` (config.json, else git user.name)."""
+    name in `you` (config.json, else git user.name). A phase bead counts only when labelled
+    `human`: the running phase is the work itself, not a wait."""
     if not issues:
         return None
     by_parent = {}
@@ -243,7 +248,7 @@ def beads_state(issues, you=()):
 
     you = {y for y in you if y}
     human = [i for i in issues if i.get("status") in ("open", "in_progress") and i.get("issue_type") != "epic"
-             and ("human" in labels(i) or (i.get("assignee") or "") in you)]
+             and ("human" in labels(i) or ((i.get("assignee") or "") in you and "phase" not in labels(i)))]
     in_prog = [i for i in issues if i.get("status") == "in_progress" and i.get("issue_type") != "epic"]
     ready = [i for i in issues if i.get("status") == "open" and i.get("issue_type") != "epic"]
 
@@ -274,7 +279,8 @@ def beads_state(issues, you=()):
         title = re.sub(rf"^{re.escape(label)}\b[\s:.-]*", "", k.get("title", "")) or k.get("title", "")
         return {"id": k["id"], "label": label, "title": title, "status": k.get("status"),
                 "branch": m.get("branch") or "", "base": m.get("base") or "",
-                "pr": (k.get("external_ref") or ""), "next": first_line(k.get("notes"))}
+                "pr": (k.get("external_ref") or ""), "next": first_line(k.get("notes")),
+                "next_sha": str(m.get("next_sha") or "")}
 
     return pick_phase(state, [phase_view(k, i) for i, k in enumerate(kids)])
 
@@ -331,11 +337,13 @@ def state_md(top):
 
         dated = [i for i, m in enumerate(heads) if re.match(r"\d{4}-\d{2}-\d{2}", m.group(1))]
         plan = next((i for i, m in enumerate(heads) if re.match(r"Plan:", m.group(1), re.I)), None)
-        out: dict = {"file": name, "head": "", "next": "", "plan": None}
+        out: dict = {"file": name, "head": "", "next": "", "at": "", "plan": None}
         if dated:
             i = max(dated, key=lambda j: heads[j].group(1)[:10])  # the newest date, whatever the order
             nxt = re.search(r"^- Next:\s*(.+(?:\n(?!- )\s+.+)*)", body(i), re.M)
-            out.update(head=heads[i].group(1), next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)))
+            at = re.search(r"^- At:\s*(" + SHA.pattern + r")\b", body(i), re.M)  # the commit NEXT was written at
+            out.update(head=heads[i].group(1), next=" ".join(nxt.group(1).split()) if nxt else first_line(body(i)),
+                       at=at.group(1) if at else "")
         elif plan is None:
             lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
             out["next"] = lines[0] if lines else ""
@@ -397,43 +405,86 @@ def phase_bases(phases):
 
 
 def nearest_bases(top, branch, skip=()):
-    """The branches HEAD was cut from, from git alone: of the local and origin branches that are ancestors of
-    HEAD (not HEAD's own branch or a phase branch), those with the fewest commits B..HEAD. A branch whose tip
+    """The branches HEAD was cut from, from git alone: of the local and origin branches whose tip is on HEAD's
+    first-parent chain (not HEAD's own branch or a phase branch), the nearest. A branch merged in as a second
+    parent, like a docs PR merged into this branch, was never cut from, so it is not one. A branch whose tip
     is HEAD counts 0, like a phase branch just cut from its base. At the same distance a branch on origin
-    beats a local-only one. [] on any failure; a few seconds at most."""
+    beats a local-only one. [] on any failure."""
     skip = set(skip) | {branch, "HEAD", "", None}
-    refs, fmt = ["refs/heads", "refs/remotes/origin"], "%(refname)%09%(objectname)"
-    out = run(["git", "for-each-ref", "--merged", "HEAD", "--format", fmt + "%09%(ahead-behind:HEAD)", *refs],
-              top, timeout=3)
-    if out is None:  # git before 2.41 has no ahead-behind atom: count each tip with rev-list below
-        out = run(["git", "for-each-ref", "--merged", "HEAD", "--format", fmt, *refs], top, timeout=3)
-    found, shared = [], set()  # (name, tip, B..HEAD or None)
+    chain = run(["git", "rev-list", "--first-parent", "--max-count=5000", "HEAD"], top, timeout=3)
+    pos = {sha: i for i, sha in enumerate((chain or "").split())}  # steps back from HEAD
+    out = run(["git", "for-each-ref", "--format", "%(refname)%09%(objectname)", "refs/heads", "refs/remotes/origin"],
+              top, timeout=3) if pos else None
+    dist, shared = {}, set()
     for ln in (out or "").splitlines():
-        f = ln.split("\t")
-        ref = f[0]
+        ref, _, tip = ln.partition("\t")
         name = ref[11:] if ref.startswith("refs/heads/") else \
             ref[20:] if ref.startswith("refs/remotes/origin/") else None
-        if len(f) < 2 or name in skip or len(found) >= 60:
+        if name in skip or tip not in pos:
             continue
         if ref.startswith("refs/remotes/"):
             shared.add(name)
-        ab = f[2].split() if len(f) > 2 else []  # "ahead behind"; behind is B..HEAD
-        found.append((name, f[1], int(ab[1]) if len(ab) == 2 and ab[1].isdigit() else None))
-    counts, dist, head, deadline = {}, {}, None, time.monotonic() + 3
-    for name, tip, n in found:
-        if n is None:
-            if head is None:
-                head = (run(["git", "rev-parse", "HEAD"], top, timeout=3) or "").strip()
-            if tip not in counts and time.monotonic() < deadline:
-                c = "0" if tip == head else (run(["git", "rev-list", "--count", f"{tip}..HEAD"], top, timeout=2) or "")
-                counts[tip] = int(c) if c.strip().isdigit() else None
-            n = counts.get(tip)
-        if n is not None:
-            dist[name] = min(dist.get(name, n), n)
+        dist[name] = min(dist.get(name, pos[tip]), pos[tip])
     if not dist:
         return []
     best = [k for k, v in dist.items() if v == min(dist.values())]
     return sorted([k for k in best if k in shared] or best)
+
+
+def existing(top, names):
+    """{name: its ref} for each name that is a local branch, else a branch on origin. One git call."""
+    names = [n for n in dict.fromkeys(names) if n]
+    cands = {n: (f"refs/heads/{n}", f"refs/remotes/origin/{n}") for n in names}
+    out = run(["git", "for-each-ref", "--format=%(refname)", *[r for rs in cands.values() for r in rs]],
+              top, timeout=3) if names else None
+    have = set((out or "").split())
+    return {n: next(r for r in rs if r in have) for n, rs in cands.items() if have & set(rs)}
+
+
+def count(top, revs):
+    """`git rev-list --count --first-parent` over revs, or None."""
+    out = run(["git", "rev-list", "--count", "--first-parent", *revs], top, timeout=3)
+    return int(out) if out and out.strip().isdigit() else None
+
+
+def md_stamp(top, sm):
+    """The commit a STATE.md/NOW.md NEXT was written at: a tracked file's last commit (none while it has
+    uncommitted edits: NEXT was just written), else the `- At: <sha>` line wrap puts under `- Next:`."""
+    f = sm["file"]
+    if run(["git", "ls-files", "--error-unmatch", "--", f], top, timeout=3) is None:
+        return sm.get("at") or ""
+    if run(["git", "diff", "--quiet", "HEAD", "--", f], top, timeout=3) is None:
+        return ""
+    return (run(["git", "log", "-1", "--format=%H", "--", f], top, timeout=3) or "").strip()
+
+
+def stale_next(top, sha, branch, base, refs):
+    """Commits on the phase branch (HEAD when it names none) that the commit NEXT was written at lacks, leaving
+    out the base's: the work NEXT does not know about. None when there is no stamp, or the stamp or the branch
+    is not in this clone. Never compares timestamps: wrap writes NEXT before its own WIP commit."""
+    if not SHA.fullmatch(sha or "") or (branch and branch not in refs):
+        return None
+    return count(top, [refs.get(branch) or "HEAD", "^" + sha] + (["^" + refs[base]] if base in refs else []))
+
+
+def aliases(top, spec):
+    """[(other plugin's command, yah's)] for /x:wrap-style names of yah's skills in the plan, the project's
+    CLAUDE.md files or the user's own, so a plan written for another plugin still maps when that one is off."""
+    files = [Path(top) / "CLAUDE.md", Path(top) / ".claude" / "CLAUDE.md", Path(top) / "CLAUDE.local.md",
+             claude_dir() / "CLAUDE.md"]
+    if spec:
+        p = Path(spec).expanduser()
+        files.insert(0, p if p.is_absolute() else Path(top) / p)
+    found = set()
+    for f in files:
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                text = fh.read(200_000)
+        except (OSError, ValueError):
+            continue
+        found |= {(m.group(1), m.group(2)) for m in ALIAS.finditer(text) if m.group(1) != "yah"}
+    pairs = sorted(found, key=lambda pn: (SKILLS.index(pn[1]), pn[0]))[:5]
+    return [(f"/{p}:{n}", f"/yah:{n}") for p, n in pairs]
 
 
 def prod_branch(prod):
@@ -563,6 +614,22 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
         land += [b for b in cached if b not in land]
     if g["branch"] in land:
         near = []
+    plan, phase = (bstate or {}).get("plan") or {}, (bstate or {}).get("phase") or {}
+    stamp = ""  # the commit NEXT was written at: the running phase's, or a plan-less STATE.md's
+    if infer and phase and plan.get("source") == "beads":
+        stamp = phase.get("next_sha") or ""
+    elif infer and sm and (phase or not plan):
+        stamp = md_stamp(str(top), sm)
+    cands = []  # with no upstream, BRANCH counts commits ahead of the phase base, else of the branch cut from
+    if infer and g["branch"] and not g["upstream"]:
+        on_phase = phase.get("branch") in ("", None, g["branch"])
+        cands = [c for c in (phase.get("base") if on_phase else "", *near[:1]) if c and c != g["branch"]]
+    refs = existing(str(top), ([phase.get("branch"), phase.get("base")] if SHA.fullmatch(stamp) else []) + cands)
+    base = next((c for c in cands if c in refs), "")
+    if base:
+        g["base"], g["base_ahead"] = base, count(str(top), ["HEAD", "^" + refs[base]])
+    n = stale_next(str(top), stamp, phase.get("branch"), phase.get("base"), refs)
+    stale = {"commits": n, "branch": phase.get("branch") or g["branch"], "sha": stamp} if n else None
     beads_dir = find_beads(top, main_root)
     env_dir = os.environ.get("BEADS_DIR")
     # An inherited BEADS_DIR would send the model's own bd calls to another repo's DB.
@@ -571,7 +638,8 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     s = {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "beads": bstate,
             "beads_source": source, "state_md": sm, "prs": prs, "gh_tried": proc is not None,
             "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
-            "bases": bases, "ancestors": near,
+            "bases": bases, "ancestors": near, "next_stale": stale,
+            "aliases": aliases(str(top), plan.get("spec")) if infer else [],
             "beads_dir": str(beads_dir) if beads_dir else None,
             "bd": find_tool("bd") if use_bd and beads_dir and not bd_note else None,  # null: no CLI, no .beads here, or bd_note
             "bd_note": bd_note}
@@ -590,14 +658,20 @@ def render(s, brief=False):
     if g["behind"]:
         sync.append(f"{g['behind']} behind")
     if not g["upstream"] and branch not in ("?",):
+        if g.get("base") and g.get("base_ahead") is not None:
+            sync.append(f"{g['base_ahead']} ahead of {g['base']}")
         sync.append("no upstream")
     prl, _ = pr_lines(s["prs"], branch, b, limit=2 if brief else 4, trunks=s["trunks"])
     off_branch = phase["branch"] if phase and phase.get("branch") and phase["branch"] != branch else ""
+    st = s.get("next_stale")
+    stale = f"NEXT predates {st['commits']} commit{'' if st['commits'] == 1 else 's'} on {st['branch']}: " \
+            "/yah:wrap first" if st else ""
     lines = []
 
     if brief:  # at most 6 lines
         warn = f"  ! phase branch is {off_branch}" if off_branch else ""
         lines.append(f"[yah] {s['key']}  branch {branch} ({', '.join([tree] + sync)}){warn}")
+        swarn = f"  ! {stale}" if stale else ""
         if plan:
             p = phase or nxt_phase
             head = f"PLAN {plan['short']} {plan['done']}/{plan['total']} done"
@@ -607,10 +681,10 @@ def render(s, brief=False):
                 head += f"  no phase in progress; next {nxt_phase['label']} ({nxt_phase['id']})"
             lines.append(head)
             if p and p.get("next"):
-                lines.append(f"NEXT {p['next']}")
+                lines.append(f"NEXT {p['next']}{swarn}")
         elif s["state_md"]:
             sm = s["state_md"]
-            lines.append(f"{sm['file']} {sm['head']}  NEXT {clip(sm['next'])}")
+            lines.append(f"{sm['file']} {sm['head']}  NEXT {clip(sm['next'])}{swarn}")
         elif b.get("in_progress"):
             lines.append("IN PROGRESS " + "; ".join(f"{i['id']} {i['title'][:60]}" for i in b["in_progress"][:2]))
         tail = []
@@ -622,7 +696,9 @@ def render(s, brief=False):
             lines.append(" | ".join(tail))
         if prod_line(s):
             lines.append(f"PROD {prod_line(s)}")
-        lines.append(FOOTER)
+        al = s.get("aliases") or []
+        lines.append(FOOTER + (f" The plan or CLAUDE.md says {', '.join(a for a, _ in al)}; unless those skills are "
+                               f"listed, use {', '.join(y for _, y in al)}." if al else ""))
         return lines
 
     lines.append(f"BRANCH  {branch}  {', '.join([tree] + sync)}")
@@ -635,6 +711,8 @@ def render(s, brief=False):
             if off_branch:
                 lines.append(f"!       phase branch is {off_branch}, you are on {branch}")
             lines.append(f"NEXT    {phase['next'] or '(none yet; /yah:wrap writes one)'}")
+            if stale:
+                lines.append(f"!       {stale}")
         elif nxt_phase:
             claim = f"bd update {nxt_phase['id']} --claim" if plan.get("source") == "beads" else \
                 f"mark it [~] in {plan['id']}"
@@ -648,6 +726,8 @@ def render(s, brief=False):
             sm = s["state_md"]
             lines.append(f"STATE   {sm['file']}: {sm['head']}")
             lines.append(f"NEXT    {clip(sm['next'])}")
+            if stale:
+                lines.append(f"!       {stale}")
         if b.get("in_progress"):
             for i in b["in_progress"][:3]:
                 lines.append(f"DOING   {i['id']}  {i['title'][:70]}")
