@@ -32,6 +32,7 @@ Edit the file at `store.path`, or create it if it does not exist. In a linked wo
 - Add a `## YYYY-MM-DD` entry for today (or rewrite today's), with `- Next: <NEXT line>` first and at most 3 short lines after it: what is done, what is half-done and where, any trap.
 - The NEXT line is what `/yah:where` prints as NEXT: one concrete action someone could start cold, at most 140 characters. Example: "Run make eval, then paste the table into PR #9".
 - In the `## Plan:` section, keep the phase lines (the outermost checkboxes) true: `[x]` done, exactly one `[~]` current, `[ ]` open, with `| branch X | base Y | PR #N` fields. Indented checkbox lines under a phase are its sub-tasks.
+- While a phase is open, add 1 to 3 handoff lines indented under its phase line, plain, not checkboxes: `  - Done: <what>`, `  - Tried: <what> failed because <why>`, `  - Decided: <what> because <why>`. They are the phase's `log`, which the next session reads before it starts. Keep only the newest 6; delete older ones.
 - A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Mark one being worked on `[~]`. Delete finished ones; the commit or PR is their record.
 - Delete a `## Plan:` section whose phases are all `[x]` once none of their PRs is open (`gh pr view <N> --json state`). The plan file and the PRs keep its history, and the file the model reads each session stays short.
 - A step only the user can do (a review, a merge, a console step) ends with `(you)`, and names the command that does it when there is one, ready to paste in a terminal: `Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user.
@@ -39,12 +40,12 @@ Edit the file at `store.path`, or create it if it does not exist. In a linked wo
 
 ## 2b. Beads: rewrite the phase bead's notes
 
-Replace the notes. Never append; they are a pointer, not a diary.
+Replace the notes with `--notes`, never `--append-notes`: each wrap rewrites NEXT, so the whole notes field is written again.
 
 bd update <phase-id> --notes "<NEXT line>
-<up to 3 short lines: what is done, what is half-done and where, any trap>"
+<the phase's log: the newest 6 Done/Tried/Decided lines, with this session's added>"
 
-- The NEXT rules in 2a apply to the first line.
+- The NEXT rules in 2a apply to the first line; the log lines follow the rules in 2a.
 - A new follow-up becomes a bead (`bd create "<title>" --silent`), never prose. A step only the user can do gets `-l human`. Close finished ones: `bd close <id>`.
 
 ## 3. Brain note (only if the brain folder exists)
@@ -84,8 +85,8 @@ If this project's auto-memory index (`MEMORY.md` in its memory folder under `$CL
 The phase's done-when in the plan file (`state.plan.spec`: the path in `## Plan: <name> (<path>)`, or the epic's `spec_id`) is met and the tests pass.
 1. Review the branch diff: run `/code-review --fix`, then `/simplify`, if available. Re-run the tests.
 2. Push the feature branch. Never push a branch in `protected`.
-3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body.
-4. Record it. STATE.md: mark the phase `[x]` and add `| PR #<N>`. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open"`.
+3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body. Move the phase's log lines into the body.
+4. Record it. STATE.md: mark the phase `[x]`, add `| PR #<N>` and delete its log lines. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open"`.
 5. Claim the next phase and give it a NEXT line, stamped as in step 4. STATE.md: mark it `[~]`. Beads: `bd update <next-id> --claim`.
 
 Merging is always the user's.

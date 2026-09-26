@@ -16,7 +16,7 @@ SKILLS = sorted(ROOT.glob("skills/*/SKILL.md"))
 AGENTS = sorted(ROOT.glob("agents/*.md"))
 MAX_DESC = 100
 MAX_VISIBLE = 600
-START_BYTES = 2394  # start/SKILL.md before the restate-first rewrite
+START_BYTES = 2500  # the restate-first rewrite came in under 2394; P2's phase-memory read adds about 100
 
 
 def parse(path):
@@ -163,6 +163,41 @@ class StampTests(unittest.TestCase):
         text = body("phases")
         self.assertIn('"next_sha":"<HEAD>"', text)
         self.assertIn("- At: <git rev-parse --short HEAD>", text)
+
+
+class PhaseMemoryTests(unittest.TestCase):
+    """A session reads its plan section, the Decisions and the phase's handoff log; wrap writes the log."""
+
+    def test_resume_and_start_read_the_plan_section_decisions_and_log_before_recall(self):
+        for name, recall in (("resume", "brain.py recall --phase"), ("start", "brain.py\" recall")):
+            with self.subTest(skill=name):
+                text = body(name)
+                for want in ("`### <label>`", "`## Decisions`", "`state.plan.spec`", "log`", "say so in one line"):
+                    self.assertIn(want, text, want)
+                    self.assertLess(text.index(want), text.index(recall), want)  # read first, then recall
+        self.assertIn("do not redo a tried approach or reopen a decision", body("resume"))
+        self.assertIn("only `## Decisions` and the `### <label>` section", body("start"))  # not the whole plan
+
+    def test_wrap_writes_the_log_and_moves_it_to_the_pr(self):
+        text = body("wrap")
+        for want in ("`  - Done: <what>`", "`  - Tried: <what> failed because <why>`",
+                     "`  - Decided: <what> because <why>`", "plain, not checkboxes", "Keep only the newest 6"):
+            self.assertIn(want, text, want)
+        finish = text.split("## 6. Only if the phase is complete", 1)[1]
+        self.assertIn("Move the phase's log lines into the body", finish)
+        self.assertIn("delete its log lines", finish)
+        # beads rewrites NEXT and the log together; appending would pile up stale NEXT lines
+        self.assertIn("never `--append-notes`", text)
+        self.assertNotIn("bd update <phase-id> --append-notes", text)
+        self.assertNotIn("not a diary", text)
+
+    def test_phases_documents_the_log_and_the_plan_headings(self):
+        text = body("phases")
+        self.assertIn("handoff log (`log` in `where.py --json`)", text)
+        self.assertIn("`  - Tried: <what> failed because <why>`", text)
+        self.assertIn("a heading that starts with `### P<n>`", text)
+        self.assertIn("`## Decisions`", text)
+        self.assertIn("`### P<n> <title>` section", body("auto"))  # /yah:auto drafts plans that way
 
 
 class UserCommandTests(unittest.TestCase):

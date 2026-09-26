@@ -28,6 +28,10 @@ Run `where.py --json`. Pick the phase: TARGET `P<n>` is the `state.phases` entry
 - Forbidden branches: everything in `protected` (trunks, the PROD branch, and where open PRs land).
 - Plan state is written where `store` says, as /yah:wrap does it. Run bd only as `store.bd`, quoted. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
 
+Read what earlier sessions left before you recall:
+- The phase's `log`: its `Done:`, `Tried: <what> failed because <why>` and `Decided: <what> because <why>` lines. Build on them; do not redo a tried approach or reopen a decision unless NEXT says to.
+- The plan file (`state.plan.spec`): only its `## Decisions` section and the section whose heading starts with `### <label>`. Find them with `grep -n "^#"` and read just those line ranges. No spec or no such section: say so in one line and go on.
+
 Then run `brain.py recall --phase "<title>. <NEXT>"` and follow the notes it prints.
 
 If NEXT starts with `NEEDS-HUMAN:`, print `YAH-RESULT: needs-human` and stop. Change nothing.
