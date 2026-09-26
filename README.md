@@ -45,7 +45,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | `/yah:where` | The full view in up to 15 lines: branch (with no upstream, how far ahead of its base), plan, phase, NEXT and whether commits have made it stale, what waits on you, the PR stack and the PROD warning. | Runs git, plus `gh` if installed, and `bd` only in a repo with `.beads/`. The output enters your context. |
 | `/yah:auto` | The launcher's first prompt, so a session starts without you typing. It reads the injected state and runs the step it calls for. An open plan phase starts `yah run --plan --detach` (autopilot, which goes on after the session closes); `/yah:auto here` does the step hands-on through `/yah:start` instead. It reports a live run, and for one that ended offers a rerun, `/yah:deep` or hands-on work. It asks a `NEEDS-HUMAN` question, writes the answer into NEXT and starts the run again, checks a PR that waits on you, fixes failing checks or review comments, tracks a newly approved plan with `/yah:phases`, sends a hard question to `/yah:deep` on any tier, and ends with `/yah:wrap`. With no plan it asks what to build; it never invents a task. | One turn to pick the step, then that step's own cost. Hidden from the model, so no listing cost. |
 | `/yah:start` | Starts a task: restates the task, phase and first step from the injected state before any tool call, runs one recall on the task's key nouns, allows at most one targeted search, then makes the edit. Offers to create a brain folder if there is none. | One turn plus the recall output. |
-| `/yah:wrap` | Ends a task. Rewrites NEXT in STATE.md, ticks off finished items, writes at most one brain note, commits WIP on the feature branch, stamps NEXT with that commit and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear". | One turn in your session. Writes in your repo. |
+| `/yah:wrap` | Ends a task. Rewrites NEXT in STATE.md, ticks off finished items, writes at most one brain note, commits WIP on the feature branch, stamps NEXT with that commit and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear", and with a plan phase open, says `/yah:auto` hands it to autopilot. | One turn in your session. Writes in your repo. |
 | `/yah:phases` | Turns an approved plan into phases in STATE.md. | One turn. Writes in your repo. |
 | `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). Works on every tier: when the account cannot use Fable, Claude Code runs the agent on the session's model. | Fable usage. See the plan table. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
@@ -108,7 +108,19 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
    ```
 5. **Resume.** The fresh session gets PLAN, PHASE and NEXT injected, so it starts on the next step without reading docs. After `/clear`, type `/yah:auto`; from a terminal, `yah shop` sends it for you. If the statusline says "cache cold", `/clear` beats resuming the old session.
 
-A new multi-phase plan was just approved? Run `/yah:phases` before its first phase. Want steps 2 to 5 repeated without you? See [`yah run`](#hands-free-runs-yah-run).
+A new multi-phase plan was just approved? Run `/yah:phases` before its first phase. Want steps 2 to 5 repeated without you? See [Autopilot](#autopilot).
+
+## Autopilot
+
+You decide at the start; the rest runs without you.
+
+1. **Give it the task.** `yah shop add Apple Pay and refunds`, or `yah shop` and answer what to build. A task that needs several PRs goes to plan mode. Claude explores, then drafts stacked phases, each with a done-when, a branch and a base. It sends the draft to `/yah:deep`, which lists the decisions and risks the plan leaves open.
+2. **Answer everything once.** Before it shows the plan, Claude asks you every one of those decisions, a few questions at a time, and writes the answers under `## Decisions` in the plan file. A headless session can still stop with a `NEEDS-HUMAN` question, but only for what nobody could foresee.
+3. **Approve the plan.** `/yah:phases` writes it to STATE.md and `/yah:auto` starts `yah run --plan --detach`. The session can close; the run goes on in fresh headless sessions, one phase after another (see [`yah run`](#hands-free-runs-yah-run)).
+4. **PRs.** With auto-merge off (the default), each green PR waits for you and the next phase stacks on its branch. With [auto-merge](#auto-merge-opt-in) on, the run merges each green PR it opened and builds the next phase on where it merged.
+5. **Check in.** `yah shop` or `/yah:where` shows the RUN line. While the run lives, `/yah:auto` only reports it and offers to end it. When it stops you get a desktop notification, and `/yah:auto` asks its `NEEDS-HUMAN` question and starts it again, or for a run that stopped offers a rerun, `/yah:deep` on why, or hands-on work.
+
+`yah shop here` opts out: an open phase runs in the session through `/yah:start`, as in the daily loop.
 
 ## The brain
 

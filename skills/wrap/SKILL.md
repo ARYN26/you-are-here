@@ -95,5 +95,17 @@ Merging is always the user's.
 ```
 Saved   <phase label> NEXT = <the NEXT line>
 Commit  <short sha or none>   PR <#N or none>
+<finish line>
+```
+
+The finish line, when a plan phase is still open (the one wrapped, or the one step 6 claimed):
+
+```
+Safe to /clear. Then /yah:auto, or `yah <project>` from a terminal, hands <phase label> to autopilot (a detached `yah run --plan`); `/yah:auto here` works it by hand.
+```
+
+With no plan phase open:
+
+```
 Safe to /clear. Then /yah:auto, or `yah <project>` from a terminal, picks up from NEXT.
 ```

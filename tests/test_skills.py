@@ -148,6 +148,17 @@ class StampTests(unittest.TestCase):
         self.assertIn("next_stale", text)
         self.assertIn("stamped as in step 4", text)  # the next phase's NEXT too
 
+    def test_wrap_finish_line_points_an_open_phase_at_autopilot(self):
+        text = body("wrap")
+        finish = text.split("## 7. Finish with exactly this", 1)[1]
+        self.assertIn("when a plan phase is still open", finish)
+        self.assertIn("hands <phase label> to autopilot (a detached `yah run --plan`)", finish)
+        self.assertIn("`/yah:auto here` works it by hand", finish)
+        self.assertIn("With no plan phase open", finish)
+        self.assertEqual(finish.count("Safe to /clear."), 2)  # one line per case, both still say it
+        # every line of a fenced block is literal: no nested backticks around a whole finish line
+        self.assertNotIn("`Safe to /clear", finish)
+
     def test_phases_stamps_next(self):
         text = body("phases")
         self.assertIn('"next_sha":"<HEAD>"', text)
