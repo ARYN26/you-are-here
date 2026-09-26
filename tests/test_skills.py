@@ -165,6 +165,25 @@ class StampTests(unittest.TestCase):
         self.assertIn("- At: <git rev-parse --short HEAD>", text)
 
 
+class UserCommandTests(unittest.TestCase):
+    """A step left to the user comes with the command that does it, ready to paste in a terminal."""
+
+    def test_user_steps_name_their_command(self):
+        for name in ("wrap", "phases", "where", "auto"):
+            with self.subTest(skill=name):
+                self.assertIn("gh pr merge", body(name))
+                self.assertNotIn("--delete-branch", body(name))  # deleting a stack's base closes the PR on it
+        self.assertIn("Merge PR #13: gh pr merge 13 --merge (you)", body("wrap"))  # `(you)` still ends the line
+        self.assertIn("- [ ] Merge PR #13: gh pr merge 13 --merge (you)", body("phases"))
+        self.assertIn("paste in a terminal, e.g. `gh pr merge 13 --merge`", (ROOT / "RULES.md").read_text("utf-8"))
+
+    def test_wrap_finish_gives_the_merge_command(self):
+        finish = body("wrap").split("## 7. Finish with exactly this", 1)[1]
+        self.assertIn("Merge   <the merge command>", finish)
+        self.assertIn("`gh pr edit <N> --base <that PR's base>` once that PR merges", finish)
+        self.assertIn("Leave the Merge line out when no PR is open", finish)
+
+
 class AutoTests(unittest.TestCase):
     """/yah:auto is the launcher's first prompt: it routes to the other skills and never makes up work."""
 

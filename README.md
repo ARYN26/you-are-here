@@ -53,7 +53,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | PostToolUse guard | The context guard again after each tool call, so wrap nudges reach a headless session, which has only one prompt. | Only inside `yah run` iterations: one local Python run per tool call. Interactive sessions never run it. |
 | Push guard | A PreToolUse hook on Bash and PowerShell that denies force pushes, pushes to protected branches and merges. See [Rails](#hands-free-runs-yah-run). | Only inside `yah run` iterations: one local Python run per Bash call. Interactive sessions never run it. |
 | Ultracode opt-in | Max 20x only, offered by `/yah:setup`: ultracode on in every session with workflows capped at medium size, plus a once-per-session rule for sizing workflows. See [Ultracode on Max 20x](#ultracode-on-max-20x). | About 80 tokens once per session. The spend is ultracode's own: xhigh effort and workflow agents. |
-| Skill and agent listing | The short descriptions Claude Code lists so the model knows these exist, each 92 characters or fewer. `/yah:auto`, `/yah:resume` and `/yah:setup` are hidden from the model. | Measured in one clean A/B pair against a no-plugin session: +593 tokens per turn in total. Of that, the skill listing is about 125 tokens (493 characters), the agent listing about 75 (299 characters) and the SessionStart block about 125; the other ~270 were not attributed (likely wrapper text and noise). Since that run the SessionStart block gained its restate rule (104 characters, about 26 tokens) and the wrap description 7 characters. If you append RULES.md through setup, add about 320 tokens (about 1,270 characters) per turn. |
+| Skill and agent listing | The short descriptions Claude Code lists so the model knows these exist, each 92 characters or fewer. `/yah:auto`, `/yah:resume` and `/yah:setup` are hidden from the model. | Measured in one clean A/B pair against a no-plugin session: +593 tokens per turn in total. Of that, the skill listing is about 125 tokens (493 characters), the agent listing about 75 (299 characters) and the SessionStart block about 125; the other ~270 were not attributed (likely wrapper text and noise). Since that run the SessionStart block gained its restate rule (104 characters, about 26 tokens) and the wrap description 7 characters. If you append RULES.md through setup, add about 345 tokens (about 1,380 characters) per turn. |
 | `/yah:setup` and the `yah` launcher | Sets the statusline and your tier. Optionally adds a `yah <project>` shell function that cds into a project and starts `claude` on `/yah:auto`; `yah run` goes to the run driver. | Changes `statusLine` in settings.json, after a backup. Each step asks first. |
 
 ## Install
@@ -64,7 +64,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 /yah:setup
 ```
 
-A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers auto-update (see below), [auto-merge](#auto-merge-opt-in) for `yah run`, the `yah` launcher, and to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md` (about 320 tokens on every turn). Each step needs your yes.
+A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers auto-update (see below), [auto-merge](#auto-merge-opt-in) for `yah run`, the `yah` launcher, and to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md` (about 345 tokens on every turn). Each step needs your yes.
 
 You can also run setup from a terminal (use `python` on Windows):
 
@@ -229,7 +229,7 @@ The iteration cap is per phase. `run_total_hours` and the weekly pace hold for t
 
 #### Auto-merge: opt-in
 
-Off by default: a run stops at a green PR and the merge is yours. `/yah:setup` offers to turn it on (`setup.py --auto-merge`, which sets `auto_merge: true` in config.json). Only a JSON `true` counts; `"true"` or `1` leaves it off. `/yah:where` then shows `auto-merge: on` on a green phase PR instead of `merge: you`.
+Off by default: a run stops at a green PR and the merge is yours. `/yah:setup` offers to turn it on (`setup.py --auto-merge`, which sets `auto_merge: true` in config.json). Only a JSON `true` counts; `"true"` or `1` leaves it off. `/yah:where` then shows `auto-merge: on` on a green phase PR instead of `merge: you` and its `gh pr merge <N> --merge` command.
 
 With it on, the driver merges, never the model: `gh pr merge` stays on the DENY list and the push guard still denies it in every session. The driver merges only when all of these hold:
 - at least one check ran, and every check passed;

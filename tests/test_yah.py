@@ -702,6 +702,13 @@ class WhereTests(Base):
         cache = next(self.data.glob("where-*.json"))  # the statusline's "for you" count
         self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))["human"], 2)
 
+    def test_state_md_you_line_with_its_command(self):
+        text = "## Follow-ups\n- [ ] Merge PR #9: gh pr merge 9 --merge (you)\n"
+        repo = self.repo({"STATE.md": text})
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["state"]["human"], [{"id": "STATE.md:2", "title": "Merge PR #9: gh pr merge 9 --merge"}])
+        self.assertNotIn("(you)", self.where(repo))
+
     def test_state_md_you_after_fields_and_fences(self):
         text = ("## Plan: Launch\n- [ ] P1 Ship | branch launch/ship | PR #13 (you)\n\n"
                 "```markdown\n- [ ] An example line (you)\n```\n")
@@ -899,10 +906,12 @@ class PrLinesTests(unittest.TestCase):
         lines, index = w.pr_lines(prs, "feature/b", phases, limit=10, trunks=["release"])
         by = {int(re.match(r"#(\d+)", ln).group(1)): ln for ln in lines}
         self.assertTrue(lines[0].startswith("#2  P2  feature/b -> feature/a"), lines[0])
-        self.assertIn("stacked on #1: retarget after it merges", by[2])
+        self.assertIn("stacked on #1: retarget after it merges, `gh pr edit 2 --base main`", by[2])
+        self.assertNotIn("gh pr merge", by[2])  # a stacked PR is retargeted first, never merged into its base
         self.assertIn("<- this branch", by[2])
         self.assertIn("P1", by[1])
-        self.assertIn("merge: you", by[1])
+        self.assertIn("merge: you, `gh pr merge 1 --merge`", by[1])
+        self.assertNotIn("--delete-branch", by[1])  # deleting a stack's base branch closes the PR on it
         self.assertNotIn("stacked", by[6])
         self.assertEqual(index["feature/b"], {"number": 2, "base": "feature/a", "checks": "green"})
         lines, _ = w.pr_lines(prs, "feature/b", None, limit=10)
@@ -926,7 +935,8 @@ class PrLinesTests(unittest.TestCase):
         on, off = by(True), by(False)
         self.assertIn("auto-merge: on", on[1])
         self.assertNotIn("merge: you", on[1])
-        self.assertIn("merge: you", on[2])  # not a phase PR: yah run never merges it
+        self.assertNotIn("gh pr merge", on[1])  # yah run merges it: no command for the user
+        self.assertIn("merge: you, `gh pr merge 2 --merge`", on[2])  # not a phase PR: yah run never merges it
         for n in (3, 4):  # a draft or a red PR: nobody merges it yet
             self.assertNotIn("merge", on[n])
         self.assertIn("merge: you", off[1])
