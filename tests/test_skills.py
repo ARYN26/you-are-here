@@ -478,6 +478,20 @@ class DocsTests(unittest.TestCase):
         self.assertNotIn("| `you` |", config)
         self.assertNotIn("assigned to you", self.readme)
 
+    def test_critic_and_judge_section_matches_run_py(self):
+        runs = self.section("## Hands-free runs")
+        crit = runs[runs.index("#### Critic and judge: quality profile"):]
+        run_py = (ROOT / "scripts/run.py").read_text("utf-8")
+        for words in ("critic_week_skip_pct", "`roles.judge`", "fix-findings", "critique=<path>", "`judge block <n>`"):
+            self.assertIn(words, crit)
+        # the log lines and the stop line it quotes are the ones run.py writes
+        for words in ("critic/judge sessions", "at or over", ": roles.judge", "bar unknown", "skipped: ",
+                      "it ended with YAH-RESULT: "):
+            with self.subTest(w=words):
+                self.assertIn(words, crit)
+                self.assertIn(words, run_py)
+        self.assertIn("(#critic-and-judge-quality-profile)", self.section("## Quality profile"))
+
     def test_manifests(self):
         plugin = json.loads((ROOT / ".claude-plugin/plugin.json").read_text("utf-8"))
         market = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text("utf-8"))

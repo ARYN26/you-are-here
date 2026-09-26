@@ -199,7 +199,7 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
   --settings '{"hooks":{"PreToolUse":[...push_guard.py],"PostToolUse":[...context_guard.py]}}'
 ```
 
-`/yah:resume` orients with where.py and brain recall, gets on the phase branch (its instructions rule out trunks and PROD), does one bounded slice toward NEXT, runs the tests, follows `/yah:wrap` and ends with a `YAH-RESULT:` line. A decision that needs you becomes NEXT = `NEEDS-HUMAN: <question>`. Before and after each iteration, run.py reads the PR (`gh pr view`, then `gh pr checks`, required checks first) and the phase (where.py). Pending checks are polled every 30 s for up to `run_checks_wait_minutes`. Failing checks make the next slice `fix-checks`, which reads the failing CI logs. A CHANGES_REQUESTED review newer than the head commit makes it `address-review`.
+`/yah:resume` orients with where.py and brain recall, gets on the phase branch (its instructions rule out trunks and PROD), does one bounded slice toward NEXT, runs the tests, follows `/yah:wrap` and ends with a `YAH-RESULT:` line. A decision that needs you becomes NEXT = `NEEDS-HUMAN: <question>`. Before and after each iteration, run.py reads the PR (`gh pr view`, then `gh pr checks`, required checks first) and the phase (where.py). Pending checks are polled every 30 s for up to `run_checks_wait_minutes`. Failing checks make the next slice `fix-checks`, which reads the failing CI logs. A CHANGES_REQUESTED review newer than the head commit makes it `address-review`. With the quality profile on, a [judge](#critic-and-judge-quality-profile) that blocks makes it `fix-findings`.
 
 **Stop rules.** Checked before and after each iteration. The first match wins:
 
@@ -207,7 +207,7 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 |---|---|
 | 6 | The PR was merged or closed. With `--plan`, a merged PR whose phase is closed moves on to the next phase instead. |
 | 8 | With `auto_merge` on, where 0 would stop: the PR met every [auto-merge](#auto-merge-opt-in) rule and yah merged it, "merged by yah". With `--plan`, the run goes on to the next phase instead. |
-| 0 | The PR is open, its checks pass (or it has none), no CHANGES_REQUESTED review is newer than the head commit, and the phase is closed (or TARGET was a PR). "The merge is yours." With `auto_merge` on, it also says which merge rule was not met. With `--plan`: no open phase is left, "plan done", with each phase's PR. |
+| 0 | The PR is open, its checks pass (or it has none), no CHANGES_REQUESTED review is newer than the head commit, and the phase is closed (or TARGET was a PR). "The merge is yours." With the quality profile on, the [judge](#critic-and-judge-quality-profile) runs first. With `auto_merge` on, it also says which merge rule was not met. With `--plan`: no open phase is left, "plan done", with each phase's PR. |
 | 2 | The last session needs you: it ended in an error (a timeout included), a permission was denied during it, it ended `needs-human` or `blocked`, or it ended without a `YAH-RESULT:` line (usually the plugin was not loaded). Also a failed auto-merge step. The denial or question is printed. |
 | 3 | Stalled: HEAD and NEXT unchanged for 2 iterations in a row. |
 | 4 | The iteration cap, or `run_total_hours` of wall clock. |
@@ -244,6 +244,31 @@ With it on, the driver merges, never the model: `gh pr merge` stays on the DENY 
 It reads the PR again once its checks pass and judges only that read, since the wait for checks can be long: a review, a draft or a new commit that lands during the wait stops the merge.
 
 Then, in this order: `gh pr merge <N> --merge --match-head-commit <sha>` (a merge commit, never a squash, and only if the head has not moved); each open PR based on the merged branch is retargeted to the merged PR's base; the merged branch is deleted on GitHub, never a protected one. Retargeting comes first because GitHub closes a PR whose base branch is deleted, which is also why it never passes `--delete-branch`. The run stops with exit 8, "merged by yah"; with `--plan` it goes on, and the next phase builds on the merged PR's base. A rule not met leaves the PR to you (exit 0 says which), and a failed merge step stops the run with exit 2.
+
+#### Critic and judge: quality profile
+
+With the [quality profile](#quality-profile) on (`ultracode: true` in config.json), a run adds two read-only sessions to each phase, on `roles.critic` (Fable at high effort by default):
+
+- **Critique**, before the phase's first build, when the phase has no PR and its branch is not on origin. `/yah:resume P2 critique` reads the code the phase will touch and writes at most 300 words: what will break, what is missing, and the order to build in. The answer is saved as `runs/<run>-P2-critique.md`, and the next build prompt ends with `critique=<path>`. That build folds it in and logs each change it makes to the plan as a `Decided:` line. A phase that already has a PR or a pushed branch gets no critique, so a restarted run does not pay for a second one.
+- **Judge**, once the PR is open and green and the phase is closed: where the run would stop with exit 0 or auto-merge. `/yah:resume P2 judge` reads `gh pr diff` and reports only the defects it can prove and that should block the merge: wrong behavior, data loss, a security hole, or a broken or weakened test. `judge pass` lets the run stop or merge as usual. `judge block <n>` saves the findings as `runs/<run>-P2-judge.md` and runs one `fix-findings` slice on them, even at the iteration cap. Then the loop goes on as usual (checks, reviews, stop rules), with no second judge, so a judge can hold a merge back by one slice, never for good.
+
+Each runs once per phase per run, with Edit, Write and NotebookEdit denied on top of the DENY list, and under the same push guard, `--max-budget-usd` and `run_iteration_minutes` as a build. No judge runs after a session that stopped for you, since the run stops there anyway. A critique or judge that fails (an error, a timeout, or not the `YAH-RESULT:` line it should end with) is logged as skipped, and the run goes on without it.
+
+**Fable fallback.** Before each one, the run reads the critic model's own weekly bar: the fullest rate-limit pool whose key contains the model name, such as `seven_day_fable`, from the last session's stream, else from `limits.json` if it is under 6 h old. At `critic_week_skip_pct` (50%) or more, the session runs on `roles.judge` (Opus at high effort) instead. A bar it cannot read counts as under, so the critic stays on Fable. To move both off Fable for good, set `roles.critic`.
+
+**Log lines.** The console shows each one as it starts. The console and the `.log` show how it ended: model and effort, why that model, cost, then its result and file, or why it was skipped:
+
+```
+[yah] critique P2: /yah:resume P2 critique on fable high (bar unknown)
+[yah] critique P2: fable high (bar unknown), $0.62, critique-done, youarehere-20260926-113655-P2-critique.md
+[yah] judge P2: /yah:resume P2 judge on opus high (fable bar 55%, at or over 50%: roles.judge)
+[yah] judge P2: opus high (fable bar 55%, at or over 50%: roles.judge), $1.10, judge block 2, youarehere-20260926-113655-P2-judge.md
+[yah] judge P3: fable high (fable bar 12%), $0.40, skipped: it ended with YAH-RESULT: blocked dirty tree
+```
+
+Each one's raw stream goes to `runs/<run>-P2-critique.jsonl` or `-P2-judge.jsonl`, and `--dry-run` prints a `critic` line: what it would critique or judge now, and on which model.
+
+**Costs.** Each critique or judge is a full session, billed like an iteration and capped by the same `--max-budget-usd`. On Fable it counts against Fable's own usage bar. They do not count toward `--iterations`, and the stop line counts them apart: `Cost $8.40 over 5 iterations, plus $1.72 over 2 critic/judge sessions.` A phase's ceiling is about (iterations + 3) × budget: its iterations, one critique, one judge and one fix-findings slice. `run_total_hours` and the weekly stop are checked before a critique and before the fix slice. The judge runs only where the run would stop anyway.
 
 **Rails.** Every iteration gets two layers. Neither is a sandbox (see Limits). run.py never passes `--bare`, `bypassPermissions` or `--dangerously-skip-permissions`. Protected branches are `main`, `master`, your `trunks` (default also `develop` and `dev`), the branch your `prod` text names, and, with no config needed, what where.py infers from git alone: the plan's phase bases, the branch open PRs land on (cached, so a closed PR still counts), `origin/HEAD`, and on a work branch the nearest branch on its first-parent chain, the one it was cut from (a branch merged into it, like a docs PR, is not one). When that chain holds only trunks, the nearest branch merged into it is protected too: a base synced in with `git merge` looks just like a merged docs PR to git. The set only grows during a run, including the base of the PR it follows. No session can merge; with `auto_merge` on, the driver merges between sessions (see [Auto-merge](#auto-merge-opt-in)).
 
@@ -310,7 +335,7 @@ The quality profile has Opus do the work at high effort with ultracode on, and g
 - `ultracode: true` in yah's `config.json`, which turns on the profile:
   - **Once per session:** questions, single-file edits and small reviews stay in the main thread. A workflow is only for genuinely parallel work, with one agent per independent unit, and the model and effort for lookups, mechanical stages, and research and judges come from `roles`. The critic's model stays out of workflows. Before a Workflow call, Claude gives one line with its agent count and rough $ cost. A workflow reuses one schema across its agents and passes on the branch and PROD rules. One verifier per finding, and reports of 1,500 characters or fewer.
   - **When weekly use runs ahead of pace:** keep workflows under 5 agents, and suggest `/effort high` for work that is not parallel. Changing effort does not rewrite the cache.
-  - **In `yah run`:** child sessions start with `--effort` from `roles.main`, and its model unless you pass `--model`. Each phase gets one critique of its plan before the build and one merge-blocker judge on its green PR, on `roles.critic`. When the critic model's own weekly bar is at `critic_week_skip_pct` (50%) or more, both run on `roles.judge` instead. With the profile off, `yah run` passes no `--effort` and runs no critic or judge.
+  - **In `yah run`:** child sessions start with `--effort` from `roles.main`, and its model unless you pass `--model`. Each phase gets one critique of its plan before the build and one merge-blocker judge on its green PR, on `roles.critic`. When the critic model's own weekly bar is at `critic_week_skip_pct` (50%) or more, both run on `roles.judge` instead. See [Critic and judge](#critic-and-judge-quality-profile). With the profile off, `yah run` passes no `--effort` and runs no critic or judge.
 
 **Roles** are `"model effort"` strings in `config.json`:
 
