@@ -946,8 +946,9 @@ def main():
     if top is None:
         return refuse(f"not inside a git repo: {cwd}")
     key = project_key(main_root)
+    pidf = run_pid_path(key, str(top), main_root)
     if a.stop:
-        return stop_run(run_pid_path(key, str(top), main_root))
+        return stop_run(pidf)
     pcfg = cfg["projects"].get(key) if isinstance(cfg["projects"].get(key), dict) else {}
     trunks = pcfg.get("trunks") or []
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
@@ -991,7 +992,6 @@ def main():
         return dry_run(r)
     runs = data_dir() / "runs"
     runs.mkdir(parents=True, exist_ok=True)
-    pidf = run_pid_path(key, str(top), main_root)
     child = os.environ.pop("YAH_RUN_DETACHED", "")  # popped, so no claude session it starts inherits it
     stem = Path(child) if child else runs / "{}-{}".format(re.sub(r"[^\w.-]", "_", key), time.strftime("%Y%m%d-%H%M%S"))
     if a.detach and not child:

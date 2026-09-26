@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import beads  # noqa: E402
 from yahlib import (NO_WINDOW, claude_dir, config, data_dir, empty_state, find_git, find_tool,  # noqa: E402
                     first_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs, run, run_info,
-                    run_text, short_of, utf8_stdout, where_cache_path, write_json)
+                    run_status, run_text, short_of, utf8_stdout, where_cache_path, write_json)
 
 PR_FIELDS = "number,title,headRefName,baseRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt"
 FOOTER = ("This is the current state. Do not read docs to orient; /yah:where shows the full view. "
@@ -776,8 +776,8 @@ def home_view(brief):
         pr = (cache.get("prs") or {}).get(branch)
         prs = f"  PR #{pr['number']} {pr['checks']}" if pr else ""
         ri = s.get("run")
-        run_ = "" if not ri else f"  RUN exit {ri['code']}" if "code" in ri else \
-            "  RUN live" if ri["alive"] else "  RUN died"
+        status = run_status(ri) if ri else ""
+        run_ = f"  RUN exit {ri['code']}" if status == "ended" else f"  RUN {status}" if status else ""
         dirty = f" +{s['git']['dirty']}" if s["git"]["dirty"] else ""
         lines.append(f"{key:<10} {clip(branch + dirty, 26):<26} {what}{prs}{run_}")
     if len(lines) == 1:

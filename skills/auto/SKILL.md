@@ -18,18 +18,18 @@ Autopilot: an open plan phase goes to a detached `yah run --plan` (section 4), w
 
 ## 1. Read the state
 
-Use the `[yah]` SessionStart block already in context. Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json` only when there is no block, or it has a PR or a RUN you must check. Read no docs, plans or long files to orient.
+Use the `[yah]` SessionStart block already in context. Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json` only when there is no block, or it has a PR or a RUN you must check; for a RUN alone, add `--no-gh`. Read no docs, plans or long files to orient.
 
 ## 2. Pick the first row that matches
 
 | State | Step |
 |---|---|
 | No project (home folder) | Show the project list from `where.py` and tell the user to exit and run `yah <name>`. Stop. |
-| A live run in this checkout: the RUN line says `running for` (`run.alive` in `--json`) | `yah run` is working here, so do no work in this checkout, not even a given task: its sessions edit this tree and branch. Say in one line what it runs, for how long, and its last log line. Then ask: wait for it, or end it. Wait: stop; `/yah:where` shows the run until it ends. End: `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --stop`, then go on hands-on, as with the task `here`; never start the run you just ended. |
+| A live run in this checkout: the RUN line says `running for` (`run.status` is `live` in `--json`) | `yah run` is working here, so do no work in this checkout, not even a given task: its sessions edit this tree and branch. Say in one line what it runs, for how long, and its last log line. Then ask: wait for it, or end it. Wait: stop; `/yah:where` shows the run until it ends. End: `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --stop`, then go on hands-on, as with the task `here`; never start the run you just ended. |
 | A task was given above, other than `here` | It is the task. If it needs several PRs or sessions, **plan it** (section 3). Otherwise run `yah:start` with the task. |
 | No plan and no NEXT, or every phase is done | There is nothing to continue. Ask one question: what to build or fix. Never invent a task, and never explore the repo to find one. Route the answer as a given task. |
 | NEXT starts with `NEEDS-HUMAN:` | Ask that question as it is. Run `yah:wrap` with the answer as what got done, so NEXT becomes the step the answer unblocks, without `NEEDS-HUMAN:`. Then, with an open plan phase, **start the run**; with none, go on with the answer. |
-| The RUN line says the run `ended` with exit 1, 2, 3, 4 or 7, or `died` (`run.code` in `--json`; died: no code and not alive) | Say its exit, reason and last log line in one line. Then ask: rerun it, `yah:deep` on why it stopped, or go on here by hand. Rerun: **start the run**. Deep: a question that stands alone (the phase, NEXT, the reason, the log at `run.log`), then act on the answer and ask again. By hand: as with the task `here`. Exit 7 is the weekly pace: a rerun stops again until usage drops, so offer waiting in place of deep. |
+| The RUN line says the run `ended` with exit 1, 2, 3, 4 or 7, or `died` (`run.status` is `ended` with `run.code`, or `died`, in `--json`) | Say its exit, reason and last log line in one line. Then ask: rerun it, `yah:deep` on why it stopped, or go on here by hand. Rerun: **start the run**. Deep: a question that stands alone (the phase, NEXT, the reason, the log at `run.log`), then act on the answer and ask again. By hand: as with the task `here`. Exit 7 is the weekly pace: a rerun stops again until usage drops, so offer waiting in place of deep. |
 | The RUN line says the run `ended` with exit 130 (Ctrl-C or `yah run --stop`) | Someone stopped it on purpose, so never restart it unasked. Ask: rerun it, or go on here by hand. |
 | NEXT waits on the user (a PR to merge, "after PR #N merges") | `gh pr view <N> --json state`. Merged: go on with NEXT (usually update the base branch, then branch). Not merged: say in one line what waits on the user, then ask: wait, or start the next phase stacked on this branch. |
 | You are not on the phase's branch | Switch to it if the tree is clean; if not, say so and ask. Then read the table again. |

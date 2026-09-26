@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from yahlib import (LOG_STAMP, config, data_dir, find_git, project_key, read_branch, read_json,  # noqa: E402
-                    run_info, utf8_stdout, where_cache_path, write_json)
+                    run_info, run_status, utf8_stdout, where_cache_path, write_json)
 
 COLD_AFTER_S, COLD_MIN_TOKENS = 3600, 30_000
 WEEK_S = 7 * 86400
@@ -88,11 +88,11 @@ def model_bits(d, premium):
 
 def run_part(ri):
     """The checkout's `yah run`: its target and last log line while it is live, else its exit code."""
-    what = f"run {ri.get('target') or 'phase'}"
-    if "code" in ri:
+    what, status = f"run {ri.get('target') or 'phase'}", run_status(ri)
+    if status == "ended":
         code = ri["code"]
         return color(f"{what} exit {code}", GREEN if code in (0, 8) else RED if code == 1 else AMBER)
-    if not ri.get("alive"):
+    if status == "died":
         return color(f"{what} died", RED)
     last = LOG_STAMP.sub("", ri.get("last") or "")
     return color(what + (f": {last[:40]}{'…' if len(last) > 40 else ''}" if last else ""), GREEN)

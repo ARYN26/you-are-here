@@ -156,11 +156,15 @@ def project_key(main_root):
     return registered_key(main_root) or Path(main_root).name.lower()
 
 
+def root_tag(root):
+    """8 hex of sha1 of the root: tells apart repos that share a folder name."""
+    return hashlib.sha1(norm(root).encode("utf-8")).hexdigest()[:8]
+
+
 def where_cache_path(main_root):
-    """where-<key>.json for a config.json project, else where-<name>-<8 hex of sha1(root)>.json,
+    """where-<key>.json for a config.json project, else where-<name>-<root_tag>.json,
     so two repos with the same folder name never share a cache."""
-    name = registered_key(main_root) or "{}-{}".format(
-        Path(main_root).name.lower(), hashlib.sha1(norm(main_root).encode("utf-8")).hexdigest()[:8])
+    name = registered_key(main_root) or "{}-{}".format(Path(main_root).name.lower(), root_tag(main_root))
     return data_dir() / "where-{}.json".format(re.sub(r"[^\w.-]", "_", name))
 
 
@@ -170,10 +174,10 @@ LOCK_AT = 1 << 30  # Windows byte locks are mandatory, so the lock sits past the
 
 
 def run_pid_path(key, top, main_root):
-    """<data dir>/runs/<key>-<8 hex of sha1(root)>.pid, so two repos with the same folder name never share a lock,
-    or <key>-<hex>@<worktree folder>.pid in a linked worktree: one `yah run` per checkout."""
+    """<data dir>/runs/<key>-<root_tag>.pid, so two repos with the same folder name never share a lock,
+    or <key>-<root_tag>@<worktree folder>.pid in a linked worktree: one `yah run` per checkout."""
     root = main_root or top
-    name = "{}-{}".format(key, hashlib.sha1(norm(root).encode("utf-8")).hexdigest()[:8])
+    name = f"{key}-{root_tag(root)}"
     name = name if norm(top) == norm(root) else f"{name}@{Path(top).name}"
     return data_dir() / "runs" / (re.sub(r"[^\w.@-]", "_", name) + ".pid")
 
@@ -191,6 +195,11 @@ def _lock(fd, unlock=False):
         return True
     except OSError:
         return False
+
+
+def _release(fd):
+    _lock(fd, unlock=True)  # at once: Windows may take a while to drop a lock on close
+    os.close(fd)
 
 
 def write_run(fd, data):
@@ -226,7 +235,19 @@ def end_run(path, data):
     fd = hold_run(path, data)
     if fd is None:
         return False
-    _lock(fd, unlock=True)  # at once: Windows may take a while to drop a lock on close
+    _release(fd)
+    return True
+
+
+def run_held(path):
+    """Whether a live run holds the pid file's lock; None when the file cannot be opened."""
+    try:
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    if _lock(fd):
+        _release(fd)
+        return False
     os.close(fd)
     return True
 
@@ -235,19 +256,16 @@ def run_state(path):
     """The pid file's data plus alive, whether its run still holds the lock. None with no pid file, or one caught
     mid-write."""
     data = read_json(path)
-    if not isinstance(data, dict):
+    held = run_held(path) if isinstance(data, dict) else None
+    if held is None:
         return None
-    try:
-        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
-    except OSError:
-        return None
-    try:
-        data["alive"] = not _lock(fd)
-        if not data["alive"]:
-            _lock(fd, unlock=True)  # at once: Windows may take a while to drop a lock on close
-    finally:
-        os.close(fd)
+    data["alive"] = held
     return data
+
+
+def run_status(st):
+    """live, ended or died. A run writes its code a moment before it lets go of the lock, so a code wins."""
+    return "ended" if "code" in st else "live" if st.get("alive") else "died"
 
 
 RUN_SHOW_S = 3 * 86400  # how long an ended run keeps its RUN line
@@ -270,12 +288,17 @@ def run_info(key, top, main_root, now=None):
     """The checkout's `yah run` for the RUN line: run_state plus `last`, its log's last line, and for a run that
     ended, `at`: when (for one that died without saying, its log's last write). None with no run, or one that
     ended over RUN_SHOW_S ago."""
-    st = run_state(run_pid_path(key, top, main_root))
-    if not st:
+    path, now = run_pid_path(key, top, main_root), now or time.time()
+    st = read_json(path)
+    if not isinstance(st, dict) or now - num(st.get("ended"), now) > RUN_SHOW_S:
+        return None  # long over: the statusline skips the lock probe and the log read on every refresh
+    held = run_held(path)
+    if held is None:
         return None
+    st["alive"] = held
     log = str(st.get("log") or "")
     st["last"] = log_tail(log) if log else ""
-    if "code" in st or not st["alive"]:  # a run writes its code a moment before it lets go of the lock
+    if run_status(st) != "live":
         at = num(st.get("ended"), None)
         if at is None:
             try:
@@ -283,7 +306,7 @@ def run_info(key, top, main_root, now=None):
             except OSError:
                 at = num(st.get("started"), 0)
         st["at"] = at
-        if (now or time.time()) - at > RUN_SHOW_S:
+        if now - at > RUN_SHOW_S:
             return None
     return st
 
@@ -299,9 +322,10 @@ def run_text(st, now=None):
     what = (st.get("target") or "current phase") + (" (--plan)" if st.get("plan") else "")
     last = LOG_STAMP.sub(r"\1 ", st.get("last") or "")
     last = f", last: {last}" if last else ""
-    if "code" in st:
+    status = run_status(st)
+    if status == "ended":
         return f"{what} ended {ago(now - st['at'])} ago, exit {st['code']}: {st.get('reason') or '-'}"
-    if st.get("alive"):
+    if status == "live":
         return f"{what} running for {ago(now - num(st.get('started'), now))}, pid {st.get('pid', '?')}{last}"
     return f"{what} died {ago(now - st['at'])} ago without an exit code, pid {st.get('pid', '?')}{last}"
 
