@@ -179,6 +179,23 @@ class StatuslineTests(Base):
         rl["seven_day"]["used_percentage"] = 60
         self.assertIn(f"{RED}wk 60%", self.line(rate_limits=rl))
 
+    def test_extra_pools_saved_to_state_and_limits_json(self):
+        now = time.time()
+        rl = {"seven_day_fable": {"used_percentage": 12, "resets_at": now + 86400},  # a guessed key name
+              "seven_day_opus": {"used_percentage": 70}, "odd": "not a pool", "blank": {"resets_at": now}}
+        out = self.line(rate_limits=rl)
+        self.assertNotIn("fable", out)  # under 50%: saved, not shown
+        want = {"seven_day_fable": {"used_pct": 12, "resets_at": round(now + 86400)},
+                "seven_day_opus": {"used_pct": 70, "resets_at": None}}
+        self.assertEqual(json.loads((self.data / "state-s1.json").read_text("utf-8"))["pools"], want)
+        lim = json.loads((self.data / "limits.json").read_text("utf-8"))
+        self.assertEqual((lim["pools"], lim["five_hour"]["used_pct"], lim["seven_day"]["used_pct"]), (want, None, None))
+        (self.data / "limits.json").write_text(json.dumps(dict(lim, ts=1)), encoding="utf-8")
+        rl["seven_day_fable"]["used_percentage"] = 55  # a pool change alone rewrites it
+        self.assertIn(f"{AMBER}wk fable 55%", self.line(rate_limits=rl))
+        lim = json.loads((self.data / "limits.json").read_text("utf-8"))
+        self.assertEqual((lim["pools"]["seven_day_fable"]["used_pct"], lim["ts"] != 1), (55, True))
+
     def test_premium_tag(self):
         out = self.line(model=("claude-fable-5-1", "Fable 5.1"))
         self.assertIn(" FABLE ", out)

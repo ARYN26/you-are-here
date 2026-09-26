@@ -331,7 +331,7 @@ The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own cont
 | `where-<project>.json` | The last where.py result for a project, read by the statusline and the home view. A repo not registered in `projects` gets `where-<name>-<8-hex path hash>.json`, so two repos with the same folder name don't collide |
 | `state-<session>.json` | The statusline's latest numbers, read by the context guard |
 | `guard-<session>.json`, `guard-daily.json` | Flags so each nudge fires once |
-| `limits.json` | The latest 5-hour and weekly numbers, written by the statusline when they change, read by `yah run` |
+| `limits.json` | The latest 5-hour and weekly numbers, plus any extra pools such as a per-model weekly bar under `pools`, written by the statusline when they change, read by `yah run` |
 | `recall-<session>.flag` | Marks that first-prompt recall already ran |
 | `runs/` | `yah run` logs, the 20 newest runs |
 | `usage-log.csv` | One row per day: date, time, five_hour_pct, week_pct, week_pace_pct, model |

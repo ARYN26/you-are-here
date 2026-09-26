@@ -10,8 +10,8 @@ Rules it makes visible:
   (Pro/Max subscribers, never API keys).
 
 Side effects, all in the data dir:
-  state-<session>.json  latest numbers, read by context_guard.py
-  limits.json           the latest rate limits, rewritten only when they change
+  state-<session>.json  latest numbers, read by context_guard.py; `pools` holds extra rate_limits pools
+  limits.json           the latest rate limits, rewritten only when they change; extra pools in `pools`
   usage-log.csv         one row per day (latest value wins), the weekly trend
 Never calls bd, gh or git. Must stay well under 300 ms.
 """
@@ -106,12 +106,14 @@ def week_pace(resets_at, now):
     return round(100 * (1 - left / WEEK_S))
 
 
-def save_limits(now, rl, five, week, pace):
-    """limits.json for other tools; rewritten only when a number changes."""
+def save_limits(now, rl, five, week, pace, pools):
+    """limits.json for other tools; rewritten only when a number changes. `pools` holds the extra
+    rate_limits pools by their key (seven_day_opus, ...)."""
     def pool(key, used):
         r = to_epoch((rl.get(key) or {}).get("resets_at"))
         return {"used_pct": used, "resets_at": None if r is None else round(r)}
-    new = {"five_hour": pool("five_hour", five), "seven_day": pool("seven_day", week), "pace_pct": pace}
+    new = {"five_hour": pool("five_hour", five), "seven_day": pool("seven_day", week), "pace_pct": pace,
+           "pools": pools}
     path = data_dir() / "limits.json"
     old = read_json(path, {}) or {}
     if {k: old.get(k) for k in new} != new:
@@ -189,11 +191,16 @@ def main():
         if pace is not None:
             c = RED if week > pace + 20 else AMBER if week > pace + 10 else ""
         parts.append(color(f"wk {week:.0f}%" + (f" (pace {pace}%)" if pace is not None else ""), c))
-    for key, val in rl.items():  # any extra pool (e.g. a per-model weekly bar), shown once it matters
+    pools = {}  # any extra pool (e.g. a per-model weekly bar), saved always, shown once it matters
+    for key, val in rl.items():
         if key in ("five_hour", "seven_day") or not isinstance(val, dict):
             continue
         p = pct(val.get("used_percentage"))
-        if p is not None and p >= 50:
+        if p is None:
+            continue
+        r = to_epoch(val.get("resets_at"))
+        pools[key] = {"used_pct": p, "resets_at": None if r is None else round(r)}
+        if p >= 50:
             parts.append(color(f"{key.replace('seven_day_', 'wk ').replace('_', ' ')} {p:.0f}%", AMBER if p < 85 else RED))
 
     ws = d.get("workspace") or {}
@@ -235,9 +242,9 @@ def main():
     if sid:
         write_json(data_dir() / f"state-{sid}.json", {
             "ts": now, "tokens": tokens, "model": model_id, "premium": tag,
-            "five_hour": five, "week": week, "pace": pace})
-    if five is not None or week is not None:
-        save_limits(now, rl, five, week, pace)
+            "five_hour": five, "week": week, "pace": pace, "pools": pools})
+    if five is not None or week is not None or pools:
+        save_limits(now, rl, five, week, pace, pools)
     log_usage(now, five, week, pace, model_id)
 
 
