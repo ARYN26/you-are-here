@@ -151,9 +151,26 @@ def md_scan(lines):
     return heads, items, prose
 
 
-def md_plan(file, head, items, nxt):
+def md_log(lines, n):
+    """The plain lines indented under the phase line at line n, bullets dropped: the handoff log wrap keeps for the
+    next session. Checkbox lines there are sub-tasks, skipped but not an end; a blank line is not an end either."""
+    def indent(ln):
+        return len(ln.expandtabs(4)) - len(ln.expandtabs(4).lstrip())
+    top, log = indent(lines[n - 1]), []
+    for ln in lines[n:]:
+        if not ln.strip():
+            continue
+        if indent(ln) <= top or ln.lstrip().startswith(("```", "~~~")):
+            break
+        if not md_line(ln):
+            log.append(re.sub(r"^[-*+]\s+", "", ln.strip()))
+    return log
+
+
+def md_plan(file, head, items, nxt, lines):
     """A `## Plan: Title (spec)` section as a plan: its phase lines (the least indented checkbox lines, normally
-    unindented) with id file:line. Lines indented under a phase are its sub-tasks, not phases."""
+    unindented) with id file:line. Lines indented under a phase are its sub-tasks, not phases, or, when they are
+    not checkboxes, its handoff `log`."""
     m = re.match(r"Plan:\s*(.*?)\s*(?:\(([^)]*)\))?$", head, re.I)
     title, spec = (m.group(1), m.group(2) or "") if m else (head, "")
     views = []
@@ -161,7 +178,7 @@ def md_plan(file, head, items, nxt):
         lm = re.match(r"(P\d+)\b[\s:.-]*(.*)", text)
         label, name = (lm.group(1), lm.group(2)) if lm else (f"P{len(views) + 1}", text)
         v = {"id": f"{file}:{n}", "label": label, "title": name or text, "status": status,
-             "branch": "", "base": "", "pr": "", "next": ""}
+             "branch": "", "base": "", "pr": "", "next": "", "log": md_log(lines, n)}
         for p in fields:
             fm = re.match(r"(branch|base)\s+(\S+)$", p, re.I)
             pr = re.match(r"PR\s*#?(\d+)$", p, re.I)
@@ -222,7 +239,7 @@ def state_md(top, main_root=None):
         # The plan with a phase in progress, else one with an open phase, else the first. A finished plan
         # left above the next one does not hide it.
         parsed = [p for p in (md_plan(name, heads[i][1], [(n, ml) for n, sec, ml in items
-                                                           if sec == i and n in phase_lines], out["next"])
+                                                           if sec == i and n in phase_lines], out["next"], lines)
                               for i in plans) if p]
         out.update(next((p for p in parsed if p["phase"]), None) or
                    next((p for p in parsed if p["next_phase"]), None) or (parsed[0] if parsed else {}))

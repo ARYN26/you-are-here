@@ -659,6 +659,37 @@ class WhereTests(Base):
                                             {"id": "STATE.md:10", "title": "Fix the flaky e2e test"}])
         self.assertEqual((s["open_count"], s["human"]), (2, [{"id": "STATE.md:11", "title": "Rotate the keys"}]))
 
+    def test_state_md_phase_log(self):
+        """Plain lines indented under a phase are its handoff log in --json; sub-tasks, counts and the plain view
+        stay as they are."""
+        plain = ("## Plan: Launch\n- [x] P1 Build\n- [~] P2 Ship | branch launch/ship\n  - [ ] Tag the release\n"
+                 "- [ ] P3 Announce\n\n## Follow-ups\n- [ ] Update the README\n\n## 2026-09-23\n- Next: Tag it.\n")
+        logged = plain.replace("  - [ ] Tag the release\n", "  - Done: built the assets\n  - [ ] Tag the release\n"
+                               "  - Tried: tagging on CI failed because the token is read-only\n\n"
+                               "  - Decided: tag by hand because CI cannot\n")
+        repo = self.state_repo(plain, branch="launch/ship", name="plain")
+        before = (json.loads(self.where(repo, "--json"))["state"], self.where(repo))
+        repo = self.state_repo(logged, branch="launch/ship", name="logged")
+        s = json.loads(self.where(repo, "--json"))["state"]
+        self.assertEqual(s["phase"]["log"], ["Done: built the assets",
+                                             "Tried: tagging on CI failed because the token is read-only",
+                                             "Decided: tag by hand because CI cannot"])
+        self.assertEqual([p["log"] for p in s["phases"]], [[], s["phase"]["log"], []])
+        self.assertEqual((s["plan"]["done"], s["plan"]["total"], s["open_count"]),
+                         (before[0]["plan"]["done"], before[0]["plan"]["total"], before[0]["open_count"]))
+        self.assertEqual((s["phase"]["id"], s["phases"][2]["id"]), ("STATE.md:3", "STATE.md:9"))
+        self.assertEqual(self.where(repo), before[1].replace("STATE.md:5", "STATE.md:9"))  # the plain view: no log
+
+    def test_beads_phase_log_is_the_notes_after_next(self):
+        w = load_where()
+        epic = {"id": "x-0", "title": "Launch", "issue_type": "epic", "status": "open", "labels": ["plan"]}
+        kid = {"id": "x-1", "title": "P1 Ship", "issue_type": "task", "status": "in_progress", "labels": ["phase"],
+               "parent": "x-0", "metadata": {"phase": 1},
+               "notes": "Tag the release.\n- Done: built the assets\n\nDecided: tag by hand because CI cannot\n"}
+        p = w.beads.beads_state([epic, kid])["phase"]
+        self.assertEqual((p["next"], p["log"]),
+                         ("Tag the release.", ["Done: built the assets", "Decided: tag by hand because CI cannot"]))
+
     def test_state_md_follow_up_in_progress_shows_as_doing(self):
         repo = self.state_repo(STATE_DATED + "\n## Follow-ups\n- [~] Fix the flaky e2e test\n- [ ] Update the README\n"
                                "- [ ] Bump the deps\n- [ ] Rotate the keys (you)\n", branch="main")
