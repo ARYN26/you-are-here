@@ -91,8 +91,9 @@ if role == "gh":
         sys.exit(c.get("rc", 0))
     else:
         sys.exit(1)
-elif role == "claude":
-    c = step("claude")
+elif role == "claude":  # a mode with its own key (critique) scripts those sessions; claude scripts the rest
+    mode = (args[args.index("-p") + 1].split() + ["", "", ""])[2]
+    c = step(mode if mode in script else "claude")
     with open(os.path.join(d, "claude.env"), "w", encoding="utf-8") as f:
         f.write(os.environ.get("YAH_PROTECTED", "-"))
     with open(os.path.join(d, "claude.detached"), "w", encoding="utf-8") as f:
@@ -100,8 +101,9 @@ elif role == "claude":
     emit({"type": "system", "subtype": "init", "permissionMode": c.get("mode", "auto")})
     for name, inp in c.get("tools", []):
         emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}})
-    if "rate" in c:
-        emit({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"seven_day": c["rate"]}}})
+    if "rate" in c or "windows" in c:
+        windows = dict(c.get("windows", {}), **({"seven_day": c["rate"]} if "rate" in c else {}))
+        emit({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": windows}})
     if c.get("orphan"):  # a child in its own session, like the Bash tool's shells
         beat, t = os.path.join(d, "orphan.txt"), time.time()
         subprocess.Popen([sys.executable, "-c", "import sys, time\nfor _ in range(600):\n"
@@ -751,6 +753,163 @@ class RunTests(unittest.TestCase):
         self.assertEqual((self.fake / "claude.env").read_text("utf-8"), "dev,develop,main,master,release,stable")
         self.git(repo, "symbolic-ref", "HEAD", "refs/heads/release")
         self.assertIn("PROD branch", self.run_yah(repo, code=5))
+
+    def test_the_profile_sets_model_and_effort_from_roles_main(self):
+        def flags(*args):
+            self.script(claude=[{"tag": "needs-human"}], critique=[{"tag": "critique-done"}])
+            self.run_yah(repo, "P2", *args, code=2)
+            argv = self.calls("claude")[-1]  # the build, after any critique
+            return [(f, argv[argv.index(f) + 1] if f in argv else None) for f in ("--model", "--effort")]
+
+        repo = self.repo()
+        self.assertEqual(flags(), [("--model", None), ("--effort", None)])  # profile off: as before
+        self.assertEqual(flags("--model", "sonnet"), [("--model", "sonnet"), ("--effort", None)])
+        self.config(ultracode=True)
+        self.assertEqual(flags(), [("--model", "opus"), ("--effort", "high")])
+        self.assertEqual(flags("--model", "sonnet"), [("--model", "sonnet"), ("--effort", "high")])
+        self.config(ultracode=True, roles={"main": "sonnet xhigh"})
+        self.assertEqual(flags(), [("--model", "sonnet"), ("--effort", "xhigh")])
+        self.config(ultracode="yes", roles={"main": "sonnet xhigh"})  # only a JSON true turns it on
+        self.assertEqual(flags(), [("--model", None), ("--effort", None)])
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])  # profile off: no critique
+
+    def flag(self, argv, name):
+        return argv[argv.index(name) + 1] if name in argv else None
+
+    def test_the_profile_critiques_builds_judges_and_fixes_each_phase_in_order(self):
+        self.config(ultracode=True)
+        state = STATE.replace("- [ ] P3 Emails", "- [ ] P3 Emails | branch checkout/emails")
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        p3 = "- [~] P3 Emails | branch checkout/emails"
+        self.script(list=[], required=[{"rc": 0}], **{
+            "view-12": [view()],
+            "view-13": [view(headRefName="checkout/emails", baseRefName="checkout/payment")],
+            "critique": [{"result": {"result": "Build the API first.\nYAH-RESULT: critique-done", "total_cost_usd": 0.4}}],
+            "judge": [{"result": {"result": "pay.py:3 drops the cents.\nYAH-RESULT: judge block 1", "total_cost_usd": 0.5}},
+                      {"result": {"result": "Nothing blocks.\nYAH-RESULT: judge pass", "total_cost_usd": 0.5}}],
+            "fix-findings": [{"commit": True, "tag": "pr-open #12", "windows": {"seven_day_fable": {"utilization": 0.55}}}],
+            "claude": [{"commit": True, "tag": "pr-open #12",
+                        "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
+                       {"commit": True, "tag": "pr-open #13", "replace": [[p3, p3.replace("[~]", "[x]") + " | PR #13"]]}]})
+        # --iterations 1: the judge's one fix slice runs past the cap
+        out = self.run_yah(self.repo(state=state), "--plan", "--iterations", "1", code=0)
+        prompts = self.prompts()
+        paths = [p.split(k, 1)[1] for p in prompts for k in ("critique=", "findings=") if k in p]
+        self.assertEqual(prompts, ["/yah:resume P2 critique", "/yah:resume P2 build critique=" + paths[0],
+                                   "/yah:resume P2 judge", "/yah:resume P2 fix-findings findings=" + paths[1],
+                                   "/yah:resume P3 critique",
+                                   "/yah:resume P3 build base=checkout/payment critique=" + paths[2],
+                                   "/yah:resume P3 judge"])  # no second judge after the fix
+        for name, path, text in zip(("P2-critique", "P2-judge", "P3-critique"), paths,
+                                    ("Build the API first.", "pay.py:3 drops the cents.", "Build the API first.")):
+            self.assertTrue(path.endswith(f"-{name}.md"), path)
+            self.assertIn(text, Path(path).read_text("utf-8"))
+        calls = self.calls("claude")
+        # critic and judge run read-only on roles.critic until its own bar (from the stream here) reaches 50%
+        self.assertEqual([(self.flag(a, "--model"), self.flag(a, "--effort")) for a in calls],
+                         [("fable", "high"), ("opus", "high"), ("fable", "high"), ("opus", "high"),
+                          ("opus", "high"), ("opus", "high"), ("opus", "high")])
+        for a, critic in zip(calls, (True, False, True, False, True, False, True)):
+            deny = a[a.index("--disallowedTools") + 1:a.index("--max-budget-usd")]
+            self.assertEqual([t in deny for t in ("Edit", "Write", "NotebookEdit")], [critic] * 3)
+        log = self.run_logs()[0].read_text("utf-8")
+        self.assertIn("critique P2: fable high (bar unknown), $0.40, critique-done, ", log)
+        self.assertIn("judge P2: fable high (bar unknown), $0.50, judge block 1, ", log)
+        self.assertIn("critique P3: opus high (fable bar 55%, at or over 50%: roles.judge), $0.40, critique-done", log)
+        self.assertIn("judge P3: opus high (fable bar 55%, at or over 50%: roles.judge), $0.50, judge pass", log)
+        self.assertIn("Cost $0.75 over 3 iterations, plus $1.80 over 4 critic/judge sessions.", log)
+        self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green.", out)
+
+    def test_the_judge_gates_a_green_pr_once_and_a_failed_judge_never_stops_the_run(self):
+        repo, now = self.repo(state=CLOSED), time.time()
+        self.script(view=[view()], required=[{"rc": 0}])
+        self.assertIn(GREEN, self.run_yah(repo, "P2", code=0))
+        self.assertEqual(self.prompts(), [])  # profile off: no judge
+        self.config(ultracode=True)
+        self.data.joinpath("limits.json").write_text(json.dumps(
+            {"ts": now, "pools": {"seven_day_fable": {"used_pct": 60}}}), encoding="utf-8")
+        self.script(view=[view()], required=[{"rc": 0}])
+        self.assertIn("critic  would judge PR #12 on opus high (fable bar 60%, at or over 50%: roles.judge) before it "
+                      "stops or merges", self.run_yah(repo, "P2", "--dry-run", code=0))
+        cases = [("no tag", {"result": {"result": "Looks fine."}}, "skipped: no YAH-RESULT line"),
+                 ("error", {"result": {"is_error": True, "subtype": "error_max_budget_usd"}},
+                  "skipped: error_max_budget_usd"),
+                 ("pass", {"tag": "judge pass"}, "judge pass, ")]
+        for name, step, text in cases:
+            with self.subTest(name):
+                self.script(view=[view()], required=[{"rc": 0}], judge=[step])
+                self.assertIn(GREEN, self.run_yah(repo, "P2", code=0))
+                self.assertEqual(self.prompts(), ["/yah:resume P2 judge"])
+                self.assertIn("judge P2: opus high (fable bar 60%, at or over 50%: roles.judge), $0.25, " + text,
+                              self.run_logs()[-1].read_text("utf-8"))
+        # auto-merge waits for the judge and its one fix slice
+        self.auto({"ultracode": True}, **{"view-12": [view()], "judge": [{"tag": "judge block 2"}],
+                                          "fix-findings": [{"tag": "pr-open #12"}]})
+        self.assertIn(MERGE_OK, self.run_yah(repo, "P2", code=8))
+        prompts = self.prompts()
+        self.assertEqual(prompts[0], "/yah:resume P2 judge")
+        self.assertRegex(prompts[1], r"^/yah:resume P2 fix-findings findings=.+-P2-judge\.md$")
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(len(self.merges()), 1)
+
+    def test_a_judge_block_after_a_build_that_errored_still_runs_its_fix_slice(self):
+        # the build opened the PR and closed the phase, then ended in an error: the green PR outranks that ending
+        self.config(ultracode=True)
+        self.script(required=[{"rc": 0}], critique=[{"tag": "critique-done"}], **{
+            "view-12": [view()], "judge": [{"tag": "judge block 1"}],
+            "fix-findings": [{"commit": True, "tag": "pr-open #12"}],
+            "claude": [{"commit": True, "close": True, "tag": "pr-open #12",
+                        "result": {"is_error": True, "subtype": "error_max_budget_usd"}}]})
+        self.assertIn(GREEN, self.run_yah(self.repo(), "P2", code=0))
+        prompts = self.prompts()
+        self.assertEqual([p.split(" findings=")[0].split(" critique=")[0] for p in prompts],
+                         ["/yah:resume P2 critique", "/yah:resume P2 build", "/yah:resume P2 judge",
+                          "/yah:resume P2 fix-findings"])
+        runs = (self.data / "runs").resolve()
+        for argv, reads_file in zip(self.calls("claude"), (False, True, False, True)):
+            add = self.flag(argv, "--add-dir")  # the critique or findings file is outside the repo
+            self.assertEqual(add and Path(add).resolve(), runs if reads_file else None)
+            deny = argv[argv.index("--disallowedTools") + 1:argv.index("--max-budget-usd")]
+            self.assertEqual("Bash(git push*)" in deny, not reads_file)  # critic and judge: no commit, no push
+
+    def test_a_critique_falls_back_at_the_bar_and_never_stops_the_run(self):
+        self.config(ultracode=True)
+        repo, now = self.repo(), time.time()
+        self.data.joinpath("limits.json").write_text(json.dumps(
+            {"ts": now, "pools": {"seven_day_fable": {"used_pct": 60, "resets_at": now + 86400}}}), encoding="utf-8")
+        self.script()
+        self.assertIn("critic  would critique P2 on opus high (fable bar 60%, at or over 50%: roles.judge) before its "
+                      "first build", self.run_yah(repo, "--dry-run", code=0))
+        cases = [("no tag", {"result": {"result": "Looks fine."}}, "opus high (fable bar 60%, at or over 50%: "
+                  "roles.judge), $0.25, skipped: no YAH-RESULT line"),
+                 ("error", {"result": {"is_error": True, "subtype": "error_max_budget_usd"}},
+                  "fable high (bar unknown), $0.25, skipped: error_max_budget_usd")]
+        for name, step, text in cases:
+            with self.subTest(name):
+                self.script(critique=[step], claude=[{"tag": "needs-human"}])
+                self.run_yah(repo, code=2)
+                self.assertEqual(self.prompts(), ["/yah:resume P2 critique", "/yah:resume P2 build"])
+                self.assertIn("critique P2: " + text, self.run_logs()[-1].read_text("utf-8"))
+                self.data.joinpath("limits.json").write_text(json.dumps(  # 7 h old: the bar is unknown
+                    {"ts": now - 7 * 3600, "pools": {"seven_day_fable": {"used_pct": 60}}}), encoding="utf-8")
+        state = (repo / "STATE.md").read_text("utf-8")
+        (repo / "STATE.md").write_text(state.replace("- Next: Wire the payment form.",
+                                                     "- Next: NEEDS-HUMAN: Which card processor?"), encoding="utf-8")
+        self.script(claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, code=2)  # NEXT waits on you: the build stops there, so no critique first
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+        (repo / "STATE.md").write_text(state, encoding="utf-8")
+        origin = self.tmp / "origin.git"
+        self.git(self.tmp, "init", "-q", "--bare", str(origin))
+        self.git(repo, "remote", "add", "origin", str(origin))
+        self.git(repo, "push", "-q", "origin", "checkout/payment:refs/heads/old/checkout/payment")
+        self.script(critique=[{"tag": "critique-done"}], claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, code=2)  # old/checkout/payment is another branch: this one is not on origin yet
+        self.assertEqual(self.prompts()[0], "/yah:resume P2 critique")
+        self.git(repo, "push", "-q", "origin", "checkout/payment")
+        self.script(claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, code=2)  # the branch is on origin: its first build is past
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
 
     def test_no_config_still_protects_where_open_prs_land(self):
         repo = self.repo()

@@ -79,7 +79,8 @@ class Base(unittest.TestCase):
         self.home.mkdir()
         self.cfg.mkdir()
         self.data = self.cfg / "you-are-here"
-        self.env = dict(os.environ, CLAUDE_CONFIG_DIR=str(self.cfg), HOME=str(self.home), USERPROFILE=str(self.home),
+        inherited = {k: v for k, v in os.environ.items() if not k.upper().startswith("YAH_")}  # e.g. yah run's
+        self.env = dict(inherited, CLAUDE_CONFIG_DIR=str(self.cfg), HOME=str(self.home), USERPROFILE=str(self.home),
                         GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.com",
                         GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.com",
                         PYTHONDONTWRITEBYTECODE="1")  # Apple's python3 caches bytecode under $HOME/Library
@@ -181,20 +182,28 @@ class StatuslineTests(Base):
 
     def test_extra_pools_saved_to_state_and_limits_json(self):
         now = time.time()
-        rl = {"seven_day_fable": {"used_percentage": 12, "resets_at": now + 86400},  # a guessed key name
-              "seven_day_opus": {"used_percentage": 70}, "odd": "not a pool", "blank": {"resets_at": now}}
+        pools = {"seven_day_fable": {"used_percentage": 12, "resets_at": now + 86400},  # a guessed key name
+                 "seven_day_opus": {"used_percentage": 70}, "odd": "not a pool", "blank": {"resets_at": now}}
+        rl = dict(pools, seven_day={"used_percentage": 41, "resets_at": now + 0.65 * WEEK})
         out = self.line(rate_limits=rl)
         self.assertNotIn("fable", out)  # under 50%: saved, not shown
         want = {"seven_day_fable": {"used_pct": 12, "resets_at": round(now + 86400)},
                 "seven_day_opus": {"used_pct": 70, "resets_at": None}}
         self.assertEqual(json.loads((self.data / "state-s1.json").read_text("utf-8"))["pools"], want)
         lim = json.loads((self.data / "limits.json").read_text("utf-8"))
-        self.assertEqual((lim["pools"], lim["five_hour"]["used_pct"], lim["seven_day"]["used_pct"]), (want, None, None))
+        self.assertEqual((lim["pools"], lim["five_hour"]["used_pct"], lim["seven_day"]["used_pct"]), (want, None, 41))
         (self.data / "limits.json").write_text(json.dumps(dict(lim, ts=1)), encoding="utf-8")
         rl["seven_day_fable"]["used_percentage"] = 55  # a pool change alone rewrites it
         self.assertIn(f"{AMBER}wk fable 55%", self.line(rate_limits=rl))
         lim = json.loads((self.data / "limits.json").read_text("utf-8"))
         self.assertEqual((lim["pools"]["seven_day_fable"]["used_pct"], lim["ts"] != 1), (55, True))
+        # a render with pools but no five_hour/seven_day never blanks the weekly number yah run reads
+        self.line(rate_limits=pools)
+        after = json.loads((self.data / "limits.json").read_text("utf-8"))
+        self.assertEqual(after, lim)
+        self.assertIsNotNone(after["seven_day"]["used_pct"])
+        self.assertEqual(json.loads((self.data / "state-s1.json").read_text("utf-8"))["pools"]["seven_day_fable"]
+                         ["used_pct"], 55)  # the session state still gets the pools
 
     def test_premium_tag(self):
         out = self.line(model=("claude-fable-5-1", "Fable 5.1"))
@@ -665,6 +674,7 @@ class WhereTests(Base):
         plain = ("## Plan: Launch\n- [x] P1 Build\n- [~] P2 Ship | branch launch/ship\n  - [ ] Tag the release\n"
                  "- [ ] P3 Announce\n\n## Follow-ups\n- [ ] Update the README\n\n## 2026-09-23\n- Next: Tag it.\n")
         logged = plain.replace("  - [ ] Tag the release\n", "  - Done: built the assets\n  - [ ] Tag the release\n"
+                               "    - the token lives in the vault\n"  # the sub-task's own detail, not the log
                                "  - Tried: tagging on CI failed because the token is read-only\n\n"
                                "  - Decided: tag by hand because CI cannot\n")
         repo = self.state_repo(plain, branch="launch/ship", name="plain")
@@ -677,8 +687,9 @@ class WhereTests(Base):
         self.assertEqual([p["log"] for p in s["phases"]], [[], s["phase"]["log"], []])
         self.assertEqual((s["plan"]["done"], s["plan"]["total"], s["open_count"]),
                          (before[0]["plan"]["done"], before[0]["plan"]["total"], before[0]["open_count"]))
-        self.assertEqual((s["phase"]["id"], s["phases"][2]["id"]), ("STATE.md:3", "STATE.md:9"))
-        self.assertEqual(self.where(repo), before[1].replace("STATE.md:5", "STATE.md:9"))  # the plain view: no log
+        self.assertNotIn("vault", json.dumps(s["phases"]))
+        self.assertEqual((s["phase"]["id"], s["phases"][2]["id"]), ("STATE.md:3", "STATE.md:10"))
+        self.assertEqual(self.where(repo), before[1].replace("STATE.md:5", "STATE.md:10"))  # the plain view: no log
 
     def test_beads_phase_log_is_the_notes_after_next(self):
         w = load_where()
@@ -1253,8 +1264,22 @@ class SetupTests(Base):
         out, err, rc = self.setup_py("--ultracode", "--yes")  # --yes must not reach the statusline
         self.assertEqual(rc, 0, err)
         self.assertNotIn("statusLine", out)
+        self.assertNotIn("ignored", out)
         self.assertEqual(self.settings(), {**mine, "ultracode": True, "workflowSizeGuideline": "medium"})
         self.assertEqual(self.read_config(), {"ultracode": True})  # no tier: install never ran
+        out, err, rc = self.setup_py("--tier", "max20", "--ultracode", "--yes")  # a tier given with it is not set
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARNING    --tier ignored", out)
+        self.assertEqual(self.read_config(), {"ultracode": True})
+
+    def test_ultracode_leaves_settings_alone_when_config_json_is_broken(self):
+        self.settings(self.SETTINGS)
+        self.data.mkdir(exist_ok=True)
+        (self.data / "config.json").write_text("{not json", encoding="utf-8")
+        _, _, rc = self.setup_py("--ultracode", "--yes")
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.settings(), self.SETTINGS)  # nothing half-applied
+        self.assertFalse((self.data / "setup-state.json").exists())
 
     def test_ultracode_uninstall_resets_an_older_setups_config(self):
         self.settings(self.SETTINGS)
@@ -1273,7 +1298,7 @@ class SetupTests(Base):
         self.setup_py("--uninstall")
         self.assertEqual(self.read_config(), {"ultracode": True})
 
-    GH ={"source": "github", "repo": "ARYN26/you-are-here"}
+    GH = {"source": "github", "repo": "ARYN26/you-are-here"}
 
     def known(self, **entries):
         p = self.cfg / "plugins" / "known_marketplaces.json"

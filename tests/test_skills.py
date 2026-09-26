@@ -345,6 +345,29 @@ class BeadsTests(unittest.TestCase):
         self.assertIn("`| base <branch>` on the STATE.md phase line", text)
         self.assertIn("--set-metadata base=<branch>", text)
 
+    def test_resume_critique_is_read_only_and_the_build_folds_it_in(self):
+        meta, text = parse(ROOT / "skills" / "resume" / "SKILL.md")
+        self.assertIn("|critique|judge]", meta["argument-hint"])
+        self.assertIn("[critique=<path>]", meta["argument-hint"])
+        for s in ("ends here and changes nothing", "at most 300 words", "`YAH-RESULT: critique-done`",
+                  "the path runs to the end", "a `Decided:` log line", "never write NEEDS-HUMAN because of it"):
+            self.assertIn(s, text)
+
+    def test_resume_judge_is_read_only_and_fix_findings_fixes_what_it_proved(self):
+        meta, text = parse(ROOT / "skills" / "resume" / "SKILL.md")
+        self.assertIn("|fix-findings|", meta["argument-hint"])
+        self.assertIn("[findings=<path>]", meta["argument-hint"])
+        judge = text[text.index("**judge**"):text.index("## 3.")]
+        for s in ("changes nothing", "`gh pr diff <n>`", "should block the merge", "a broken or weakened test",
+                  "Prove each one", "report only the proven ones", "file:line", "`YAH-RESULT: judge pass`",
+                  "`YAH-RESULT: judge block <count>`"):
+            self.assertIn(s, judge)
+        fix = text[text.index("- **fix-findings:**"):text.index("`<n>` is TARGET")]
+        for s in ("`findings=<path>`", "regression test", "`Done:` or `Decided:` log line", "NEEDS-HUMAN"):
+            self.assertIn(s, fix)
+        self.assertIn("In fix-checks, address-review and fix-findings, the PR exists", text)
+        self.assertIn("`YAH-RESULT: judge pass` or `YAH-RESULT: judge block <count>` in judge mode", text)
+
     def test_skills_read_the_state_key(self):
         for name in ("wrap", "resume"):
             with self.subTest(skill=name):
@@ -454,6 +477,20 @@ class DocsTests(unittest.TestCase):
         self.assertNotIn('"you"', config)
         self.assertNotIn("| `you` |", config)
         self.assertNotIn("assigned to you", self.readme)
+
+    def test_critic_and_judge_section_matches_run_py(self):
+        runs = self.section("## Hands-free runs")
+        crit = runs[runs.index("#### Critic and judge: quality profile"):]
+        run_py = (ROOT / "scripts/run.py").read_text("utf-8")
+        for words in ("critic_week_skip_pct", "`roles.judge`", "fix-findings", "critique=<path>", "`judge block <n>`"):
+            self.assertIn(words, crit)
+        # the log lines and the stop line it quotes are the ones run.py writes
+        for words in ("critic/judge sessions", "at or over", ": roles.judge", "bar unknown", "skipped: ",
+                      "it ended with YAH-RESULT: "):
+            with self.subTest(w=words):
+                self.assertIn(words, crit)
+                self.assertIn(words, run_py)
+        self.assertIn("(#critic-and-judge-quality-profile)", self.section("## Quality profile"))
 
     def test_manifests(self):
         plugin = json.loads((ROOT / ".claude-plugin/plugin.json").read_text("utf-8"))

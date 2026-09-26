@@ -246,7 +246,7 @@ def main():
         write_json(data_dir() / f"state-{sid}.json", {
             "ts": now, "tokens": tokens, "model": model_id, "premium": tag,
             "five_hour": five, "week": week, "pace": pace, "pools": pools})
-    if five is not None or week is not None or pools:
+    if five is not None or week is not None:  # a pools-only render must not blank the weekly number yah run reads
         save_limits(now, rl, five, week, pace, pools)
     log_usage(now, five, week, pace, model_id)
 
