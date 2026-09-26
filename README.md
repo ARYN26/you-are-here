@@ -162,6 +162,7 @@ Claude Code cannot `/clear` itself or start a new session from inside one. No ho
 
 ```
 yah run [TARGET] [--plan] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--model M] [--plugin-dir DIR] [--dry-run] [--detach]
+yah run --stop [--cwd DIR | --project NAME]
 ```
 
 Without the launcher, run `python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/run.py"` with the same arguments (`python` on Windows). Try `--dry-run` first.
@@ -176,6 +177,7 @@ Without the launcher, run `python3 "$HOME/.claude/plugins/marketplaces/you-are-h
 | `--model M`, `--plugin-dir DIR` | Passed to `claude`. Without `--plugin-dir`, a run.py started from a yah checkout (not from `plugins/cache` or `plugins/marketplaces`) passes `--plugin-dir <checkout>` itself, so each session has `/yah:resume`. `--dry-run` prints which one it used. |
 | `--dry-run` | Prints the resolved argv, the DENY list, the caps and what it would do now. Spawns nothing, but still calls `gh`. |
 | `--detach` | Runs in the background and returns once the run has started (exit 0), or with the run's own exit code if it stopped first. On Windows it has no console window, so closing the terminal or ending the Claude Code session does not end it; elsewhere it gets its own session, so SIGHUP never reaches it. Its output goes to `<data dir>/runs/<project>-<time>.out` beside the `.log`. |
+| `--stop` | Ends the run going in this checkout: the driver, the session it is in and every process under them. The pid file then says exit 130, "ended by yah run --stop", so the RUN line shows the run ended. A session cut off mid-edit can leave uncommitted work in the tree. With no live run it says so and exits 0. `/yah:auto` offers it when a session starts in a checkout a run is working in. |
 
 **The loop.** Each iteration runs one headless session in the repo:
 
@@ -199,7 +201,7 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 | 4 | The iteration cap, or `run_total_hours` of wall clock. |
 | 7 | Weekly usage at or over `run_week_stop_pct`, or more than `pace_slack` points ahead of pace. |
 | 5 | Refused: not a git repo, on a trunk or the PROD branch with no TARGET, `claude` not on PATH, `gh` missing, an invalid TARGET, a `P<n>` with no such phase, an unknown or ambiguous project, or no way to name the branch the PR targets (no base in the plan, no open PR, no `origin/HEAD` and no `prod` in config), so it cannot be protected. That last check also runs before each iteration. Also another run already going in this checkout (below). |
-| 1, 130 | run.py itself failed, or you pressed Ctrl-C. |
+| 1, 130 | run.py itself failed, or you pressed Ctrl-C or ran `yah run --stop`. |
 
 **One run per checkout.** A run holds a lock on `<data dir>/runs/<project>.pid` (`<project>@<worktree>.pid` in a linked worktree), a JSON file with its pid, target, log and, once it stops, its exit code and reason. A second run in the same checkout is refused while the first lives. The OS drops the lock when the driver dies, so a pid file whose lock is free is a run that ended, even after a crash or a reboot. `/yah:where`, the session-start block and the statusline show it as the RUN line: while it runs, its target and the log's last line; once it ends, its exit code and reason (for 3 days), or `died` when it was killed before it could say.
 

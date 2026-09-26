@@ -171,6 +171,17 @@ class AutoTests(unittest.TestCase):
         for name in ("yah:start", "yah:phases", "yah:wrap", "yah:deep"):
             self.assertIn(f"`{name}`", self.body)
 
+    def test_a_live_run_blocks_work_here_before_any_task(self):
+        rows = [ln for ln in self.body.splitlines() if ln.startswith("| ") and "---" not in ln]
+        live = next(i for i, ln in enumerate(rows) if "A live run in this checkout" in ln)
+        task = next(i for i, ln in enumerate(rows) if ln.startswith("| A task was given"))
+        self.assertLess(live, task)  # a given task waits too: the run's sessions edit this tree
+        self.assertIn("`running for`", rows[live])
+        self.assertIn("wait for it, or end it", rows[live])
+        self.assertIn('scripts/run.py" --stop`', rows[live])
+        self.assertIn("Bash(python *scripts/run.py --stop*)", self.meta["allowed-tools"])
+        self.assertNotIn("Bash(python *scripts/run.py*)", self.meta["allowed-tools"])  # --stop only, never a run
+
     def test_deep_on_every_tier_and_merges_stay_the_users(self):
         self.assertIn("every plan tier", self.body)
         self.assertIn("Never merge a PR", self.body)

@@ -213,6 +213,17 @@ def hold_run(path, data):
     return fd
 
 
+def end_run(path, data):
+    """Write an ended run's data to its pid file, holding the lock only while it writes. False while a live run
+    holds it."""
+    fd = hold_run(path, data)
+    if fd is None:
+        return False
+    _lock(fd, unlock=True)  # at once: Windows may take a while to drop a lock on close
+    os.close(fd)
+    return True
+
+
 def run_state(path):
     """The pid file's data plus alive, whether its run still holds the lock. None with no pid file, or one caught
     mid-write."""

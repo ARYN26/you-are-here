@@ -3,7 +3,7 @@ name: auto
 description: Run the yah step the state calls for. The yah launcher sends it as the first prompt.
 argument-hint: "[task]"
 disable-model-invocation: true
-allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*), Bash(py -3 *scripts/where.py*), Bash(gh pr view *), Bash(gh pr checks *), Bash(gh run view *)
+allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*), Bash(py -3 *scripts/where.py*), Bash(gh pr view *), Bash(gh pr checks *), Bash(gh run view *), Bash(python3 *scripts/run.py --stop*), Bash(python *scripts/run.py --stop*), Bash(py -3 *scripts/run.py --stop*)
 ---
 
 # Auto
@@ -23,6 +23,7 @@ Use the `[yah]` SessionStart block already in context. Run `PY "${CLAUDE_SKILL_D
 | State | Step |
 |---|---|
 | No project (home folder) | Show the project list from `where.py` and tell the user to exit and run `yah <name>`. Stop. |
+| A live run in this checkout: the RUN line says `running for` (`run.alive` in `--json`) | `yah run` is working here, so do no work in this checkout, not even a given task: its sessions edit this tree and branch. Say in one line what it runs, for how long, and its last log line. Then ask: wait for it, or end it. Wait: stop; `/yah:where` shows the run until it ends. End: `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --stop`, then read the state again with `where.py --json` and pick a row. |
 | A task was given above | It is the task. If it needs several PRs or sessions, plan it in plan mode; once the user approves, run `yah:phases`, then start its first phase. Otherwise run `yah:start` with the task. |
 | No plan and no NEXT, or every phase is done | There is nothing to continue. Ask one question: what to build or fix. Never invent a task, and never explore the repo to find one. Route the answer as a given task. |
 | NEXT starts with `NEEDS-HUMAN:` | Ask that question as it is, then go on with the answer. |

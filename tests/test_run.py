@@ -327,6 +327,31 @@ class RunTests(unittest.TestCase):
         self.assertEqual((st["alive"], st["target"], st["code"], st["out"]), (False, "#12", 0, ""))
         self.assertNotEqual(st["pid"], 4242)
 
+    def test_stop_ends_the_run_and_its_tree_and_writes_exit_130(self):
+        repo = self.repo()
+        self.assertIn("[yah] no run is going in this checkout.", self.run_yah(repo, "--stop", code=0))
+        self.assertIn("--stop takes only --cwd or --project", self.run_yah(repo, "P2", "--stop", code=5))
+        self.script(list=[], claude=[{"sleep": 60, "orphan": True}])
+        self.run_yah(repo, "--detach", code=0)
+        pidf, beat = self.data / "runs" / "shop.pid", self.fake / "orphan.txt"
+        t = time.monotonic()
+        while not beat.exists() and time.monotonic() - t < 30:
+            time.sleep(0.1)
+        self.assertTrue(beat.exists(), "the session never started its child")
+        pid = yahlib.run_state(pidf)["pid"]
+        out = self.run_yah(repo, "--stop", code=0)
+        self.assertIn(f"[yah] run ended: pid {pid}, P2, log ", out)
+        self.assertLess(self.elapsed, 20)
+        st = yahlib.run_state(pidf)
+        self.assertEqual((st["alive"], st["code"], st["reason"]), (False, 130, "ended by yah run --stop."))
+        self.assertTrue(Path(st["log"]).read_text("utf-8").rstrip().endswith("stop, exit 130: ended by yah run --stop."))
+        size = beat.stat().st_size
+        time.sleep(1)
+        self.assertEqual(beat.stat().st_size, size, "the session's child outlived --stop")
+        text = yahlib.run_text(dict(st, at=st["ended"]))  # the RUN line
+        self.assertEqual(text, "P2 ended 1m ago, exit 130: ended by yah run --stop.")
+        self.assertIn("[yah] no run is going in this checkout.", self.run_yah(repo, "--stop", code=0))
+
     # ------------------------------------------------------------ exit 0 and MODE
 
     def test_green_pr_stops_before_any_session(self):

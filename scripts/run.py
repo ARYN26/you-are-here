@@ -2,6 +2,7 @@
 
     yah run [TARGET] [--plan] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--dry-run]
             [--model M] [--plugin-dir DIR] [--detach]
+    yah run --stop [--cwd DIR | --project NAME]
 
 --plan goes on past exit 0: once a phase's PR is open and green (or merged) and the phase is closed, it
 pins the next open phase and runs that, until none is left ("plan done", exit 0). The iteration cap is per
@@ -36,6 +37,7 @@ matches sets the exit code:
     7  weekly usage at run_week_stop_pct or over pace + pace_slack
     8  PR merged by yah (auto_merge on; --plan goes on to the next phase instead)
     1  run.py itself failed
+  130  Ctrl-C, or ended by --stop
 
 Logs go to <data dir>/runs/. The driver writes nothing inside the repo. Each run holds a lock on
 runs/<project>.pid (<project>@<worktree>.pid in a linked worktree), a JSON file with its pid, target, log and,
@@ -47,6 +49,10 @@ it as the RUN line (live: target and the log's last line; ended: exit code and r
 closing the terminal cannot end it; elsewhere: its own session, so SIGHUP never reaches it). Its output goes to
 runs/<name>.out beside its .log. The caller returns 0 once the run holds the lock, or the run's own exit code if
 it stopped first, like a refusal.
+
+--stop ends the checkout's run: the driver, the session it is in and every process under them (taskkill /T on
+Windows; elsewhere the driver is frozen first, so it starts nothing while its tree is found). It then writes exit
+130 to the pid file, so the RUN line says the run ended. A session cut off mid-edit can leave uncommitted work.
 
 What a real `claude -p --output-format stream-json --verbose` stream carries (checked Sep 2026):
   events: system (subtypes hook_started, hook_response, init, thinking_tokens), assistant
@@ -75,12 +81,14 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import where  # noqa: E402
 from statusline import week_pace  # noqa: E402
-from yahlib import (NO_WINDOW, config, data_dir, find_git, find_tool, hold_run, num, project_key,  # noqa: E402
-                    read_branch, read_json, run, run_pid_path, run_state, utf8_stdout, write_run)
+from yahlib import (NO_WINDOW, config, data_dir, find_git, find_tool, end_run, hold_run, num,  # noqa: E402
+                    project_key, read_branch, read_json, run, run_pid_path, run_state, utf8_stdout, write_run)
 
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
 KEEP_RUNS = 20
 DETACH_WAIT_S = 60  # how long --detach waits for the background run to take its lock
+STOP_WAIT_S = 15  # how long --stop waits for the ended run to let go of its lock
+STOPPED = "ended by yah run --stop."
 TAG = re.compile(r"^\s*YAH-RESULT:\s*(.+?)\s*$", re.M)
 DENY_BASE = ["PowerShell", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push *--force*)", "Bash(git push * -f*)",
              "Bash(git push *+*)", "Bash(gh pr merge*)", "Bash(gh api *merge*)", "Bash(gh repo delete*)",
@@ -781,7 +789,49 @@ def busy(st):
     st = st or {}
     since = time.strftime("%H:%M", time.localtime(st["started"])) if st.get("started") else "?"
     return (f"a run is already going in this checkout: pid {st.get('pid', '?')}, {st.get('target') or 'current phase'}"
-            f", since {since}, log {st.get('log', '?')}. Let it finish, or end that pid first.")
+            f", since {since}, log {st.get('log', '?')}. Let it finish, or end it with `yah run --stop`.")
+
+
+def end_tree(pid):
+    """Kill pid and every process under it. Elsewhere than Windows pid is frozen first, so it starts nothing new
+    while its tree is found."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=15,
+                           creationflags=NO_WINDOW)
+            return
+        os.kill(pid, signal.SIGSTOP)
+        for p in descendants(pid) + [pid]:
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def stop_run(pidf):
+    """--stop: end the checkout's run and everything under it, then write its exit code for the RUN line."""
+    st = run_state(pidf)
+    if not st or not st.get("alive"):
+        say("[yah] no run is going in this checkout.")
+        return 0
+    pid, what = int(num(st.get("pid"), 0)), st.get("target") or "current phase"
+    if pid > 0:
+        end_tree(pid)
+    t = time.monotonic()
+    while st.get("alive") and time.monotonic() - t < STOP_WAIT_S:
+        time.sleep(0.1)
+        st = run_state(pidf) or st  # None: caught mid-write
+    if st.get("alive"):
+        say(f"[yah] the run (pid {pid}, {what}) still holds its lock after {STOP_WAIT_S} s. End that pid by hand.")
+        return 1
+    if "code" not in st:  # it may have ended on its own just now: then its own code stands
+        st.pop("alive", None)
+        end_run(pidf, dict(st, ended=int(time.time()), code=130, reason=STOPPED))
+        log(SimpleNamespace(log=st.get("log") or None), f"stop, exit 130: {STOPPED}")
+    say(f"[yah] run ended: pid {pid}, {what}, log {st.get('log', '?')}")
+    return 0
 
 
 def detach(r, pidf, stem):
@@ -878,7 +928,11 @@ def main():
     ap.add_argument("--plugin-dir", help="passed to claude as --plugin-dir (testing an uninstalled yah checkout)")
     ap.add_argument("--detach", action="store_true", help="run in the background, output to <data dir>/runs/, and "
                     "return once it has started")
+    ap.add_argument("--stop", action="store_true", help="end the run going in this checkout, and every process "
+                    "under it")
     a = ap.parse_args()
+    if a.stop and (a.target or a.plan or a.detach or a.dry_run):
+        return refuse("--stop takes only --cwd or --project.")
     cfg = config()
     target = parse_target(a.target)
     if target is None:
@@ -899,6 +953,8 @@ def main():
     if top is None:
         return refuse(f"not inside a git repo: {cwd}")
     key = project_key(main_root)
+    if a.stop:
+        return stop_run(run_pid_path(key, str(top), main_root))
     pcfg = cfg["projects"].get(key) if isinstance(cfg["projects"].get(key), dict) else {}
     trunks = pcfg.get("trunks") or []
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
