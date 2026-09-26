@@ -5,6 +5,7 @@
   premium main model     once per session (config.json premium_models)
   weekly % more than pace_slack points ahead of the week's elapsed share: once a day
   ultracode on (config.json, set by setup.py --ultracode): workflow sizing rules, once per session
+  a newer yah installed while this session runs the old copy: once per session, until reload
 
 Thresholds come from config.json and its tier preset. Context size comes from the
 transcript's last main-thread assistant turn (fresh), falling back to the statusline's
@@ -19,10 +20,10 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import config, data_dir, read_json, utf8_stdout, write_json  # noqa: E402
+from yahlib import config, data_dir, plugin_outdated, read_json, utf8_stdout, write_json  # noqa: E402
 
 TAIL_BYTES = 600_000
-SKIP = ("/yah:wrap", "/clear", "/compact", "/exit")
+SKIP = ("/yah:wrap", "/clear", "/compact", "/exit", "/reload-plugins")
 
 
 def transcript_tokens(path):
@@ -106,6 +107,10 @@ def main():
                          "work: one agent per independent unit, low or medium effort for mechanical stages, high for "
                          "research and judges, one verifier per finding, reports of 1,500 characters or fewer.")
 
+    if event == "UserPromptSubmit" and not flags.get("outdated") and plugin_outdated():
+        flags["outdated"] = True
+        to_user.append("yah was updated: run /reload-plugins (or /exit and restart) to load it.")
+
     week, pace = state.get("week"), state.get("pace")
     if week is not None and pace is not None and week > pace + cfg["pace_slack"] and daily.get("pace") != today:
         daily["pace"] = today
@@ -118,10 +123,12 @@ def main():
         to_user.append(f"Weekly {week:.0f}% vs {pace}% of the week gone: run lean today.")
 
     write_json(flags_path, flags)
+    out = {}
     if to_claude:
-        out = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": "\n".join(to_claude)}}
-        if to_user:
-            out["systemMessage"] = " ".join(to_user)
+        out["hookSpecificOutput"] = {"hookEventName": event, "additionalContext": "\n".join(to_claude)}
+    if to_user:
+        out["systemMessage"] = " ".join(to_user)
+    if out:
         print(json.dumps(out, ensure_ascii=False))
 
 

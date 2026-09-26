@@ -102,6 +102,29 @@ def norm(p):
     return os.path.normcase(os.path.normpath(str(p)))
 
 
+def plugins_dir():
+    """Claude Code's plugins folder: installed_plugins.json, known_marketplaces.json and cache/."""
+    return Path(os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or claude_dir() / "plugins")
+
+
+def plugin_outdated():
+    """True when this copy of yah is an old version that a running Claude Code still holds.
+
+    An update installs the new version beside the old one in the plugin cache and points
+    installed_plugins.json at it. A session keeps the copy it loaded, even across /clear, until
+    /reload-plugins or a restart. A copy outside the cache (--plugin-dir, the marketplace clone) never counts."""
+    root = Path(__file__).resolve().parent.parent  # cache/<marketplace>/<plugin>/<version>
+    try:
+        if norm(root.parents[2]) != norm(plugins_dir() / "cache"):
+            return False
+        installed = read_json(plugins_dir() / "installed_plugins.json")["plugins"]
+        paths = {norm(e["installPath"]) for es in installed.values() for e in es}
+    except Exception:
+        return False  # never cost the other nudges
+    here = norm(root)
+    return here not in paths and any(os.path.dirname(p) == os.path.dirname(here) for p in paths)
+
+
 def find_git(start):
     """Walk up from `start` without a subprocess.
 

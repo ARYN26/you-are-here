@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import TIERS, claude_dir, data_dir, read_json, utf8_stdout  # noqa: E402
+from yahlib import TIERS, claude_dir, data_dir, plugins_dir, read_json, utf8_stdout  # noqa: E402
 
 PROBE = "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"
 SHELLS = ("bash", "zsh", "fish", "powershell", "cmd")
@@ -366,8 +366,7 @@ def auto_update(settings, sp, state, state_file, dry, say):
     written here. A missing entry is added with the source Claude Code recorded. The old value goes into
     setup-state.json so --uninstall can put it back."""
     name = marketplace_name()
-    plugins = Path(os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or claude_dir() / "plugins")
-    known = (read_json(plugins / "known_marketplaces.json") or {}).get(name)
+    known = (read_json(plugins_dir() / "known_marketplaces.json") or {}).get(name)
     known = known if isinstance(known, dict) else {}
     ekm = settings.get("extraKnownMarketplaces", {})
     if not isinstance(ekm, dict):
