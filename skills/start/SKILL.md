@@ -21,13 +21,13 @@ Phase  <label and title, or "no plan">   NEXT <the NEXT line, or none>
 First  <at most one targeted search, then the edit>
 ```
 
-No `[yah]` block in context: write `Phase  unknown`.
+No `[yah]` block: write `Phase  unknown`.
 
 The `[yah]` block and any task text already in context are enough: never re-read STATE.md or run `bd show` or `which bd` for them. If bd is truly needed, run `store.bd` from `where.py --json`, quoted (null: skip bd). Do not read `docs/`, `documents/`, whole plans or files over 200 lines to orient.
 
 ## 2. Recall
 
-With a plan phase, run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh`. Read `state.phase.log`, then only the `## Decisions` and `### <label>` sections of `state.plan.spec` (`grep -n "^#"` finds them; none: say so in one line).
+With a plan phase (or `unknown`), run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh`. Read the phase's `log`, then only the `## Decisions` and `### <label>` sections of `state.plan.spec` (`grep -n "^#"` finds them; none: say so in one line).
 
 Query with the task's key nouns, 12 words or fewer, no double quotes:
 

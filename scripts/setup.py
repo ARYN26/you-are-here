@@ -334,6 +334,8 @@ def ultracode(settings, sp, state, state_file, dry, say):
     """Opt-in for Max 20x: ultracode on in every session, workflows sized medium (<10 agents). The old values
     go into setup-state.json so --uninstall can put them back; config.json's ultracode turns on the guard's rules,
     built from config roles (the defaults unless the user set some)."""
+    cp = data_dir() / "config.json"
+    cfg = load_obj(cp)  # before any write: a broken config.json stops setup with settings.json untouched
     legacy = isinstance(state.get("ultracode"), dict) and "ultracodeConfig" not in state  # an older setup's run
     if all(settings.get(k) == v for k, v in ULTRA.items()):
         say("ultracode  unchanged (on, workflows medium)")
@@ -344,8 +346,6 @@ def ultracode(settings, sp, state, state_file, dry, say):
         save_json(sp, settings, dry)
         save_json(state_file, state, dry)
         say(f"ultracode  on, workflowSizeGuideline medium  ({sp})")
-    cp = data_dir() / "config.json"
-    cfg = load_obj(cp)
     if cfg.get("ultracode") is not True:
         # it was off, so config.json holds the user's latest choice: record that, not an older run's
         state["ultracodeConfig"] = {"added": "ultracode" not in cfg, "prev": cfg.get("ultracode")}
@@ -534,6 +534,11 @@ def main():
             record(state, "rules", dest, state_file, a.dry_run)
         return 0
     if a.auto_update or a.auto_merge or a.ultracode:  # on their own: a yes here never touches a kept statusline
+        extra = [f for f, v in (("--tier", a.tier), ("--python", a.python), ("--launcher", a.launcher),
+                                ("--install-launcher", a.install_launcher)) if v]
+        if extra:
+            say(f"WARNING    {', '.join(extra)} ignored: --ultracode, --auto-update and --auto-merge run on their own. "
+                "Run setup again with just those.")
         sp = claude_dir() / "settings.json"
         if a.auto_update:
             auto_update(load_obj(sp), sp, state, state_file, a.dry_run, say)
