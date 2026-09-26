@@ -30,6 +30,10 @@ On yes, run `setup.py --tier <tier> --yes` and show the output. The statusline s
 
 Only when the tier is `max20`, offer: "Turn ultracode on for every session? It runs xhigh effort with workflows, which costs more per turn. yah keeps it lean: workflows capped at medium size (<10 agents), and a once-per-session rule to use workflows only for genuinely parallel work, with low or medium effort for mechanical stages." On yes, run `setup.py --ultracode --yes` and show the output. `--uninstall` restores the previous values.
 
+## 3c. Auto-update (optional)
+
+Offer: "Turn on auto-update for yah? Claude Code leaves it off for plugins from third-party marketplaces, so yah stays at the version you installed until you run `claude plugin update yah@you-are-here`. With it on, Claude Code fetches new versions in the background once a session starts, and the next session loads them." On yes, run `setup.py --auto-update` and show the output. It changes only that setting. `--uninstall` restores the previous value.
+
 ## 4. Launcher (optional)
 
 Explain: `yah <project>` opens Claude Code in that project from any folder, so project hooks and memory load; `yah` alone lists projects. On yes, find the shell's rc file (`~/.zshrc`, `~/.bashrc`, `~/.config/fish/config.fish`, or on Windows the path printed by `powershell -NoProfile -Command '$PROFILE'`) and run `setup.py --install-launcher <rcfile>`. On Windows also run it with the `yah.cmd` path that setup printed, so `yah` works in cmd.exe too. Tell the user to open a new terminal.

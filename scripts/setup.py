@@ -6,10 +6,12 @@
                                                    (a .cmd path gets a whole yah.cmd, for cmd.exe)
     setup.py --install-rules [FILE]                append RULES.md to FILE (default: CLAUDE.md)
     setup.py --ultracode                           opt-in: ultracode on by default, workflows medium
+    setup.py --auto-update                         opt-in: Claude Code auto-updates yah's marketplace
     setup.py --uninstall                           undo all of the above
 
 Merge-only: settings.json is backed up first and only its statusLine key changes (never model,
-effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode. What it changed goes into setup-state.json in the data dir,
+effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode, and
+autoUpdate on yah's extraKnownMarketplaces entry with --auto-update. What it changed goes into setup-state.json in the data dir,
 so --uninstall can put things back. --dry-run writes nothing. Re-running is safe.
 """
 import argparse
@@ -345,9 +347,76 @@ def ultracode(settings, sp, cfg, state, state_file, dry, say):
         save_json(data_dir() / "config.json", cfg, dry)
 
 
+UPDATE_OFF = ("DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+
+
+def marketplace_name():
+    """The name yah's marketplace registers under: the one in .claude-plugin/marketplace.json beside scripts/."""
+    mf = Path(__file__).resolve().parent.parent / ".claude-plugin" / "marketplace.json"
+    name = (read_json(mf) or {}).get("name")
+    return name if isinstance(name, str) and name else "you-are-here"
+
+
+def auto_update(settings, sp, state, state_file, dry, say):
+    """Opt-in: Claude Code auto-updates the marketplace yah came from. It leaves that off for every third-party
+    marketplace, and an author cannot change the default. autoUpdate on the extraKnownMarketplaces entry in
+    settings.json wins over the /plugin toggle, which writes known_marketplaces.json; that file is never
+    written here. A missing entry is added with the source Claude Code recorded. The old value goes into
+    setup-state.json so --uninstall can put it back."""
+    name = marketplace_name()
+    plugins = Path(os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or claude_dir() / "plugins")
+    known = (read_json(plugins / "known_marketplaces.json") or {}).get(name)
+    known = known if isinstance(known, dict) else {}
+    ekm = settings.get("extraKnownMarketplaces", {})
+    if not isinstance(ekm, dict):
+        say(f"autoupdate extraKnownMarketplaces in {sp} is not an object, so it was left as is")
+        return
+    entry = ekm.get(name) if isinstance(ekm.get(name), dict) else None
+    src = (entry or {}).get("source") or known.get("source")
+    if not isinstance(src, dict):
+        say(f"autoupdate {name} is not an installed marketplace here (a --plugin-dir copy?); nothing to turn on")
+        return
+    if src.get("source") in ("directory", "file"):
+        say(f"autoupdate {name} is a local marketplace, which loads in place; nothing to turn on")
+        return
+    on = entry["autoUpdate"] if entry and "autoUpdate" in entry else known.get("autoUpdate")
+    if on is True:
+        say(f"autoupdate unchanged (on for {name})")
+    else:
+        backup(sp, dry, say)
+        # it was off, so settings.json holds the user's latest choice: record that, not an older run's
+        state["autoUpdate"] = {"name": name, "added": entry is None, "prev": (entry or {}).get("autoUpdate")}
+        settings["extraKnownMarketplaces"] = {**ekm, name: {**(entry or {"source": src}), "autoUpdate": True}}
+        save_json(sp, settings, dry)
+        save_json(state_file, state, dry)
+        say(f"autoupdate on for {name}: Claude Code updates yah in the background once a session starts, "
+            f"and the next session loads it  ({sp})")
+    env = settings.get("env") if isinstance(settings.get("env"), dict) else {}
+
+    def truthy(v):  # as Claude Code reads a flag: DISABLE_AUTOUPDATER=0 is not set
+        return any(str(e.get(v, "")).strip().lower() in ("1", "true", "yes", "on") for e in (os.environ, env))
+
+    off = [v for v in UPDATE_OFF if truthy(v)]
+    if off and not truthy("FORCE_AUTOUPDATE_PLUGINS"):
+        say(f"WARNING    {', '.join(off)} turns plugin auto-update off. Set FORCE_AUTOUPDATE_PLUGINS=1 to keep it on.")
+
+
 def uninstall(sdir, state, state_file, dry, say):
     sp = claude_dir() / "settings.json"
     settings = load_obj(sp)
+    au, ekm = state.get("autoUpdate"), settings.get("extraKnownMarketplaces")
+    if isinstance(au, dict) and isinstance(ekm, dict) and isinstance(ekm.get(au.get("name")), dict):
+        backup(sp, dry, say)
+        if au.get("added"):
+            ekm.pop(au["name"])
+        elif au.get("prev") is None:
+            ekm[au["name"]].pop("autoUpdate", None)
+        else:
+            ekm[au["name"]]["autoUpdate"] = au["prev"]
+        if not ekm:
+            settings.pop("extraKnownMarketplaces")
+        save_json(sp, settings, dry)
+        say(f"autoupdate restored for {au['name']}")
     prev = state.get("ultracode")
     if isinstance(prev, dict):
         backup(sp, dry, say)
@@ -396,6 +465,8 @@ def main():
                     help="append RULES.md to FILE as a marked block (default: CLAUDE.md in the Claude config dir)")
     ap.add_argument("--ultracode", action="store_true",
                     help="opt-in (for max20): ultracode on by default, workflowSizeGuideline medium")
+    ap.add_argument("--auto-update", action="store_true",
+                    help="opt-in: turn on Claude Code's auto-update for yah's marketplace (off for third-party ones)")
     ap.add_argument("--yes", action="store_true", help="no prompts")
     a = ap.parse_args()
     say = (lambda s: print("[dry-run] " + s)) if a.dry_run else print
@@ -414,6 +485,10 @@ def main():
         rules = src.read_text(encoding="utf-8-sig").replace("\r\n", "\n").strip()
         if edit_block(dest, f"{RULES[0]}\n{rules}\n{RULES[1]}", RULES, a.dry_run, say, "rules") is not None:
             record(state, "rules", dest, state_file, a.dry_run)
+        return 0
+    if a.auto_update:  # on its own, so a yes here never touches a statusline the user kept
+        sp = claude_dir() / "settings.json"
+        auto_update(load_obj(sp), sp, state, state_file, a.dry_run, say)
         return 0
 
     py = pick_python(a.python)
