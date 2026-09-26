@@ -16,6 +16,12 @@ state CLEAN or HAS_HOOKS, not a draft, no newer CHANGES_REQUESTED, authored by t
 pinned to the head it saw, then the open PRs on its head retargeted to its base, then the head branch
 deleted unless protected. --plan then goes on, and the next phase builds on that base.
 
+The quality profile (config.json "ultracode": true) starts builds with --model/--effort from roles.main (a user
+--model replaces only the model). Before a plan phase's first build (no PR, no phase branch on origin) it runs one
+read-only `/yah:resume <label> critique` on roles.critic, or on roles.judge once the critic model's own weekly pool
+is at critic_week_skip_pct. Its answer goes to runs/<stem>-<label>-critique.md, and the next build prompt ends
+with critique=<path>. A critique that fails is logged and skipped; it never stops the run.
+
 TARGET is P<n> (a plan phase), #<pr> (a bare PR number works too, since shells treat # as a
 comment) or empty for the current phase, which is pinned at start and passed as P<n>. Each iteration
 is one `claude -p "/yah:resume TARGET MODE"` in auto permission mode, with prompts off and a DENY
@@ -96,6 +102,7 @@ DENY_BASE = ["PowerShell", "Bash(git push --force*)", "Bash(git push -f*)", "Bas
              "Bash(git push *--prune*)", "Bash(git push -d*)", "Bash(git push * -d *)"]
 DENY_BRANCH = ["Bash(git push * {})", "Bash(git push * {} *)", "Bash(git push * HEAD:{}*)", "Bash(git push * *:{}*)",
                "Bash(git push *refs/heads/{}*)"]
+READ_ONLY = ["Edit", "Write", "NotebookEdit"]  # also denied to the profile's critic and judge
 PR_JSON = ("state,url,reviewDecision,reviews,commits,headRefName,baseRefName,mergeable,mergeStateStatus,isDraft,"
            "author,headRefOid")
 NO_TAG = "session ended without a YAH-RESULT line; is the yah plugin loaded? (--plugin-dir)"
@@ -172,15 +179,17 @@ def command(path, args):
     return [path, *args]
 
 
-def claude_argv(r):
-    prompt = " ".join(x for x in ("/yah:resume", r.target or r.label, r.mode, r.base_arg and "base=" + r.base_arg)
-                      if x)
+def claude_argv(r, prompt=None, role=None):
+    """A build session's argv, or with `role` (model, effort) a read-only critique or judge running `prompt`.
+    critique=<path> goes last: the skill reads the path to the end of the prompt."""
+    prompt = prompt or " ".join(x for x in ("/yah:resume", r.target or r.label, r.mode, r.base_arg and "base=" + r.base_arg,
+                                            r.critique and "critique=" + r.critique) if x)
     argv = [r.claude, "-p", prompt, "--permission-mode", "auto", "--permission-prompts", "none",
-            "--disallowedTools", *r.deny, "--max-budget-usd", "{:g}".format(r.budget),
+            "--disallowedTools", *r.deny, *(READ_ONLY if role else []), "--max-budget-usd", "{:g}".format(r.budget),
             "--output-format", "stream-json", "--verbose", "--settings", guard_settings()]
     # the quality profile (config ultracode) runs roles.main; a user --model replaces only its model
-    model, effort = r.cfg["roles"]["main"].split() if r.cfg["ultracode"] else (None, None)
-    model = r.model or model
+    model, effort = role or (r.cfg["roles"]["main"].split() if r.cfg["ultracode"] else (None, None))
+    model = model if role else r.model or model
     return (argv + (["--model", model] if model else []) + (["--effort", effort] if effort else [])
             + (["--plugin-dir", r.plugin_dir] if r.plugin_dir else []))
 
@@ -610,14 +619,16 @@ def on_event(ev, it, r):
             if isinstance(c, dict) and c.get("type") == "tool_use":
                 say(f"  {c.get('name')} {brief(c.get('input'))}")
     elif kind == "rate_limit_event":
-        wk = ((ev.get("rate_limit_info") or {}).get("unifiedWindows") or {}).get("seven_day") or {}
-        u = wk.get("utilization")
-        if isinstance(u, (int, float)):
-            r.week = (u * 100 if u <= 1 else u, wk.get("resetsAt"))
+        for key, w in (((ev.get("rate_limit_info") or {}).get("unifiedWindows") or {}).items()):
+            u = w.get("utilization") if isinstance(w, dict) else None
+            if isinstance(u, (int, float)):
+                r.pools[key] = u * 100 if u <= 1 else u
+                if key == "seven_day":
+                    r.week = (r.pools[key], w.get("resetsAt"))
     elif kind == "result":
         text = ev.get("result") if isinstance(ev.get("result"), str) else ""
         tags = TAG.findall(text)
-        it.update(done=True, is_error=bool(ev.get("is_error")), cost=num(ev.get("total_cost_usd"), 0),
+        it.update(done=True, is_error=bool(ev.get("is_error")), cost=num(ev.get("total_cost_usd"), 0), text=text,
                   turns=int(num(ev.get("num_turns"), 0)), denials=ev.get("permission_denials") or [],
                   tag=tags[-1] if tags else "",
                   error="{}: {}".format(ev.get("subtype") or "error", brief(text, 200)))
@@ -644,17 +655,29 @@ def read_stream(proc, raw, it, r):
 
 
 def iterate(r):
-    """One headless session. Returns its summary dict. r.n counts the phase's sessions, r.total the run's."""
+    """One build session. Returns its summary dict. r.n counts the phase's sessions, r.total the run's."""
     r.n += 1
     r.total += 1
     argv = claude_argv(r)
+    r.critique = ""  # folded in by this build; later ones read its Decided: lines
     say(f"[yah] iteration {r.n}/{r.cap}: {argv[2]}")
-    it = {"n": r.n, "done": False, "is_error": True, "cost": 0.0, "turns": 0, "denials": [], "tag": "", "error": ""}
+    it = session(r, argv, f"{r.total}", r.n)
+    m = re.match(r"pr-open\s+#?(\d+)", it["tag"], re.I)
+    if m:
+        r.pr = int(m.group(1))
+    r.cost += it["cost"]
+    return it
+
+
+def session(r, argv, name, n=0):
+    """One headless session; its stream goes to <log stem>-<name>.jsonl. Returns its summary dict."""
+    it = {"n": n, "done": False, "is_error": True, "cost": 0.0, "turns": 0, "denials": [], "tag": "", "error": "",
+          "text": ""}
     left = r.cfg["run_total_hours"] * 60 - (time.monotonic() - r.t0) / 60
     limit = min(r.cfg["run_iteration_minutes"], max(left, 0.1))
     kw = {} if os.name == "nt" else {"start_new_session": True}
     timed_out = False
-    with open(r.log.with_name(f"{r.log.stem}-{r.total}.jsonl"), "wb") as raw:
+    with open(r.log.with_name(f"{r.log.stem}-{name}.jsonl"), "wb") as raw:
         try:
             proc = subprocess.Popen(command(argv[0], argv[1:]), cwd=r.top, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -684,11 +707,68 @@ def iterate(r):
         it["error"] = f"timed out after {limit:g} min; the process tree was killed" if timed_out else \
             f"no result event (claude exit code {proc.returncode})"
     it["word"] = it["tag"].split()[0].lower() if it["tag"] else ""
-    m = re.match(r"pr-open\s+#?(\d+)", it["tag"], re.I)
-    if m:
-        r.pr = int(m.group(1))
-    r.cost += it["cost"]
     return it
+
+
+# ---------------------------------------------------------------- critic and judge (the quality profile)
+
+def pool_used(r, model):
+    """The used % of the fullest rate-limit pool whose key names `model` (seven_day_fable, ...): the stream's
+    windows, else a limits.json under 6 h old. None when neither has one."""
+    hits = [u for k, u in r.pools.items() if model in k.lower()]
+    if not hits:
+        lim = read_json(data_dir() / "limits.json", {})
+        fresh = isinstance(lim, dict) and time.time() - num(lim.get("ts"), 0) < 6 * 3600
+        pools = lim.get("pools") if fresh and isinstance(lim.get("pools"), dict) else {}
+        hits = [num(v.get("used_pct"), None) for k, v in pools.items() if model in k.lower() and isinstance(v, dict)]
+    hits = [u for u in hits if u is not None]
+    return max(hits) if hits else None
+
+
+def review_role(r):
+    """(model, effort, why) for a critique or judge: roles.critic, or roles.judge once the critic model's own
+    weekly bar is at critic_week_skip_pct. A bar that cannot be read counts as under."""
+    model, effort = r.cfg["roles"]["critic"].split()
+    used, skip = pool_used(r, model), r.cfg["critic_week_skip_pct"]
+    if used is None:
+        return model, effort, "bar unknown"
+    why = f"{model} bar {used:.0f}%"
+    if used < skip:
+        return model, effort, why
+    model, effort = r.cfg["roles"]["judge"].split()
+    return model, effort, f"{why}, at or over {skip:g}%: roles.judge"
+
+
+def wants_critique(r):
+    """The profile critiques a plan phase once per run, before its first build: no PR yet and no phase branch on
+    origin (a remote that cannot be read has none)."""
+    ph = r.phase or {}
+    if not (r.cfg["ultracode"] and r.label and r.mode == "build" and not r.pr and r.label not in r.critiqued
+            and ph.get("status") != "closed"):
+        return False
+    b = ph.get("branch")
+    return not (b and run(["git", "ls-remote", "--heads", "origin", b], r.top, timeout=20,
+                          env=dict(os.environ, GIT_TERMINAL_PROMPT="0")))
+
+
+def critique(r):
+    """/yah:resume <label> critique, read-only. Its answer goes to runs/<stem>-<label>-critique.md and the next
+    build prompt names it. A critique that errors or ends without critique-done is logged and skipped."""
+    r.critiqued.add(r.label)
+    model, effort, why = review_role(r)
+    argv = claude_argv(r, f"/yah:resume {r.label} critique", (model, effort))
+    say(f"[yah] critique {r.label}: {argv[2]} on {model} {effort} ({why})")
+    it = session(r, argv, f"{r.label}-critique")
+    r.review_cost, r.reviews = r.review_cost + it["cost"], r.reviews + 1
+    if it["is_error"]:
+        verdict = "skipped: " + it["error"]
+    elif it["word"] != "critique-done":
+        verdict = "skipped: " + (f"it ended with YAH-RESULT: {it['tag']}" if it["tag"] else "no YAH-RESULT line")
+    else:
+        path = r.log.with_name(f"{r.log.stem}-{r.label}-critique.md")
+        path.write_text(it["text"], encoding="utf-8")
+        r.critique, verdict = path.as_posix(), f"critique-done, {path.name}"
+    tell(r, f"critique {r.label}: {model} {effort} ({why}), ${it['cost']:.2f}, {verdict}")
 
 
 # ---------------------------------------------------------------- stop
@@ -708,7 +788,7 @@ def prune(runs):
     try:
         logs = sorted(runs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
         for old in logs[KEEP_RUNS:]:
-            for f in [old, old.with_suffix(".out"), *runs.glob(old.stem + "-*.jsonl")]:
+            for f in [old, old.with_suffix(".out"), *runs.glob(old.stem + "-*.jsonl"), *runs.glob(old.stem + "-*.md")]:
                 f.unlink(missing_ok=True)
     except Exception:
         pass
@@ -773,7 +853,7 @@ def advance(r, code, reason):
     head = (r.phase or {}).get("branch") or (r.view or {}).get("headRefName") or ""
     r.prev = dict(r.phase or {}, label=r.label, branch=head, pr=f"#{r.pr}", pr_state=r.pr_state, merged_into=r.base)
     r.label = r.target = nxt["label"]
-    r.pr, r.url, r.pr_state, r.n, r.stalls, r.last, r.waiting = None, "", "", 0, 0, None, False
+    r.pr, r.url, r.pr_state, r.n, r.stalls, r.last, r.waiting, r.critique = None, "", "", 0, 0, None, False, ""
     refresh(r, s)
     r.base, r.base_from = pr_base(r, s)
     # Nothing in this run pushes the finished phase's branch again, nor the new phase's base.
@@ -785,11 +865,13 @@ def advance(r, code, reason):
 
 
 def finish(r, code, reason):
-    log(r, f"stop, exit {code}: {reason} Cost ${r.cost:.2f} over {r.total} iterations.")
+    review = f"${r.review_cost:.2f} over {r.reviews} critic/judge sessions" if r.reviews else ""
+    log(r, f"stop, exit {code}: {reason} Cost ${r.cost:.2f} over {r.total} iterations"
+        + (f", plus {review}." if review else "."))
     notify(f"yah run {r.key}", reason)
     say(f"[yah] stop (exit {code}): {reason}")
     say(f"[yah] PR {r.url or (f'#{r.pr}' if r.pr else 'none')} | cost ${r.cost:.2f} | "
-        f"{r.total} iterations | log {r.log}")
+        f"{r.total} iterations" + (f" | {review}" if review else "") + f" | log {r.log}")
 
 
 # ---------------------------------------------------------------- main
@@ -902,6 +984,10 @@ def dry_run(r):
         ok, why = mergeable(r, r.view or {})
         am += f": would merge PR #{r.pr} (merge commit)" if ok else f": would not merge PR #{r.pr}: {why}"
     say(f"merge   auto-merge {am}")
+    if c["ultracode"]:
+        model, effort, why = review_role(r)
+        say(f"critic  would critique {r.label} on {model} {effort} ({why}) before its first build"
+            if code is None and wants_critique(r) else "critic  no critique: a PR or a branch on origin, or no plan phase")
     say(f"now     would stop, exit {code}: {reason}" if code is not None else
         f"now     would run iteration 1 in MODE {r.mode}" + (f" (checks {r.checks})" if r.checks else ""))
     return 0
@@ -981,7 +1067,8 @@ def main():
         pr=int(target[1:]) if target[:1] == "#" else None, label=target if target[:1] == "P" else None,
         phase=None, phases=[], plan_key=None, next="", head="", mode="build", checks="", url="", waiting=False,
         week=None, pace_logged=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
-        chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="")
+        chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="",
+        pools={}, critiqued=set(), critique="", review_cost=0.0, reviews=0)
     refresh(r, s)
     if (target[:1] == "P" or a.plan) and r.phase is None:
         what = f"no phase {target} in this repo's plan. " if target else "--plan found no open phase in this repo's plan. "
@@ -1023,6 +1110,9 @@ def main():
             if not r.base:  # the PR gh could not read names no base either
                 code, reason = 5, "run refused: " + no_base(r)
                 break
+            if wants_critique(r):
+                critique(r)
+                continue  # the stop rules (hours, week) again before the build
             before = (r.head, r.next)
             r.last = iterate(r)
             refresh(r)

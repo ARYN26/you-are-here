@@ -91,8 +91,9 @@ if role == "gh":
         sys.exit(c.get("rc", 0))
     else:
         sys.exit(1)
-elif role == "claude":
-    c = step("claude")
+elif role == "claude":  # a mode with its own key (critique) scripts those sessions; claude scripts the rest
+    mode = (args[args.index("-p") + 1].split() + ["", "", ""])[2]
+    c = step(mode if mode in script else "claude")
     with open(os.path.join(d, "claude.env"), "w", encoding="utf-8") as f:
         f.write(os.environ.get("YAH_PROTECTED", "-"))
     with open(os.path.join(d, "claude.detached"), "w", encoding="utf-8") as f:
@@ -100,8 +101,9 @@ elif role == "claude":
     emit({"type": "system", "subtype": "init", "permissionMode": c.get("mode", "auto")})
     for name, inp in c.get("tools", []):
         emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}})
-    if "rate" in c:
-        emit({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {"seven_day": c["rate"]}}})
+    if "rate" in c or "windows" in c:
+        windows = dict(c.get("windows", {}), **({"seven_day": c["rate"]} if "rate" in c else {}))
+        emit({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": windows}})
     if c.get("orphan"):  # a child in its own session, like the Bash tool's shells
         beat, t = os.path.join(d, "orphan.txt"), time.time()
         subprocess.Popen([sys.executable, "-c", "import sys, time\nfor _ in range(600):\n"
@@ -754,9 +756,9 @@ class RunTests(unittest.TestCase):
 
     def test_the_profile_sets_model_and_effort_from_roles_main(self):
         def flags(*args):
-            self.script(claude=[{"tag": "needs-human"}])
+            self.script(claude=[{"tag": "needs-human"}], critique=[{"tag": "critique-done"}])
             self.run_yah(repo, "P2", *args, code=2)
-            argv = self.calls("claude")[0]
+            argv = self.calls("claude")[-1]  # the build, after any critique
             return [(f, argv[argv.index(f) + 1] if f in argv else None) for f in ("--model", "--effort")]
 
         repo = self.repo()
@@ -769,6 +771,72 @@ class RunTests(unittest.TestCase):
         self.assertEqual(flags(), [("--model", "sonnet"), ("--effort", "xhigh")])
         self.config(ultracode="yes", roles={"main": "sonnet xhigh"})  # only a JSON true turns it on
         self.assertEqual(flags(), [("--model", None), ("--effort", None)])
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])  # profile off: no critique
+
+    def flag(self, argv, name):
+        return argv[argv.index(name) + 1] if name in argv else None
+
+    def test_the_profile_critiques_each_phase_once_before_its_first_build(self):
+        self.config(ultracode=True)
+        state = STATE.replace("- [ ] P3 Emails", "- [ ] P3 Emails | branch checkout/emails")
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        p3 = "- [~] P3 Emails | branch checkout/emails"
+        self.script(list=[], required=[{"rc": 0}], **{
+            "view-12": [view()],
+            "view-13": [view(headRefName="checkout/emails", baseRefName="checkout/payment")],
+            "critique": [{"result": {"result": "Build the API first.\nYAH-RESULT: critique-done", "total_cost_usd": 0.4}}],
+            "claude": [{"commit": True, "tag": "pr-open #12", "windows": {"seven_day_fable": {"utilization": 0.55}},
+                        "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
+                       {"commit": True, "tag": "pr-open #13", "replace": [[p3, p3.replace("[~]", "[x]") + " | PR #13"]]}]})
+        out = self.run_yah(self.repo(state=state), "--plan", "--iterations", "1", code=0)
+        prompts = self.prompts()
+        paths = [p.split("critique=", 1)[1] for p in prompts if "critique=" in p]
+        self.assertEqual(prompts, ["/yah:resume P2 critique", "/yah:resume P2 build critique=" + paths[0],
+                                   "/yah:resume P3 critique",
+                                   "/yah:resume P3 build base=checkout/payment critique=" + paths[1]])
+        for label, path in zip(("P2", "P3"), paths):
+            self.assertTrue(path.endswith(f"-{label}-critique.md"), path)
+            self.assertIn("Build the API first.", Path(path).read_text("utf-8"))
+        calls = self.calls("claude")
+        # the critic runs read-only on roles.critic until its own bar (from the stream here) reaches 50%
+        self.assertEqual([(self.flag(a, "--model"), self.flag(a, "--effort")) for a in calls],
+                         [("fable", "high"), ("opus", "high"), ("opus", "high"), ("opus", "high")])
+        for a, critic in zip(calls, (True, False, True, False)):
+            deny = a[a.index("--disallowedTools") + 1:a.index("--max-budget-usd")]
+            self.assertEqual([t in deny for t in ("Edit", "Write", "NotebookEdit")], [critic] * 3)
+        log = self.run_logs()[0].read_text("utf-8")
+        self.assertIn("critique P2: fable high (bar unknown), $0.40, critique-done, ", log)
+        self.assertIn("critique P3: opus high (fable bar 55%, at or over 50%: roles.judge), $0.40, critique-done", log)
+        self.assertIn("Cost $0.50 over 2 iterations, plus $0.80 over 2 critic/judge sessions.", log)
+        self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green.", out)
+
+    def test_a_critique_falls_back_at_the_bar_and_never_stops_the_run(self):
+        self.config(ultracode=True)
+        repo, now = self.repo(), time.time()
+        self.data.joinpath("limits.json").write_text(json.dumps(
+            {"ts": now, "pools": {"seven_day_fable": {"used_pct": 60, "resets_at": now + 86400}}}), encoding="utf-8")
+        self.script()
+        self.assertIn("critic  would critique P2 on opus high (fable bar 60%, at or over 50%: roles.judge) before its "
+                      "first build", self.run_yah(repo, "--dry-run", code=0))
+        cases = [("no tag", {"result": {"result": "Looks fine."}}, "opus high (fable bar 60%, at or over 50%: "
+                  "roles.judge), $0.25, skipped: no YAH-RESULT line"),
+                 ("error", {"result": {"is_error": True, "subtype": "error_max_budget_usd"}},
+                  "fable high (bar unknown), $0.25, skipped: error_max_budget_usd")]
+        for name, step, text in cases:
+            with self.subTest(name):
+                self.script(critique=[step], claude=[{"tag": "needs-human"}])
+                self.run_yah(repo, code=2)
+                self.assertEqual(self.prompts(), ["/yah:resume P2 critique", "/yah:resume P2 build"])
+                self.assertIn("critique P2: " + text, self.run_logs()[-1].read_text("utf-8"))
+                self.data.joinpath("limits.json").write_text(json.dumps(  # 7 h old: the bar is unknown
+                    {"ts": now - 7 * 3600, "pools": {"seven_day_fable": {"used_pct": 60}}}), encoding="utf-8")
+        origin = self.tmp / "origin.git"
+        self.git(self.tmp, "init", "-q", "--bare", str(origin))
+        self.git(repo, "remote", "add", "origin", str(origin))
+        self.git(repo, "push", "-q", "origin", "checkout/payment")
+        self.script(claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, code=2)  # the branch is on origin: its first build is past
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
 
     def test_no_config_still_protects_where_open_prs_land(self):
         repo = self.repo()

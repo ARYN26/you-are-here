@@ -345,6 +345,14 @@ class BeadsTests(unittest.TestCase):
         self.assertIn("`| base <branch>` on the STATE.md phase line", text)
         self.assertIn("--set-metadata base=<branch>", text)
 
+    def test_resume_critique_is_read_only_and_the_build_folds_it_in(self):
+        meta, text = parse(ROOT / "skills" / "resume" / "SKILL.md")
+        self.assertIn("|critique]", meta["argument-hint"])
+        self.assertIn("[critique=<path>]", meta["argument-hint"])
+        for s in ("ends here and changes nothing", "at most 300 words", "`YAH-RESULT: critique-done`",
+                  "the path runs to the end", "a `Decided:` log line", "never write NEEDS-HUMAN because of it"):
+            self.assertIn(s, text)
+
     def test_skills_read_the_state_key(self):
         for name in ("wrap", "resume"):
             with self.subTest(skill=name):
