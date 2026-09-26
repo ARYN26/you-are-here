@@ -201,7 +201,7 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 | 5 | Refused: not a git repo, on a trunk or the PROD branch with no TARGET, `claude` not on PATH, `gh` missing, an invalid TARGET, a `P<n>` with no such phase, an unknown or ambiguous project, or no way to name the branch the PR targets (no base in the plan, no open PR, no `origin/HEAD` and no `prod` in config), so it cannot be protected. That last check also runs before each iteration. Also another run already going in this checkout (below). |
 | 1, 130 | run.py itself failed, or you pressed Ctrl-C. |
 
-**One run per checkout.** A run holds a lock on `<data dir>/runs/<project>.pid` (`<project>@<worktree>.pid` in a linked worktree), a JSON file with its pid, target, log and, once it stops, its exit code and reason. A second run in the same checkout is refused while the first lives. The OS drops the lock when the driver dies, so a pid file whose lock is free is a run that ended, even after a crash or a reboot.
+**One run per checkout.** A run holds a lock on `<data dir>/runs/<project>.pid` (`<project>@<worktree>.pid` in a linked worktree), a JSON file with its pid, target, log and, once it stops, its exit code and reason. A second run in the same checkout is refused while the first lives. The OS drops the lock when the driver dies, so a pid file whose lock is free is a run that ended, even after a crash or a reboot. `/yah:where`, the session-start block and the statusline show it as the RUN line: while it runs, its target and the log's last line; once it ends, its exit code and reason (for 3 days), or `died` when it was killed before it could say.
 
 #### Whole plans: `--plan`
 

@@ -1,6 +1,6 @@
-"""statusline.py: one line from Claude Code's statusline JSON + the where.py cache.
+"""statusline.py: one line from Claude Code's statusline JSON + the where.py cache + the `yah run` pid file.
 
-  Opus 5.5 high | 113k | 5h 22% | wk 41% (pace 35%) | feature/login | PR#8 | CHECKOUT P2/4 | 1 for you
+  Opus 5.5 high | 113k | 5h 22% | wk 41% (pace 35%) | feature/login | PR#8 | CHECKOUT P2/4 | 1 for you | run P2: iter…
 
 Rules it makes visible:
   context amber at `amber`, red with "wrap" at `wrap_soon` (config.json, tier presets);
@@ -24,8 +24,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import (config, data_dir, find_git, read_branch, read_json,  # noqa: E402
-                    utf8_stdout, where_cache_path, write_json)
+from yahlib import (LOG_STAMP, config, data_dir, find_git, project_key, read_branch, read_json,  # noqa: E402
+                    run_info, utf8_stdout, where_cache_path, write_json)
 
 COLD_AFTER_S, COLD_MIN_TOKENS = 3600, 30_000
 WEEK_S = 7 * 86400
@@ -84,6 +84,18 @@ def model_bits(d, premium):
     tag = next((p for p in premium if p in ident), "").upper()
     short = re.sub(r"\s*\(.*?\)", "", name).replace("Claude ", "").strip()
     return short, tag, str(m.get("id") or name)
+
+
+def run_part(ri):
+    """The checkout's `yah run`: its target and last log line while it is live, else its exit code."""
+    what = f"run {ri.get('target') or 'phase'}"
+    if "code" in ri:
+        code = ri["code"]
+        return color(f"{what} exit {code}", GREEN if code in (0, 8) else RED if code == 1 else AMBER)
+    if not ri.get("alive"):
+        return color(f"{what} died", RED)
+    last = LOG_STAMP.sub("", ri.get("last") or "")
+    return color(what + (f": {last[:40]}{'…' if len(last) > 40 else ''}" if last else ""), GREEN)
 
 
 def week_pace(resets_at, now):
@@ -186,7 +198,7 @@ def main():
 
     ws = d.get("workspace") or {}
     cwd = ws.get("current_dir") or d.get("cwd") or os.getcwd()
-    _, main_root, git_dir = find_git(cwd)
+    top, main_root, git_dir = find_git(cwd)
     branch = read_branch(git_dir) if git_dir else None
     cache = read_json(where_cache_path(main_root), {}) if main_root else {}
     cache = cache if isinstance(cache, dict) else {}
@@ -206,6 +218,9 @@ def main():
         parts.append(f"{plan.get('short', '')} {label}/{plan.get('total', '?')}{mark}")
     if cache.get("human"):
         parts.append(color(f"{cache['human']} for you", AMBER))
+    ri = run_info(project_key(main_root), str(top), str(main_root), now) if main_root else None
+    if ri:
+        parts.append(run_part(ri))
 
     tp = d.get("transcript_path")
     try:

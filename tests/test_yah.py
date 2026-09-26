@@ -947,6 +947,50 @@ class AutoMergeWhereTests(Base):
                         self.assertIn("merge: you", text)
 
 
+class RunLineTests(Base):
+    """The RUN line: where.py and the statusline read the checkout's `yah run` pid file."""
+    line = StatuslineTests.line
+
+    def test_run_line_live_ended_died_and_too_old(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import yahlib
+        repo, now = self.state_repo(), time.time()
+        pidf, log = self.data / "runs" / "shop.pid", self.data / "runs" / "shop-1.log"
+        log.parent.mkdir(parents=True)
+        log.write_text("2026-09-25 14:02:00 started\n2026-09-25 14:35:10 iteration 2: $1.20, 30 turns, CONTINUE\n\n",
+                       encoding="utf-8")
+        for out in (self.where(repo), self.where(repo, "--brief"), self.line(cwd=repo)):  # no run yet
+            self.assertNotIn("RUN", out)
+            self.assertNotIn("run P", out)
+        info = {"pid": 4242, "started": int(now) - 7200, "target": "P2", "plan": False, "log": str(log)}
+        fd = yahlib.hold_run(pidf, info)
+        self.assertIsNotNone(fd)
+        try:
+            self.assertIn("RUN     P2 running for 2h, pid 4242, last: 14:35 iteration 2: $1.20, 30 turns, CONTINUE",
+                          self.where(repo))
+            brief = self.where(repo, "--brief")
+            self.assertLessEqual(len(brief.splitlines()), 6)
+            self.assertIn("RUN P2 running for 2h, pid 4242", brief)
+            self.assertIs(json.loads(self.where(repo, "--json"))["run"]["alive"], True)
+            self.assertIn(f"{GREEN}run P2: iteration 2: $1.20, 30 turns, CONTINUE{RST}", self.line(cwd=repo))
+            self.assertIn("RUN live", self.py("where.py")[0])  # the home view
+            yahlib.write_run(fd, dict(info, ended=int(now) - 600, code=2, reason="needs you: CI is red."))
+        finally:
+            os.close(fd)
+        full = self.where(repo)
+        self.assertIn("RUN     P2 ended 10m ago, exit 2: needs you: CI is red.", full)
+        self.assertNotIn("running", full)
+        self.assertIn(f"{AMBER}run P2 exit 2{RST}", self.line(cwd=repo))
+        pidf.write_text(json.dumps(info), encoding="utf-8")  # no code and no lock: the driver was killed
+        self.assertIn("RUN     P2 died 1m ago without an exit code, pid 4242, last: 14:35 iteration 2",
+                      self.where(repo))
+        self.assertIn(f"{RED}run P2 died{RST}", self.line(cwd=repo))
+        pidf.write_text(json.dumps(dict(info, ended=int(now) - 4 * 86400, code=0, reason="plan done.")), "utf-8")
+        for out in (self.where(repo), self.where(repo, "--brief"), self.line(cwd=repo)):  # over 3 days ago
+            self.assertNotIn("RUN", out)
+            self.assertNotIn("run P2", out)
+
+
 # ---------------------------------------------------------------- setup.py
 
 class SetupTests(Base):

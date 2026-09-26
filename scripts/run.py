@@ -40,7 +40,8 @@ matches sets the exit code:
 Logs go to <data dir>/runs/. The driver writes nothing inside the repo. Each run holds a lock on
 runs/<project>.pid (<project>@<worktree>.pid in a linked worktree), a JSON file with its pid, target, log and,
 once it stops, its exit code and reason; a second run in the same checkout is refused (exit 5). The OS drops the
-lock when the driver dies, so a pid file whose lock is free is a run that ended.
+lock when the driver dies, so a pid file whose lock is free is a run that ended. where.py and the statusline show
+it as the RUN line (live: target and the log's last line; ended: exit code and reason) for 3 days.
 
 --detach starts the same command in the background (Windows: CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, so
 closing the terminal cannot end it; elsewhere: its own session, so SIGHUP never reaches it). Its output goes to
@@ -962,6 +963,8 @@ def main():
             if code is not None:
                 code, reason = advance(r, code, reason)
                 if code is None:  # a new phase: its own stop rules (hours, week, its PR) before its first session
+                    info["target"] = r.label  # the RUN line names the phase it is on
+                    write_run(hold, info)
                     continue
                 break
             if not r.base:  # the PR gh could not read names no base either

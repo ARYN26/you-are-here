@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -229,6 +230,62 @@ def run_state(path):
     finally:
         os.close(fd)
     return data
+
+
+RUN_SHOW_S = 3 * 86400  # how long an ended run keeps its RUN line
+LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\d (\d\d:\d\d):\d\d ")
+
+
+def log_tail(path, size=4096):
+    """The log's last non-empty line, read from its end only: the statusline reads it on every refresh."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - size))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    return next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+
+
+def run_info(key, top, main_root, now=None):
+    """The checkout's `yah run` for the RUN line: run_state plus `last`, its log's last line, and for a run that
+    ended, `at`: when (for one that died without saying, its log's last write). None with no run, or one that
+    ended over RUN_SHOW_S ago."""
+    st = run_state(run_pid_path(key, top, main_root))
+    if not st:
+        return None
+    log = str(st.get("log") or "")
+    st["last"] = log_tail(log) if log else ""
+    if "code" in st or not st["alive"]:  # a run writes its code a moment before it lets go of the lock
+        at = num(st.get("ended"), None)
+        if at is None:
+            try:
+                at = os.path.getmtime(log)
+            except OSError:
+                at = num(st.get("started"), 0)
+        st["at"] = at
+        if (now or time.time()) - at > RUN_SHOW_S:
+            return None
+    return st
+
+
+def ago(secs):
+    secs = max(0, int(secs))
+    return f"{max(1, secs // 60)}m" if secs < 3600 else f"{secs // 3600}h" if secs < 86400 else f"{secs // 86400}d"
+
+
+def run_text(st, now=None):
+    """The RUN line from run_info: a live run's target and last log line; an ended one's exit code and reason."""
+    now = now or time.time()
+    what = (st.get("target") or "current phase") + (" (--plan)" if st.get("plan") else "")
+    last = LOG_STAMP.sub(r"\1 ", st.get("last") or "")
+    last = f", last: {last}" if last else ""
+    if "code" in st:
+        return f"{what} ended {ago(now - st['at'])} ago, exit {st['code']}: {st.get('reason') or '-'}"
+    if st.get("alive"):
+        return f"{what} running for {ago(now - num(st.get('started'), now))}, pid {st.get('pid', '?')}{last}"
+    return f"{what} died {ago(now - st['at'])} ago without an exit code, pid {st.get('pid', '?')}{last}"
 
 
 # ---------------------------------------------------------------- subprocess

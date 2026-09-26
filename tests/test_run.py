@@ -461,6 +461,8 @@ class RunTests(unittest.TestCase):
         self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green. The merges are yours.", out)
         self.assertIn("2 iterations", out)
         self.assertEqual(len(list((self.data / "runs").glob("*-[12].jsonl"))), 2)  # per-run numbering, no clobber
+        st = yahlib.run_state(self.data / "runs" / "shop.pid")  # the RUN line names the phase it went on to
+        self.assertEqual((st["target"], st["plan"], st["code"]), ("P3", True, 0))
 
     def test_plan_builds_on_where_a_stacked_parent_merged(self):
         repo = self.repo(state=STATE.replace("| branch checkout/payment | base main",
