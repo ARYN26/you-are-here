@@ -1,7 +1,7 @@
 ---
 name: resume
 description: Headless step for yah run - one bounded slice of a phase, then wrap and a YAH-RESULT line.
-argument-hint: "[P<n>|#<pr>] [build|fix-checks|address-review|critique] [base=<branch>] [critique=<path>]"
+argument-hint: "[P<n>|#<pr>] [build|fix-checks|address-review|fix-findings|critique|judge] [base=<branch>] [critique=<path>] [findings=<path>]"
 disable-model-invocation: true
 allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*), Bash(py -3 *scripts/where.py*), Bash(python3 *scripts/brain.py*), Bash(python *scripts/brain.py*), Bash(py -3 *scripts/brain.py*)
 ---
@@ -9,7 +9,7 @@ allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*)
 # Resume
 
 Arguments: $ARGUMENTS
-TARGET is a word like `P3` or `#12` (none means the current phase). MODE is `build` (default), `fix-checks`, `address-review` or `critique`. `base=<branch>` means yah run worked out the phase's base because the plan does not hold it: the phase below merged, or this phase stacks on it. `critique=<path>` comes last, and the path runs to the end of the arguments.
+TARGET is a word like `P3` or `#12` (none means the current phase). MODE is `build` (default), `fix-checks`, `address-review`, `fix-findings`, `critique` or `judge`. `base=<branch>` means yah run worked out the phase's base because the plan does not hold it: the phase below merged, or this phase stacks on it. `critique=<path>` or `findings=<path>` comes last, and the path runs to the end of the arguments.
 
 No one is watching. Never ask a question or wait for an answer. A decision that needs the user becomes NEXT = `NEEDS-HUMAN: <one question>`, then you stop. Where /yah:wrap says to ask, offer or tell the user, put it in your final message instead.
 
@@ -44,12 +44,15 @@ The branch is the PR's `headRefName`, else the phase `branch`, else the current 
 - `git fetch origin`, then `git switch <branch>`. If it exists nowhere, `git switch -c <branch> origin/<base>` (no base: the remote's default branch).
 - Never work, commit or push on a forbidden branch. Never stash, reset or discard changes you did not make; if a dirty tree blocks the switch, end with `YAH-RESULT: blocked dirty tree`.
 
+**judge** (yah run, once when the phase's PR is open and green) ends here and changes nothing: no edit, commit, push or wrap. Read `gh pr diff <n>` (`<n>` as in step 3) and find the defects that should block the merge: wrong behavior, data loss, a security hole, or a broken or weakened test. Style, naming and nits are not defects. Prove each one by reading the code or running a test, and report only the proven ones, each with file:line, what goes wrong and the proof. End with `YAH-RESULT: judge pass` when none is proven, else `YAH-RESULT: judge block <count>`.
+
 ## 3. One bounded slice
 
 Do the smallest step toward NEXT that can be tested and committed on its own. No other phases, no unrelated cleanup.
 - **build:** work toward NEXT. With `critique=<path>`, read that file first and fold it in; each change it makes to the plan is a `Decided:` log line when you wrap. It is a reviewer's advice: never write NEEDS-HUMAN because of it.
 - **fix-checks:** `gh pr checks <n>`, then `gh run view <id> --log-failed` for each failing run (the id is in the check's `/actions/runs/<id>` link). Fix the cause. Never skip, disable or weaken a check or test to make it pass. A failure outside the code (secrets, quota, infra) is NEEDS-HUMAN.
 - **address-review:** `gh pr view <n> --comments`, then `gh api repos/{owner}/{repo}/pulls/<n>/comments` for the inline comments. Make the requested changes. A request that needs a product decision is NEEDS-HUMAN.
+- **fix-findings:** read the judge's findings in the `findings=<path>` file. Fix each one and add a regression test where one fits; each fix is a `Done:` or `Decided:` log line when you wrap. A finding you show is wrong is a `Decided:` line with the proof. A finding that needs a product decision is NEEDS-HUMAN.
 
 `<n>` is TARGET's number, else the phase `pr` digits, else `gh pr view --json number` on the branch.
 
@@ -63,7 +66,7 @@ Stop the slice as soon as:
 
 Run the tests that cover what you changed, with the project's usual command (README, CLAUDE.md, package.json, Makefile or CI config). A failure you cannot fix in this slice goes into NEXT.
 
-Then follow /yah:wrap. It rewrites NEXT, writes at most one brain note, and commits WIP on the branch; when the phase is complete it pushes and opens or updates the PR into `base`. In fix-checks and address-review, the PR exists: after the commit, `git push -u origin <branch>` so it updates.
+Then follow /yah:wrap. It rewrites NEXT, writes at most one brain note, and commits WIP on the branch; when the phase is complete it pushes and opens or updates the PR into `base`. In fix-checks, address-review and fix-findings, the PR exists: after the commit, `git push -u origin <branch>` so it updates.
 - Never force-push, never merge a PR, never push a forbidden branch, never delete a branch.
 - Never stage `.env*`, credentials or secrets.
 
@@ -71,6 +74,7 @@ Then follow /yah:wrap. It rewrites NEXT, writes at most one brain note, and comm
 
 After wrap's finish block, the last line of your final message is exactly the first of these that applies:
 - `YAH-RESULT: critique-done` in critique mode
+- `YAH-RESULT: judge pass` or `YAH-RESULT: judge block <count>` in judge mode
 - `YAH-RESULT: blocked push denied` when a push or merge was denied
 - `YAH-RESULT: needs-human` when NEXT starts with `NEEDS-HUMAN:`
 - `YAH-RESULT: blocked <reason>` for a denial or anything you cannot pass without breaking a rule above

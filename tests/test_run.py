@@ -776,7 +776,7 @@ class RunTests(unittest.TestCase):
     def flag(self, argv, name):
         return argv[argv.index(name) + 1] if name in argv else None
 
-    def test_the_profile_critiques_each_phase_once_before_its_first_build(self):
+    def test_the_profile_critiques_builds_judges_and_fixes_each_phase_in_order(self):
         self.config(ultracode=True)
         state = STATE.replace("- [ ] P3 Emails", "- [ ] P3 Emails | branch checkout/emails")
         p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
@@ -785,30 +785,72 @@ class RunTests(unittest.TestCase):
             "view-12": [view()],
             "view-13": [view(headRefName="checkout/emails", baseRefName="checkout/payment")],
             "critique": [{"result": {"result": "Build the API first.\nYAH-RESULT: critique-done", "total_cost_usd": 0.4}}],
-            "claude": [{"commit": True, "tag": "pr-open #12", "windows": {"seven_day_fable": {"utilization": 0.55}},
+            "judge": [{"result": {"result": "pay.py:3 drops the cents.\nYAH-RESULT: judge block 1", "total_cost_usd": 0.5}},
+                      {"result": {"result": "Nothing blocks.\nYAH-RESULT: judge pass", "total_cost_usd": 0.5}}],
+            "fix-findings": [{"commit": True, "tag": "pr-open #12", "windows": {"seven_day_fable": {"utilization": 0.55}}}],
+            "claude": [{"commit": True, "tag": "pr-open #12",
                         "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
                        {"commit": True, "tag": "pr-open #13", "replace": [[p3, p3.replace("[~]", "[x]") + " | PR #13"]]}]})
+        # --iterations 1: the judge's one fix slice runs past the cap
         out = self.run_yah(self.repo(state=state), "--plan", "--iterations", "1", code=0)
         prompts = self.prompts()
-        paths = [p.split("critique=", 1)[1] for p in prompts if "critique=" in p]
+        paths = [p.split(k, 1)[1] for p in prompts for k in ("critique=", "findings=") if k in p]
         self.assertEqual(prompts, ["/yah:resume P2 critique", "/yah:resume P2 build critique=" + paths[0],
+                                   "/yah:resume P2 judge", "/yah:resume P2 fix-findings findings=" + paths[1],
                                    "/yah:resume P3 critique",
-                                   "/yah:resume P3 build base=checkout/payment critique=" + paths[1]])
-        for label, path in zip(("P2", "P3"), paths):
-            self.assertTrue(path.endswith(f"-{label}-critique.md"), path)
-            self.assertIn("Build the API first.", Path(path).read_text("utf-8"))
+                                   "/yah:resume P3 build base=checkout/payment critique=" + paths[2],
+                                   "/yah:resume P3 judge"])  # no second judge after the fix
+        for name, path, text in zip(("P2-critique", "P2-judge", "P3-critique"), paths,
+                                    ("Build the API first.", "pay.py:3 drops the cents.", "Build the API first.")):
+            self.assertTrue(path.endswith(f"-{name}.md"), path)
+            self.assertIn(text, Path(path).read_text("utf-8"))
         calls = self.calls("claude")
-        # the critic runs read-only on roles.critic until its own bar (from the stream here) reaches 50%
+        # critic and judge run read-only on roles.critic until its own bar (from the stream here) reaches 50%
         self.assertEqual([(self.flag(a, "--model"), self.flag(a, "--effort")) for a in calls],
-                         [("fable", "high"), ("opus", "high"), ("opus", "high"), ("opus", "high")])
-        for a, critic in zip(calls, (True, False, True, False)):
+                         [("fable", "high"), ("opus", "high"), ("fable", "high"), ("opus", "high"),
+                          ("opus", "high"), ("opus", "high"), ("opus", "high")])
+        for a, critic in zip(calls, (True, False, True, False, True, False, True)):
             deny = a[a.index("--disallowedTools") + 1:a.index("--max-budget-usd")]
             self.assertEqual([t in deny for t in ("Edit", "Write", "NotebookEdit")], [critic] * 3)
         log = self.run_logs()[0].read_text("utf-8")
         self.assertIn("critique P2: fable high (bar unknown), $0.40, critique-done, ", log)
+        self.assertIn("judge P2: fable high (bar unknown), $0.50, judge block 1, ", log)
         self.assertIn("critique P3: opus high (fable bar 55%, at or over 50%: roles.judge), $0.40, critique-done", log)
-        self.assertIn("Cost $0.50 over 2 iterations, plus $0.80 over 2 critic/judge sessions.", log)
+        self.assertIn("judge P3: opus high (fable bar 55%, at or over 50%: roles.judge), $0.50, judge pass", log)
+        self.assertIn("Cost $0.75 over 3 iterations, plus $1.80 over 4 critic/judge sessions.", log)
         self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green.", out)
+
+    def test_the_judge_gates_a_green_pr_once_and_a_failed_judge_never_stops_the_run(self):
+        repo, now = self.repo(state=CLOSED), time.time()
+        self.script(view=[view()], required=[{"rc": 0}])
+        self.assertIn(GREEN, self.run_yah(repo, "P2", code=0))
+        self.assertEqual(self.prompts(), [])  # profile off: no judge
+        self.config(ultracode=True)
+        self.data.joinpath("limits.json").write_text(json.dumps(
+            {"ts": now, "pools": {"seven_day_fable": {"used_pct": 60}}}), encoding="utf-8")
+        self.script(view=[view()], required=[{"rc": 0}])
+        self.assertIn("critic  would judge PR #12 on opus high (fable bar 60%, at or over 50%: roles.judge) before it "
+                      "stops or merges", self.run_yah(repo, "P2", "--dry-run", code=0))
+        cases = [("no tag", {"result": {"result": "Looks fine."}}, "skipped: no YAH-RESULT line"),
+                 ("error", {"result": {"is_error": True, "subtype": "error_max_budget_usd"}},
+                  "skipped: error_max_budget_usd"),
+                 ("pass", {"tag": "judge pass"}, "judge pass, ")]
+        for name, step, text in cases:
+            with self.subTest(name):
+                self.script(view=[view()], required=[{"rc": 0}], judge=[step])
+                self.assertIn(GREEN, self.run_yah(repo, "P2", code=0))
+                self.assertEqual(self.prompts(), ["/yah:resume P2 judge"])
+                self.assertIn("judge P2: opus high (fable bar 60%, at or over 50%: roles.judge), $0.25, " + text,
+                              self.run_logs()[-1].read_text("utf-8"))
+        # auto-merge waits for the judge and its one fix slice
+        self.auto({"ultracode": True}, **{"view-12": [view()], "judge": [{"tag": "judge block 2"}],
+                                          "fix-findings": [{"tag": "pr-open #12"}]})
+        self.assertIn(MERGE_OK, self.run_yah(repo, "P2", code=8))
+        prompts = self.prompts()
+        self.assertEqual(prompts[0], "/yah:resume P2 judge")
+        self.assertRegex(prompts[1], r"^/yah:resume P2 fix-findings findings=.+-P2-judge\.md$")
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(len(self.merges()), 1)
 
     def test_a_critique_falls_back_at_the_bar_and_never_stops_the_run(self):
         self.config(ultracode=True)

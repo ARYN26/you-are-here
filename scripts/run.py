@@ -20,7 +20,10 @@ The quality profile (config.json "ultracode": true) starts builds with --model/-
 --model replaces only the model). Before a plan phase's first build (no PR, no phase branch on origin) it runs one
 read-only `/yah:resume <label> critique` on roles.critic, or on roles.judge once the critic model's own weekly pool
 is at critic_week_skip_pct. Its answer goes to runs/<stem>-<label>-critique.md, and the next build prompt ends
-with critique=<path>. A critique that fails is logged and skipped; it never stops the run.
+with critique=<path>. Once a phase's PR is open and green, before auto-merge or exit 0, it runs one read-only
+`/yah:resume <label> judge` on the same model. A `judge block <n>` saves its answer to runs/<stem>-<label>-judge.md
+and runs one `fix-findings findings=<path>` slice, which the iteration cap does not hold back; then the loop goes on
+as usual, with no second judge. A critique or judge that fails is logged and skipped; it never stops the run.
 
 TARGET is P<n> (a plan phase), #<pr> (a bare PR number works too, since shells treat # as a
 comment) or empty for the current phase, which is pinned at start and passed as P<n>. Each iteration
@@ -181,9 +184,10 @@ def command(path, args):
 
 def claude_argv(r, prompt=None, role=None):
     """A build session's argv, or with `role` (model, effort) a read-only critique or judge running `prompt`.
-    critique=<path> goes last: the skill reads the path to the end of the prompt."""
+    critique=<path> or findings=<path> goes last: the skill reads the path to the end of the prompt."""
     prompt = prompt or " ".join(x for x in ("/yah:resume", r.target or r.label, r.mode, r.base_arg and "base=" + r.base_arg,
-                                            r.critique and "critique=" + r.critique) if x)
+                                            r.critique and "critique=" + r.critique,
+                                            r.mode == "fix-findings" and "findings=" + r.findings) if x)
     argv = [r.claude, "-p", prompt, "--permission-mode", "auto", "--permission-prompts", "none",
             "--disallowedTools", *r.deny, *(READ_ONLY if role else []), "--max-budget-usd", "{:g}".format(r.budget),
             "--output-format", "stream-json", "--verbose", "--settings", guard_settings()]
@@ -413,9 +417,10 @@ def evaluate(r, wait=True):
         if state == "OPEN":
             r.checks, cr = checks(r, wait), changes_requested(view)
             phase_done = r.target.startswith("#") or r.phase is None or r.phase.get("status") == "closed"
-            if r.checks in ("pass", "none") and not cr and phase_done:
+            if r.checks in ("pass", "none") and not cr and phase_done and not r.findings:
                 return 0, f"PR #{r.pr} is open and green. The merge is yours."
-            r.mode = "fix-checks" if r.checks == "fail" else "address-review" if cr else "build"
+            r.mode = ("fix-checks" if r.checks == "fail" else "address-review" if cr else
+                      "fix-findings" if r.findings else "build")
     if r.last:
         if stopped(r.last):
             return 2, needs_you(r)
@@ -423,7 +428,7 @@ def evaluate(r, wait=True):
             return 2, NO_TAG
         if r.stalls >= 2:
             return 3, "HEAD and NEXT unchanged for 2 iterations in a row."
-    if r.n >= r.cap:
+    if r.n >= r.cap and r.mode != "fix-findings":  # the judge's one fix slice runs past the cap
         return 4, f"reached the cap of {r.cap} iterations."
     if time.monotonic() - r.t0 > r.cfg["run_total_hours"] * 3600:
         return 4, f"passed run_total_hours ({r.cfg['run_total_hours']:g} h)."
@@ -660,6 +665,8 @@ def iterate(r):
     r.total += 1
     argv = claude_argv(r)
     r.critique = ""  # folded in by this build; later ones read its Decided: lines
+    if r.mode == "fix-findings":
+        r.findings = ""  # one slice; the loop goes on as usual
     say(f"[yah] iteration {r.n}/{r.cap}: {argv[2]}")
     it = session(r, argv, f"{r.total}", r.n)
     m = re.match(r"pr-open\s+#?(\d+)", it["tag"], re.I)
@@ -751,24 +758,48 @@ def wants_critique(r):
                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0")))
 
 
-def critique(r):
-    """/yah:resume <label> critique, read-only. Its answer goes to runs/<stem>-<label>-critique.md and the next
-    build prompt names it. A critique that errors or ends without critique-done is logged and skipped."""
-    r.critiqued.add(r.label)
+def wants_judge(r):
+    """The profile judges each PR once per run, when evaluate finds it open and green; not after a session that
+    stopped for you, since the run stops there anyway."""
+    return bool(r.cfg["ultracode"] and r.pr and r.pr_state == "OPEN" and r.pr not in r.judged
+                and not stopped(r.last, errors=False))
+
+
+def review(r, target, mode, name, verdict):
+    """One read-only `/yah:resume <target> <mode>` on review_role. When its YAH-RESULT matches the `verdict`
+    regex, its answer goes to runs/<stem>-<name>-<mode>.md: returns (the match, that path). An error or another
+    tag is logged as skipped: (None, "")."""
     model, effort, why = review_role(r)
-    argv = claude_argv(r, f"/yah:resume {r.label} critique", (model, effort))
-    say(f"[yah] critique {r.label}: {argv[2]} on {model} {effort} ({why})")
-    it = session(r, argv, f"{r.label}-critique")
+    argv = claude_argv(r, f"/yah:resume {target} {mode}", (model, effort))
+    say(f"[yah] {mode} {name}: {argv[2]} on {model} {effort} ({why})")
+    it = session(r, argv, f"{name}-{mode}")
     r.review_cost, r.reviews = r.review_cost + it["cost"], r.reviews + 1
-    if it["is_error"]:
-        verdict = "skipped: " + it["error"]
-    elif it["word"] != "critique-done":
-        verdict = "skipped: " + (f"it ended with YAH-RESULT: {it['tag']}" if it["tag"] else "no YAH-RESULT line")
-    else:
-        path = r.log.with_name(f"{r.log.stem}-{r.label}-critique.md")
+    m = None if it["is_error"] else re.fullmatch(verdict, it["tag"], re.I)
+    path = r.log.with_name(f"{r.log.stem}-{name}-{mode}.md")
+    if m:
         path.write_text(it["text"], encoding="utf-8")
-        r.critique, verdict = path.as_posix(), f"critique-done, {path.name}"
-    tell(r, f"critique {r.label}: {model} {effort} ({why}), ${it['cost']:.2f}, {verdict}")
+        said = f"{it['tag']}, {path.name}"
+    else:
+        said = "skipped: " + (it["error"] if it["is_error"] else f"it ended with YAH-RESULT: {it['tag']}"
+                              if it["tag"] else "no YAH-RESULT line")
+    tell(r, f"{mode} {name}: {model} {effort} ({why}), ${it['cost']:.2f}, {said}")
+    return (m, path.as_posix()) if m else (None, "")
+
+
+def critique(r):
+    """/yah:resume <label> critique: the next build prompt names its answer."""
+    r.critiqued.add(r.label)
+    r.critique = review(r, r.label, "critique", r.label, r"critique-done\b.*")[1]
+
+
+def judge(r):
+    """/yah:resume <target> judge on an open, green PR. A block sets r.findings, so evaluate asks for one
+    fix-findings slice before exit 0 or a merge; a pass or a skip lets them happen."""
+    r.judged.add(r.pr)
+    m, path = review(r, r.target or r.label or f"#{r.pr}", "judge", r.label or f"PR{r.pr}",
+                     r"judge\s+(pass|block)\b.*")
+    if m and m.group(1).lower() == "block":
+        r.findings = path
 
 
 # ---------------------------------------------------------------- stop
@@ -853,7 +884,8 @@ def advance(r, code, reason):
     head = (r.phase or {}).get("branch") or (r.view or {}).get("headRefName") or ""
     r.prev = dict(r.phase or {}, label=r.label, branch=head, pr=f"#{r.pr}", pr_state=r.pr_state, merged_into=r.base)
     r.label = r.target = nxt["label"]
-    r.pr, r.url, r.pr_state, r.n, r.stalls, r.last, r.waiting, r.critique = None, "", "", 0, 0, None, False, ""
+    r.pr, r.url, r.pr_state, r.n, r.stalls, r.last, r.waiting, r.critique, r.findings = (None, "", "", 0, 0, None,
+                                                                                         False, "", "")
     refresh(r, s)
     r.base, r.base_from = pr_base(r, s)
     # Nothing in this run pushes the finished phase's branch again, nor the new phase's base.
@@ -987,7 +1019,10 @@ def dry_run(r):
     if c["ultracode"]:
         model, effort, why = review_role(r)
         say(f"critic  would critique {r.label} on {model} {effort} ({why}) before its first build"
-            if code is None and wants_critique(r) else "critic  no critique: a PR or a branch on origin, or no plan phase")
+            if code is None and wants_critique(r) else
+            f"critic  would judge PR #{r.pr} on {model} {effort} ({why}) before it stops or merges"
+            if code == 0 and wants_judge(r) else
+            "critic  no critique (a PR or a branch on origin, or no plan phase) and no judge (no open, green PR)")
     say(f"now     would stop, exit {code}: {reason}" if code is not None else
         f"now     would run iteration 1 in MODE {r.mode}" + (f" (checks {r.checks})" if r.checks else ""))
     return 0
@@ -1068,7 +1103,7 @@ def main():
         phase=None, phases=[], plan_key=None, next="", head="", mode="build", checks="", url="", waiting=False,
         week=None, pace_logged=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
         chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="",
-        pools={}, critiqued=set(), critique="", review_cost=0.0, reviews=0)
+        pools={}, critiqued=set(), critique="", judged=set(), findings="", review_cost=0.0, reviews=0)
     refresh(r, s)
     if (target[:1] == "P" or a.plan) and r.phase is None:
         what = f"no phase {target} in this repo's plan. " if target else "--plan found no open phase in this repo's plan. "
@@ -1098,6 +1133,9 @@ def main():
     try:
         while True:
             code, reason = evaluate(r)
+            if code == 0 and wants_judge(r):
+                judge(r)
+                continue  # a block: one fix-findings slice; a pass or a skip: the PR read again, then exit 0 or a merge
             if code == 0 and r.cfg["auto_merge"]:
                 code, reason = auto_merge(r, reason)
             if code is not None:
