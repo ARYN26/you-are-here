@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import beads  # noqa: E402
 from yahlib import (NO_WINDOW, claude_dir, config, data_dir, empty_state, find_git, find_tool,  # noqa: E402
-                    first_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs, run, run_info,
+                    first_line, log_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs, run, run_info,
                     run_status, run_text, short_of, utf8_stdout, where_cache_path, write_json)
 
 PR_FIELDS = "number,title,headRefName,baseRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt"
@@ -155,15 +155,17 @@ def md_log(lines, n):
     """The plain lines indented under the phase line at line n, bullets dropped: the handoff log wrap keeps for the
     next session. Checkbox lines there are sub-tasks, skipped but not an end; a blank line is not an end either."""
     def indent(ln):
-        return len(ln.expandtabs(4)) - len(ln.expandtabs(4).lstrip())
+        t = ln.expandtabs(4)
+        return len(t) - len(t.lstrip())
     top, log = indent(lines[n - 1]), []
     for ln in lines[n:]:
-        if not ln.strip():
+        s = ln.strip()
+        if not s:
             continue
-        if indent(ln) <= top or ln.lstrip().startswith(("```", "~~~")):
+        if indent(ln) <= top or s.startswith(("```", "~~~")):
             break
         if not md_line(ln):
-            log.append(re.sub(r"^[-*+]\s+", "", ln.strip()))
+            log.append(log_line(s))
     return log
 
 

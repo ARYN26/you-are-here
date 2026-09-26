@@ -176,7 +176,8 @@ class PhaseMemoryTests(unittest.TestCase):
                     self.assertIn(want, text, want)
                     self.assertLess(text.index(want), text.index(recall), want)  # read first, then recall
         self.assertIn("do not redo a tried approach or reopen a decision", body("resume"))
-        self.assertIn("only `## Decisions` and the `### <label>` section", body("start"))  # not the whole plan
+        for name in ("resume", "start"):
+            self.assertIn('`grep -n "^#"`', body(name))  # find the two sections, never read the whole plan
 
     def test_wrap_writes_the_log_and_moves_it_to_the_pr(self):
         text = body("wrap")

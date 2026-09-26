@@ -27,7 +27,7 @@ The `[yah]` block and any task text already in context are enough: never re-read
 
 ## 2. Recall
 
-With a plan phase, run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh`. Read `state.phase.log`, then only `## Decisions` and the `### <label>` section of the plan file `state.plan.spec` (none: say so in one line).
+With a plan phase, run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh`. Read `state.phase.log`, then only the `## Decisions` and `### <label>` sections of `state.plan.spec` (`grep -n "^#"` finds them; none: say so in one line).
 
 Query with the task's key nouns, 12 words or fewer, no double quotes:
 

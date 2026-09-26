@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import empty_state, find_tool, first_line, norm, pick_phase, repo_dirs, run, short_of  # noqa: E402
+from yahlib import empty_state, find_tool, first_line, log_line, norm, pick_phase, repo_dirs, run, short_of  # noqa: E402
 
 CLAIM = "bd update {} --claim"  # starts a phase, like marking a STATE.md phase [~]
 
@@ -166,8 +166,7 @@ def beads_state(issues):
         return {"id": k["id"], "label": label, "title": title, "status": k.get("status"),
                 "branch": m.get("branch") or "", "base": m.get("base") or "",
                 "pr": (k.get("external_ref") or ""), "next": first_line(k.get("notes")),
-                "log": [re.sub(r"^[-*+]\s+", "", ln.strip()) for ln in (k.get("notes") or "").strip().splitlines()[1:]
-                        if ln.strip()],
+                "log": [log_line(ln) for ln in (k.get("notes") or "").strip().splitlines()[1:] if ln.strip()],
                 "next_sha": str(m.get("next_sha") or "")}
 
     return pick_phase(state, [phase_view(k, i) for i, k in enumerate(kids)])
