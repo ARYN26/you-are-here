@@ -163,6 +163,74 @@ def where_cache_path(main_root):
     return data_dir() / "where-{}.json".format(re.sub(r"[^\w.-]", "_", name))
 
 
+# ---------------------------------------------------------------- the `yah run` pid file
+
+LOCK_AT = 1 << 30  # Windows byte locks are mandatory, so the lock sits past the JSON and readers can still read it
+
+
+def run_pid_path(key, top, main_root):
+    """<data dir>/runs/<key>.pid, or <key>@<worktree folder>.pid in a linked worktree: one `yah run` per checkout."""
+    name = key if norm(top) == norm(main_root or top) else f"{key}@{Path(top).name}"
+    return data_dir() / "runs" / (re.sub(r"[^\w.@-]", "_", name) + ".pid")
+
+
+def _lock(fd, unlock=False):
+    """Try once to lock fd (or unlock it); True on success. The OS drops the lock when its process dies."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, LOCK_AT, 0)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK if unlock else msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def write_run(fd, data):
+    """Rewrite the pid file in place: it cannot be replaced while its run holds it open on Windows."""
+    try:
+        raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        os.lseek(fd, 0, 0)
+        os.write(fd, raw)
+        os.ftruncate(fd, len(raw))
+    except OSError:
+        pass
+
+
+def hold_run(path, data):
+    """Take the checkout's run lock and write data to its pid file. The fd, to keep open for the life of the run,
+    or None while another live run holds it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    if not _lock(fd):
+        os.close(fd)
+        return None
+    write_run(fd, data)
+    return fd
+
+
+def run_state(path):
+    """The pid file's data plus alive, whether its run still holds the lock. None with no pid file, or one caught
+    mid-write."""
+    data = read_json(path)
+    if not isinstance(data, dict):
+        return None
+    try:
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    try:
+        data["alive"] = not _lock(fd)
+        if not data["alive"]:
+            _lock(fd, unlock=True)  # at once: Windows may take a while to drop a lock on close
+    finally:
+        os.close(fd)
+    return data
+
+
 # ---------------------------------------------------------------- subprocess
 
 def run(cmd, cwd, timeout=10, env=None):

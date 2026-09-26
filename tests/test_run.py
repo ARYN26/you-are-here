@@ -21,6 +21,8 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "scripts" / "run.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+import yahlib  # noqa: E402
 IS_WIN = os.name == "nt"
 NOTIFIER = "osascript" if sys.platform == "darwin" else "powershell" if IS_WIN else "notify-send"
 URL = "https://example.com/pr/12"
@@ -93,6 +95,8 @@ elif role == "claude":
     c = step("claude")
     with open(os.path.join(d, "claude.env"), "w", encoding="utf-8") as f:
         f.write(os.environ.get("YAH_PROTECTED", "-"))
+    with open(os.path.join(d, "claude.detached"), "w", encoding="utf-8") as f:
+        f.write(os.environ.get("YAH_RUN_DETACHED", "-"))
     emit({"type": "system", "subtype": "init", "permissionMode": c.get("mode", "auto")})
     for name, inp in c.get("tools", []):
         emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}})
@@ -275,6 +279,53 @@ class RunTests(unittest.TestCase):
                 self.assertIn(text, self.run_yah(cwd, *args, env=env, code=5))
         self.assertEqual(self.calls("claude"), [])
         self.assertFalse((self.data / "runs").exists())
+
+    # ------------------------------------------------------------ --detach and the pid file
+
+    def test_detach_returns_while_the_run_goes_on_and_holds_the_lock(self):
+        self.script(list=[], view=[view()], required=[{"rc": 0}],
+                    claude=[{"sleep": 6, "commit": True, "close": True, "next": "Start P3.", "tag": "pr-open #12"}])
+        repo = self.repo()
+        out = self.run_yah(repo, "--detach", code=0)
+        pidf = self.data / "runs" / "shop.pid"
+        st = yahlib.run_state(pidf)
+        self.assertTrue(st and st["alive"], (st, out))
+        self.assertIn(f"run started in the background: P2, pid {st['pid']}", out)
+        self.assertNotIn("stop (exit", out)
+        self.assertEqual((st["target"], st["branch"], st["plan"]), ("P2", "checkout/payment", False))
+        busy = f"a run is already going in this checkout: pid {st['pid']}, P2"
+        self.assertIn(busy, self.run_yah(repo, code=5))
+        self.assertIn(busy, self.run_yah(repo, "--detach", code=5))
+        t = time.monotonic()
+        while st["alive"] and time.monotonic() - t < 60:
+            time.sleep(0.2)
+            st = yahlib.run_state(pidf) or st
+        self.assertFalse(st["alive"], "the background run did not end")
+        self.assertEqual((st["code"], st["reason"]), (0, GREEN))
+        self.assertIn("[yah] stop (exit 0): " + GREEN, Path(st["out"]).read_text("utf-8"))
+        self.assertIn("stop, exit 0: " + GREEN, Path(st["log"]).read_text("utf-8"))
+        self.assertEqual(Path(st["out"]).with_suffix(".log"), Path(st["log"]))
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+        self.assertEqual((self.fake / "claude.detached").read_text("utf-8"), "-")  # sessions never see the marker
+
+    def test_a_held_pid_file_refuses_and_a_stale_one_does_not(self):
+        self.script(view=[view()], required=[{"rc": 0}])
+        repo = self.repo()
+        pidf = self.data / "runs" / "shop.pid"
+        fd = yahlib.hold_run(pidf, {"pid": 4242, "target": "P2", "log": "old.log"})
+        try:
+            for args in ([], ["--detach"]):
+                with self.subTest(args=args):
+                    out = self.run_yah(repo, *args, code=5)
+                    self.assertIn("already going in this checkout: pid 4242, P2, since ?, log old.log", out)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.calls("claude"), [])
+        self.assertEqual(self.run_logs(), [])
+        self.assertIn(GREEN, self.run_yah(repo, "#12", code=0))  # its holder is gone, so the lock is free
+        st = yahlib.run_state(pidf)
+        self.assertEqual((st["alive"], st["target"], st["code"], st["out"]), (False, "#12", 0, ""))
+        self.assertNotEqual(st["pid"], 4242)
 
     # ------------------------------------------------------------ exit 0 and MODE
 
@@ -791,6 +842,25 @@ class HelperTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("yah_run", RUN)
         cls.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.mod)
+
+    def test_run_lock_and_pid_file(self):
+        tmp = Path(tempfile.mkdtemp(prefix="yah-lock-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        pidf = tmp / "runs" / "shop.pid"
+        self.assertIsNone(yahlib.run_state(pidf))
+        fd = yahlib.hold_run(pidf, {"pid": 1, "reason": "long " * 50})
+        self.assertIsNotNone(fd)
+        self.assertIsNone(yahlib.hold_run(pidf, {"pid": 2}))  # a second fd conflicts even in the same process
+        self.assertEqual(yahlib.run_state(pidf), {"pid": 1, "reason": "long " * 50, "alive": True})
+        yahlib.write_run(fd, {"pid": 1, "code": 0})  # shorter than before: the old tail is cut
+        self.assertEqual(yahlib.run_state(pidf), {"pid": 1, "code": 0, "alive": True})
+        os.close(fd)
+        self.assertEqual(yahlib.run_state(pidf), {"pid": 1, "code": 0, "alive": False})
+        fd = yahlib.hold_run(pidf, {"pid": 3})
+        self.assertIsNotNone(fd)
+        os.close(fd)
+        self.assertEqual(yahlib.run_pid_path("shop", str(tmp / "shop"), str(tmp / "shop")).name, "shop.pid")
+        self.assertEqual(yahlib.run_pid_path("shop", str(tmp / "wt 2"), str(tmp / "shop")).name, "shop@wt_2.pid")
 
     def test_targets_and_prod_branch(self):
         pt = self.mod.parse_target
