@@ -153,18 +153,23 @@ def md_scan(lines):
 
 def md_log(lines, n):
     """The plain lines indented under the phase line at line n, bullets dropped: the handoff log wrap keeps for the
-    next session. Checkbox lines there are sub-tasks, skipped but not an end; a blank line is not an end either."""
+    next session. Checkbox lines there are sub-tasks, skipped with the lines indented under them, but not an end;
+    a blank line is not an end either."""
     def indent(ln):
         t = ln.expandtabs(4)
         return len(t) - len(t.lstrip())
-    top, log = indent(lines[n - 1]), []
+    top, sub, log = indent(lines[n - 1]), None, []
     for ln in lines[n:]:
         s = ln.strip()
         if not s:
             continue
-        if indent(ln) <= top or s.startswith(("```", "~~~")):
+        i = indent(ln)
+        if i <= top or s.startswith(("```", "~~~")):
             break
-        if not md_line(ln):
+        if sub is not None and i > sub:
+            continue  # a sub-task's own detail, not the phase's log
+        sub = i if md_line(ln) else None
+        if sub is None:
             log.append(log_line(s))
     return log
 
