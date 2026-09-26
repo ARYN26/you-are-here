@@ -228,6 +228,22 @@ class AutoTests(unittest.TestCase):
         self.assertIn("The task `here` opts out", self.body)
         self.assertIn("other than `here`", rows[self.row("A task was given")])
 
+    def test_a_multi_pr_task_is_deep_checked_and_every_decision_asked_before_the_run(self):
+        rows = self.rows()
+        self.assertIn("**plan it** (section 3)", rows[self.row("A task was given")])
+        self.assertIn("Route the answer as a given task", rows[self.row("No plan and no NEXT")])
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        steps = ("Enter plan mode", "`yah:deep`", "AskUserQuestion", "`## Decisions`", "Then ExitPlanMode",
+                 "`yah:phases`", "**start the run**")
+        at = [plan.index(s) for s in steps]
+        self.assertEqual(at, sorted(at))  # deep-check, then ask everything, then exit, then track, then run
+        self.assertIn("before ExitPlanMode", plan)
+        self.assertIn("a `branch` and a `base`", plan)  # yah run --plan stops at a phase with no branch
+        self.assertIn("`NEEDS-HUMAN:` is only for what nobody could foresee", plan)
+        # never the old hands-on ending: an approved plan goes to the run, not a foreground first phase
+        self.assertNotIn("start its first phase", self.body)
+        self.assertNotIn("`yah:start`", plan)
+
     def test_deep_on_every_tier_and_merges_stay_the_users(self):
         self.assertIn("every plan tier", self.body)
         self.assertIn("Never merge a PR yourself", self.body)
