@@ -879,6 +879,28 @@ class PrLinesTests(unittest.TestCase):
         lines, _ = w.pr_lines(prs, "main", None, limit=2)
         self.assertEqual(lines[-1], "+2 more (gh pr list)")
 
+    def test_auto_merge_marks_only_a_green_phase_pr(self):
+        w = load_where()
+        green = [{"conclusion": "SUCCESS"}]
+        prs = [{"number": 1, "headRefName": "p/1", "baseRefName": "main", "statusCheckRollup": green},
+               {"number": 2, "headRefName": "docs", "baseRefName": "main", "statusCheckRollup": green},
+               {"number": 3, "headRefName": "p/3", "baseRefName": "main", "statusCheckRollup": green, "isDraft": True},
+               {"number": 4, "headRefName": "p/4", "baseRefName": "main", "statusCheckRollup": [{"conclusion": "FAILURE"}]}]
+        phases = {"phases": [{"label": f"P{n}", "pr": "", "branch": f"p/{n}"} for n in (1, 3, 4)]}
+
+        def by(auto):
+            lines, _ = w.pr_lines(prs, "main", phases, limit=10, auto=auto)
+            return {int(re.match(r"#(\d+)", ln).group(1)): ln for ln in lines}
+
+        on, off = by(True), by(False)
+        self.assertIn("auto-merge: on", on[1])
+        self.assertNotIn("merge: you", on[1])
+        self.assertIn("merge: you", on[2])  # not a phase PR: yah run never merges it
+        for n in (3, 4):  # a draft or a red PR: nobody merges it yet
+            self.assertNotIn("merge", on[n])
+        self.assertIn("merge: you", off[1])
+        self.assertFalse(any("auto-merge" in ln for ln in off.values()), off)
+
     def test_prod_is_inferred_from_where_prs_land(self):
         w = load_where()
         prs = [{"headRefName": "feat/a", "baseRefName": "live"}, {"headRefName": "feat/b", "baseRefName": "feat/a"},
@@ -900,6 +922,29 @@ class PrLinesTests(unittest.TestCase):
         near = {**s, "landing": ["main"], "ancestors": ["feat/q"]}
         self.assertTrue(w.prod_line(near).startswith("`feat/q` inferred: this branch was cut from it."))
         self.assertEqual(w.prod_line({**near, "ancestors": ["feat/q", "main"]}), "")  # as near a trunk: say nothing
+
+
+class AutoMergeWhereTests(Base):
+    def test_only_a_json_true_turns_auto_merge_on(self):
+        w = load_where()
+        repo = self.beads_repo()
+        prs = [{"number": 7, "headRefName": "checkout/payment", "baseRefName": "checkout/cart",
+                "statusCheckRollup": [{"conclusion": "SUCCESS"}]}]
+        for value, on in ((True, True), ("true", False), (1, False), (None, False)):
+            with self.subTest(auto_merge=value):
+                self.config(**({} if value is None else {"auto_merge": value}))
+                s = json.loads(self.where(repo, "--json"))
+                self.assertIs(s["auto_merge"], on)
+                s["prs"] = prs  # the same view gh would give, through render: --brief and the full view agree
+                for brief in (False, True):
+                    text = "\n".join(w.render(s, brief=brief))
+                    self.assertIn("#7  P2  checkout/payment -> checkout/cart  green", text)
+                    if on:
+                        self.assertIn("auto-merge: on", text)
+                        self.assertNotIn("merge: you", text)
+                    else:
+                        self.assertNotIn("auto-merge", text)
+                        self.assertIn("merge: you", text)
 
 
 # ---------------------------------------------------------------- setup.py
@@ -937,7 +982,8 @@ class SetupTests(Base):
         (self.cfg / "plugins" / "known_marketplaces.json").write_text(
             json.dumps({"you-are-here": {"source": {"source": "github", "repo": "ARYN26/you-are-here"}}}), "utf-8")
         before = self.snapshot()
-        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--install-launcher", str(self.home / ".bashrc")],
+        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--auto-merge"],
+                     ["--install-launcher", str(self.home / ".bashrc")],
                      ["--install-rules"], ["--uninstall"]):
             out, err, rc = self.setup_py("--dry-run", *args, scripts=scripts)
             self.assertEqual(rc, 0, err)
@@ -1090,6 +1136,35 @@ class SetupTests(Base):
         self.setup_py("--auto-update")
         self.setup_py("--uninstall")
         self.assertEqual(self.settings(), {})  # not a leftover {"source": ...} entry
+
+    def read_config(self):
+        return json.loads((self.data / "config.json").read_text("utf-8"))
+
+    def test_auto_merge_opt_in_and_uninstall(self):
+        self.settings(self.SETTINGS)
+        for prior in (None, False, "true"):  # absent, off, and a string that never counted as on
+            with self.subTest(prior=prior):
+                cfg = {"tier": "max20", **({} if prior is None else {"auto_merge": prior})}
+                self.config(**cfg)
+                out, err, rc = self.setup_py("--auto-merge", "--yes")  # --yes must not reach the statusline
+                self.assertEqual(rc, 0, err)
+                self.assertIn("automerge  on:", out)
+                self.assertNotIn("statusLine", out)
+                self.assertEqual(self.read_config(), {**cfg, "auto_merge": True})
+                self.assertEqual(self.settings(), self.SETTINGS)
+                out = self.setup_py("--auto-merge", "--yes")[0]
+                self.assertIn("automerge  unchanged (on)", out)
+                out, err, rc = self.setup_py("--uninstall")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("automerge  removed" if prior is None else "automerge  restored", out)
+                self.assertEqual(self.read_config(), cfg)
+                self.assertEqual(self.settings(), self.SETTINGS)
+
+    def test_auto_merge_uninstall_keeps_a_later_hand_edit(self):
+        self.setup_py("--auto-merge")
+        self.config(auto_merge=False)  # the user turns it off by hand
+        self.assertNotIn("automerge", self.setup_py("--uninstall")[0])
+        self.assertEqual(self.read_config(), {"auto_merge": False})
 
     def test_launcher_block(self):
         rc_file = self.home / ".bashrc"

@@ -7,11 +7,13 @@
     setup.py --install-rules [FILE]                append RULES.md to FILE (default: CLAUDE.md)
     setup.py --ultracode                           opt-in: ultracode on by default, workflows medium
     setup.py --auto-update                         opt-in: Claude Code auto-updates yah's marketplace
+    setup.py --auto-merge                          opt-in: `yah run` merges the green phase PRs it opened
     setup.py --uninstall                           undo all of the above
 
 Merge-only: settings.json is backed up first and only its statusLine key changes (never model,
 effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode, and
-autoUpdate on yah's extraKnownMarketplaces entry with --auto-update. What it changed goes into setup-state.json in the data dir,
+autoUpdate on yah's extraKnownMarketplaces entry with --auto-update. --auto-merge sets only auto_merge
+in config.json. What it changed goes into setup-state.json in the data dir,
 so --uninstall can put things back. --dry-run writes nothing. Re-running is safe.
 """
 import argparse
@@ -401,11 +403,38 @@ def auto_update(settings, sp, state, state_file, dry, say):
         say(f"WARNING    {', '.join(off)} turns plugin auto-update off. Set FORCE_AUTOUPDATE_PLUGINS=1 to keep it on.")
 
 
+def auto_merge(state, state_file, dry, say):
+    """Opt-in: `yah run` merges a phase PR it opened once every check passed (a merge commit, then it
+    retargets stacked PRs, then deletes the head branch). Only the driver merges, never the model. The old
+    value goes into setup-state.json so --uninstall can put it back."""
+    cp = data_dir() / "config.json"
+    cfg = load_obj(cp)
+    if cfg.get("auto_merge") is True:
+        say("automerge  unchanged (on)")
+        return
+    # it was off, so config.json holds the user's latest choice: record that, not an older run's
+    state["autoMerge"] = {"added": "auto_merge" not in cfg, "prev": cfg.get("auto_merge")}
+    cfg["auto_merge"] = True
+    save_json(cp, cfg, dry)
+    save_json(state_file, state, dry)
+    say(f"automerge  on: `yah run` merges a green phase PR it opened, then retargets and deletes its branch  ({cp})")
+
+
 def uninstall(sdir, state, state_file, dry, say):
+    am, cp = state.get("autoMerge"), data_dir() / "config.json"
+    cfg = load_obj(cp) if isinstance(am, dict) else {}
+    if cfg.get("auto_merge") is True:  # still ours: a hand edit since then is the user's choice
+        if am.get("added"):
+            cfg.pop("auto_merge")
+        else:
+            cfg["auto_merge"] = am.get("prev")
+        save_json(cp, cfg, dry)
+        say("automerge  " + ("removed" if am.get("added") else f"restored: {json.dumps(am.get('prev'))}"))
     sp = claude_dir() / "settings.json"
     settings = load_obj(sp)
     au, ekm = state.get("autoUpdate"), settings.get("extraKnownMarketplaces")
-    if isinstance(au, dict) and isinstance(ekm, dict) and isinstance(ekm.get(au.get("name")), dict):
+    if isinstance(au, dict) and isinstance(ekm, dict) and isinstance(ekm.get(au.get("name")), dict) \
+            and ekm[au["name"]].get("autoUpdate") is True:  # still ours: a hand edit since then is the user's choice
         backup(sp, dry, say)
         if au.get("added"):
             ekm.pop(au["name"])
@@ -467,6 +496,8 @@ def main():
                     help="opt-in (for max20): ultracode on by default, workflowSizeGuideline medium")
     ap.add_argument("--auto-update", action="store_true",
                     help="opt-in: turn on Claude Code's auto-update for yah's marketplace (off for third-party ones)")
+    ap.add_argument("--auto-merge", action="store_true",
+                    help="opt-in: `yah run` merges the green phase PRs it opened (merge commit, never squash)")
     ap.add_argument("--yes", action="store_true", help="no prompts")
     a = ap.parse_args()
     say = (lambda s: print("[dry-run] " + s)) if a.dry_run else print
@@ -486,9 +517,12 @@ def main():
         if edit_block(dest, f"{RULES[0]}\n{rules}\n{RULES[1]}", RULES, a.dry_run, say, "rules") is not None:
             record(state, "rules", dest, state_file, a.dry_run)
         return 0
-    if a.auto_update:  # on its own, so a yes here never touches a statusline the user kept
-        sp = claude_dir() / "settings.json"
-        auto_update(load_obj(sp), sp, state, state_file, a.dry_run, say)
+    if a.auto_update or a.auto_merge:  # on their own, so a yes here never touches a statusline the user kept
+        if a.auto_update:
+            sp = claude_dir() / "settings.json"
+            auto_update(load_obj(sp), sp, state, state_file, a.dry_run, say)
+        if a.auto_merge:
+            auto_merge(state, state_file, a.dry_run, say)
         return 0
 
     py = pick_python(a.python)
