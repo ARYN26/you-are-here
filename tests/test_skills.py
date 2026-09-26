@@ -197,6 +197,14 @@ class BeadsTests(unittest.TestCase):
                              "`ignored_plan`", "`state_md.path`", "no beads DB here"):
                     self.assertNotIn(gone, text, gone)
 
+    def test_resume_takes_the_base_yah_run_worked_out(self):
+        meta, text = parse(ROOT / "skills" / "resume" / "SKILL.md")
+        self.assertIn("[base=<branch>]", meta["argument-hint"])
+        self.assertIn("replaces the phase's `base` everywhere below", text)
+        # written back in both stores, so the next session reads it from the plan (beads adds nothing)
+        self.assertIn("`| base <branch>` on the STATE.md phase line", text)
+        self.assertIn("--set-metadata base=<branch>", text)
+
     def test_skills_read_the_state_key(self):
         for name in ("wrap", "resume"):
             with self.subTest(skill=name):

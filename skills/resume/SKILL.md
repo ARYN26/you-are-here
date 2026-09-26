@@ -1,7 +1,7 @@
 ---
 name: resume
 description: Headless step for yah run - one bounded slice of a phase, then wrap and a YAH-RESULT line.
-argument-hint: "[P<n>|#<pr>] [build|fix-checks|address-review]"
+argument-hint: "[P<n>|#<pr>] [build|fix-checks|address-review] [base=<branch>]"
 disable-model-invocation: true
 allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*), Bash(py -3 *scripts/where.py*), Bash(python3 *scripts/brain.py*), Bash(python *scripts/brain.py*), Bash(py -3 *scripts/brain.py*)
 ---
@@ -9,7 +9,7 @@ allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*)
 # Resume
 
 Arguments: $ARGUMENTS
-TARGET is a word like `P3` or `#12` (none means the current phase). MODE is `build` (default), `fix-checks` or `address-review`.
+TARGET is a word like `P3` or `#12` (none means the current phase). MODE is `build` (default), `fix-checks` or `address-review`. `base=<branch>` means yah run worked out the phase's base because the plan does not hold it: the phase below merged, or this phase stacks on it.
 
 No one is watching. Never ask a question or wait for an answer. A decision that needs the user becomes NEXT = `NEEDS-HUMAN: <one question>`, then you stop. Where /yah:wrap says to ask, offer or tell the user, put it in your final message instead.
 
@@ -24,6 +24,7 @@ Rules for the whole run:
 
 Run `where.py --json`. Pick the phase: TARGET `P<n>` is the `state.phases` entry with that `label`; none is `state.phase`, else `state.next_phase`. For `#<n>`, run `gh pr view <n> --json state,headRefName,baseRefName`; the phase is the entry whose `pr` is `#<n>` or `gh-<n>`, or whose `branch` is the PR's `headRefName`.
 - From the phase take `label`, `title`, `branch`, `base`, `pr` and `next` (NEXT). An empty `next` means the first step toward `title`.
+- A `base=<branch>` argument replaces the phase's `base` everywhere below: the branch is cut from it and the PR targets it. Write it to the phase when you wrap: `| base <branch>` on the STATE.md phase line, or `bd update <id> --set-metadata base=<branch>`.
 - Forbidden branches: everything in `protected` (trunks, the PROD branch, and where open PRs land).
 - Plan state is written where `store` says, as /yah:wrap does it. Run bd only as `store.bd`, quoted. Never set, export or follow `BEADS_DIR`, and never run bd against a database outside this repo.
 
@@ -33,7 +34,7 @@ If NEXT starts with `NEEDS-HUMAN:`, print `YAH-RESULT: needs-human` and stop. Ch
 
 ## 2. Get on the phase branch
 
-The branch is the PR's `headRefName`, else the phase `branch`, else the current `git.branch` if it is not forbidden. With none of these, write NEXT = `NEEDS-HUMAN: Which branch should <label> use?` via /yah:wrap and stop.
+The branch is the PR's `headRefName`, else the phase `branch`, else the current `git.branch` if it is not forbidden, not `base` and not another phase's `branch` (yah run leaves the finished phase's branch checked out). With none of these, write NEXT = `NEEDS-HUMAN: Which branch should <label> use?` via /yah:wrap and stop.
 - `git fetch origin`, then `git switch <branch>`. If it exists nowhere, `git switch -c <branch> origin/<base>` (no base: the remote's default branch).
 - Never work, commit or push on a forbidden branch. Never stash, reset or discard changes you did not make; if a dirty tree blocks the switch, end with `YAH-RESULT: blocked dirty tree`.
 

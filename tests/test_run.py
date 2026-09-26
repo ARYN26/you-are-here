@@ -56,7 +56,7 @@ with open(os.path.join(d, "script.json"), encoding="utf-8") as f:
 
 def step(key):
     seq = script.get(key) or [{}]
-    counter = os.path.join(d, key + ".count")
+    counter = os.path.join(d, re.sub(r"[^\w.-]", "_", key) + ".count")  # view-<branch> may hold a /
     n = int(open(counter).read()) if os.path.exists(counter) else 0
     with open(counter, "w") as f:
         f.write(str(n + 1))
@@ -70,8 +70,9 @@ def emit(ev):
 if role == "gh":
     if args[:2] == ["pr", "list"]:
         print(json.dumps(script.get("list", [])))
-    elif args[:2] == ["pr", "view"]:
-        print(json.dumps(step("view")))
+    elif args[:2] == ["pr", "view"]:  # view-<ref> scripts one PR; view scripts the rest
+        ref = "view-" + (args[2] if len(args) > 2 else "")
+        print(json.dumps(step(ref if ref in script else "view")))
     elif args[:2] == ["pr", "checks"]:
         c = step("required" if "--required" in args else "checks")
         sys.stdout.write(c.get("out", ""))
@@ -102,6 +103,8 @@ elif role == "claude":
             text = f.read()
         if c.get("close"):
             text = text.replace("- [~] P2", "- [x] P2")
+        for old, new in c.get("replace", []):
+            text = text.replace(old, new)
         if c.get("next"):
             text = re.sub(r"(?m)^- Next:.*$", "- Next: " + c["next"], text)
         with open("STATE.md", "w", encoding="utf-8", newline="") as f:
@@ -351,6 +354,112 @@ class RunTests(unittest.TestCase):
                 self.script(view=[view(state)])
                 self.assertIn(f"PR #12 is {state.lower()}", self.run_yah(repo, "#12", code=6))
                 self.assertEqual(self.calls("claude"), [])
+
+    # ------------------------------------------------------------ --plan
+
+    def assert_never_merged(self):
+        """--plan without auto_merge never asks gh to merge anything."""
+        self.assertFalse([a for a in self.calls("gh") if any("merge" in x for x in a)], self.calls("gh"))
+
+    def test_plan_chains_phases_until_the_plan_is_done(self):
+        state = STATE.replace("- [ ] P3 Emails", "- [ ] P3 Emails | branch checkout/emails")
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        p3 = "- [~] P3 Emails | branch checkout/emails"
+        self.script(list=[], required=[{"rc": 0}], **{
+            "view-12": [view()],
+            "view-13": [dict(view(), headRefName="checkout/emails", baseRefName="checkout/payment")],
+            "claude": [{"commit": True, "tag": "pr-open #12", "next": "Write the emails.",
+                        "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
+                       {"commit": True, "tag": "pr-open #13", "replace": [[p3, p3.replace("[~]", "[x]") + " | PR #13"]]}]})
+        out = self.run_yah(self.repo(state=state), "--plan", "--iterations", "1", code=0)  # the cap is per phase
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build", "/yah:resume P3 build base=checkout/payment"])
+        self.assertIn("P2 done: PR #12 open and green. Next: P3 on checkout/payment "
+                      "(stacked on P2's PR #12, still open)", out)
+        self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green. The merges are yours.", out)
+        self.assertIn("2 iterations", out)
+        self.assertEqual(len(list((self.data / "runs").glob("*-[12].jsonl"))), 2)  # per-run numbering, no clobber
+        self.assert_never_merged()
+
+    def test_plan_builds_on_where_a_stacked_parent_merged(self):
+        repo = self.repo(state=STATE.replace("| branch checkout/payment | base main",
+                                             "| branch checkout/payment | base checkout/cart"))
+        for state, base, arg in (("MERGED", "base    main (P1's PR #11 merged into it; the plan's base for P2 is "
+                                  "checkout/cart)", " base=main"),
+                                 ("OPEN", "base    checkout/cart (the plan's base for P2)", "")):
+            with self.subTest(state):
+                self.script(list=[], **{"view-11": [{"number": 11, "state": state, "baseRefName": "main"}]})
+                out = self.run_yah(repo, "--plan", "--dry-run", code=0)
+                self.assertIn(base, out)
+                self.assertIn(f"/yah:resume P2 build{arg}'", out)
+                self.assertIn("plan    P2 checkout/payment <- " + base.split()[1] + " | P3 (new branch) <- P2's branch;", out)
+                self.assertEqual(self.calls("claude"), [])
+
+    def test_plan_goes_on_past_a_merged_phase_but_not_a_closed_pr(self):
+        state = STATE.replace("- [~] P2 Payment form | branch checkout/payment | base main",
+                              "- [x] P2 Payment form | branch checkout/payment | base main | PR #12")
+        repo = self.repo(state=state)
+        self.script(list=[], required=[{"rc": 0}], **{
+            "view-12": [view("MERGED")], "view-13": [dict(view(), headRefName="checkout/emails")],
+            "claude": [{"commit": True, "tag": "pr-open #13", "replace": [["- [ ] P3", "- [x] P3"]]}]})
+        out = self.run_yah(repo, "--plan", "P2", code=0)
+        self.assertEqual(self.prompts(), ["/yah:resume P3 build base=main"])
+        self.assertIn("plan done: P2 PR #12 merged, P3 PR #13 green. The merges are yours.", out)
+        self.assert_never_merged()
+        self.script(list=[], **{"view-12": [view("CLOSED")]})
+        self.assertIn("PR #12 is closed.", self.run_yah(repo, "--plan", "P2", code=6))
+        self.assertEqual(self.calls("claude"), [])
+
+    def test_plan_refusals_and_trunk_start(self):
+        self.script(list=[])
+        repo = self.repo()
+        self.assertIn("TARGET must be P<n> or empty, not a PR", self.run_yah(repo, "--plan", "#12", code=5))
+        done = self.repo(name="done", state=STATE.replace("[~] P2", "[x] P2").replace("[ ] P3", "[x] P3"))
+        self.assertIn("--plan found no open phase", self.run_yah(done, "--plan", code=5))
+        trunk = self.repo("main", "trunk")  # the plan pins the phase, so a trunk checkout is fine
+        self.assertIn("target  current phase (phase P2)", self.run_yah(trunk, "--plan", "--dry-run", code=0))
+        self.assertIn("a trunk or the PROD branch", self.run_yah(trunk, code=5))
+        self.assertEqual(self.calls("claude"), [])
+
+    def test_plan_stacks_a_branchless_phase_on_the_open_pr_below(self):
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        pr12 = {"number": 12, "title": "P2", "headRefName": "checkout/payment", "baseRefName": "main", "isDraft": False,
+                "reviewDecision": "", "statusCheckRollup": [], "updatedAt": "2026-09-24T10:00:00Z"}
+        self.script(list=[pr12], required=[{"rc": 0}], **{
+            "view-12": [view()], "view-13": [dict(view(), headRefName="p3", baseRefName="checkout/payment")],
+            "claude": [{"commit": True, "tag": "pr-open #12",
+                        "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
+                       {"commit": True, "tag": "pr-open #13", "replace": [["- [~] P3", "- [x] P3"]]}]})
+        out = self.run_yah(self.repo(), "--plan", code=0)
+        # P2's branch is still checked out and gh lists its open PR: neither is P3's
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build", "/yah:resume P3 build base=checkout/payment"])
+        self.assertIn("Next: P3 on checkout/payment (stacked on P2's PR #12, still open)", out)
+        self.assertIn("checkout/payment", (self.fake / "claude.env").read_text("utf-8").split(","))
+
+    def test_plan_checks_the_stop_rules_before_the_next_phase(self):
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        self.script(list=[], required=[{"rc": 0}], **{"view-12": [view()], "claude": [
+            {"commit": True, "tag": "pr-open #12", "rate": {"utilization": 0.95, "resetsAt": time.time() + 86400},
+             "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]}]})
+        out = self.run_yah(self.repo(), "--plan", code=7)
+        self.assertIn("P2 done: PR #12 open and green", out)
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+
+    def test_plan_stops_at_a_you_phase_a_question_or_the_plan_end(self):
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        other = "\n## Plan: Admin (docs/plans/admin.md)\n- [ ] P1 Roles | base main\n- [ ] P3 Audit | base main\n"
+        cases = [("(you) phase", STATE.replace("- [ ] P3 Emails", "- [ ] P3 Emails: sign off the copy (you)"),
+                  {"tag": "pr-open #12"}, 2, "needs you: P3 (Emails: sign off the copy) is marked (you). "
+                  "So far: P2 PR #12 green."),
+                 ("a question", STATE, {"tag": "needs-human", "next": "NEEDS-HUMAN: SES or SendGrid?"}, 2,
+                  "needs you: NEEDS-HUMAN: SES or SendGrid? (P2's PR #12 is open and green.)"),
+                 ("another plan below", STATE.replace("- [ ] P3 Emails", "- [x] P3 Emails") + other,
+                  {"tag": "pr-open #12"}, 0, "plan done: P2 PR #12 green.")]
+        for i, (name, state, claude, code, text) in enumerate(cases):
+            with self.subTest(name):
+                self.script(list=[], required=[{"rc": 0}], **{"view-12": [view()], "claude": [
+                    dict(claude, commit=True, replace=[[p2, p2.replace("[~]", "[x]") + " | PR #12"]])]})
+                self.assertIn(text, self.run_yah(self.repo(name=f"shop{i}", state=state), "--plan", code=code))
+                self.assertEqual(len(self.calls("claude")), 1)
 
     def test_weekly_usage_stops_with_exit_7(self):
         repo, now = self.repo(), time.time()
