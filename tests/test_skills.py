@@ -148,6 +148,17 @@ class StampTests(unittest.TestCase):
         self.assertIn("next_stale", text)
         self.assertIn("stamped as in step 4", text)  # the next phase's NEXT too
 
+    def test_wrap_finish_line_points_an_open_phase_at_autopilot(self):
+        text = body("wrap")
+        finish = text.split("## 7. Finish with exactly this", 1)[1]
+        self.assertIn("when a plan phase is still open", finish)
+        self.assertIn("hands <phase label> to autopilot (a detached `yah run --plan`)", finish)
+        self.assertIn("`/yah:auto here` works it by hand", finish)
+        self.assertIn("With no plan phase open", finish)
+        self.assertEqual(finish.count("Safe to /clear."), 2)  # one line per case, both still say it
+        # every line of a fenced block is literal: no nested backticks around a whole finish line
+        self.assertNotIn("`Safe to /clear", finish)
+
     def test_phases_stamps_next(self):
         text = body("phases")
         self.assertIn('"next_sha":"<HEAD>"', text)
@@ -171,9 +182,83 @@ class AutoTests(unittest.TestCase):
         for name in ("yah:start", "yah:phases", "yah:wrap", "yah:deep"):
             self.assertIn(f"`{name}`", self.body)
 
+    def rows(self):
+        return [ln for ln in self.body.splitlines() if ln.startswith("| ") and "---" not in ln]
+
+    def row(self, start):
+        return next(i for i, ln in enumerate(self.rows()) if ln.startswith("| " + start))
+
+    def test_a_live_run_blocks_work_here_before_any_task(self):
+        rows, live, task = self.rows(), self.row("A live run in this checkout"), self.row("A task was given")
+        self.assertLess(live, task)  # a given task waits too: the run's sessions edit this tree
+        self.assertIn("`running for`", rows[live])
+        self.assertIn("wait for it, or end it", rows[live])
+        self.assertIn('scripts/run.py" --stop`', rows[live])
+        # after --stop the table is not read again: its open-phase row would start the run just ended
+        self.assertIn("never start the run you just ended", rows[live])
+        self.assertNotIn("read the state again", rows[live])
+
+    def test_allowed_tools_match_the_quoted_script_path(self):
+        tools = self.meta["allowed-tools"]
+        for py in ("python3", "python", "py -3"):  # the skill quotes the path: `PY ".../run.py" --stop`
+            self.assertIn(f"Bash({py} *scripts/run.py* --stop)", tools)
+            self.assertIn(f"Bash({py} *scripts/run.py* --detach)", tools)
+        self.assertNotIn("run.py --stop*", tools)  # never matched `run.py" --stop`
+        self.assertNotIn("Bash(python *scripts/run.py*)", tools)  # never a foreground run: it holds the session
+
+    def test_an_ended_run_is_asked_about_before_the_run_starts_again(self):
+        rows, ended, stopped = self.rows(), self.row("The RUN line says the run `ended` with exit 1"), \
+            self.row("The RUN line says the run `ended` with exit 130")
+        start = self.row("A plan with an open phase")
+        self.assertLess(self.row("NEXT starts with `NEEDS-HUMAN:`"), ended)  # exit 2 needs-human: answered first
+        self.assertLess(ended, start)
+        self.assertLess(stopped, start)
+        for code in ("1, 2, 3, 4 or 7", "`died`"):
+            self.assertIn(code, rows[ended])
+        self.assertIn("rerun it, `yah:deep` on why it stopped, or go on here by hand", rows[ended])
+        self.assertIn("offer waiting in place of deep", rows[ended])  # exit 7: a rerun stops again at once
+        self.assertIn("never restart it unasked", rows[stopped])
+        self.assertNotIn("**Start the run", rows[stopped])
+
+    def test_needs_human_writes_the_answer_into_next_then_starts_the_run(self):
+        row = self.rows()[self.row("NEXT starts with `NEEDS-HUMAN:`")]
+        self.assertIn("Ask that question as it is", row)
+        self.assertIn("`yah:wrap` with the answer", row)
+        self.assertIn("without `NEEDS-HUMAN:`", row)  # else the run's first session stops needs-human again
+        self.assertIn("**start the run**", row)
+
+    def test_an_open_phase_starts_the_detached_plan_run(self):
+        rows = self.rows()
+        row = rows[self.row("A plan with an open phase")]
+        self.assertIn("**Start the run.**", row)
+        self.assertNotIn("yah:start", row)  # autopilot: no foreground session work for an open phase
+        self.assertIn('scripts/run.py" --plan --detach`', self.body)
+        self.assertIn("`run.py <run.target> --detach`", self.body)
+        self.assertIn("never start a run in the foreground", self.body)
+        self.assertIn("If the tree is dirty", self.body)
+        self.assertIn("The task `here` opts out", self.body)
+        self.assertIn("other than `here`", rows[self.row("A task was given")])
+
+    def test_a_multi_pr_task_is_deep_checked_and_every_decision_asked_before_the_run(self):
+        rows = self.rows()
+        self.assertIn("**plan it** (section 3)", rows[self.row("A task was given")])
+        self.assertIn("Route the answer as a given task", rows[self.row("No plan and no NEXT")])
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        steps = ("Enter plan mode", "`yah:deep`", "AskUserQuestion", "`## Decisions`", "Then ExitPlanMode",
+                 "`yah:phases`", "**start the run**")
+        at = [plan.index(s) for s in steps]
+        self.assertEqual(at, sorted(at))  # deep-check, then ask everything, then exit, then track, then run
+        self.assertIn("before ExitPlanMode", plan)
+        self.assertIn("a `branch` and a `base`", plan)  # yah run --plan stops at a phase with no branch
+        self.assertIn("`NEEDS-HUMAN:` is only for what nobody could foresee", plan)
+        # never the old hands-on ending: an approved plan goes to the run, not a foreground first phase
+        self.assertNotIn("start its first phase", self.body)
+        self.assertNotIn("`yah:start`", plan)
+
     def test_deep_on_every_tier_and_merges_stay_the_users(self):
         self.assertIn("every plan tier", self.body)
-        self.assertIn("Never merge a PR", self.body)
+        self.assertIn("Never merge a PR yourself", self.body)
+        self.assertIn("Only the run driver merges, and only when `auto_merge` is on", self.body)
 
 
 class BeadsTests(unittest.TestCase):

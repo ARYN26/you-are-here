@@ -43,9 +43,9 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | Context guard | A UserPromptSubmit hook. It nudges once at the wrap mark, once at wrap now, once per session on a premium model, and once a day when weekly use runs ahead of pace. It never blocks. | One local Python run per prompt. A short message only when a nudge fires. |
 | Brain recall | A UserPromptSubmit hook. On a session's first prompt it injects the [brain](#the-brain) notes that match the prompt, the phase and your changed files. | 0 when the repo has no brain folder. Otherwise once per session, capped at about 2.5k tokens, usually a few hundred. Recall over 100 notes took about 80–130 ms. |
 | `/yah:where` | The full view in up to 15 lines: branch (with no upstream, how far ahead of its base), plan, phase, NEXT and whether commits have made it stale, what waits on you, the PR stack and the PROD warning. | Runs git, plus `gh` if installed, and `bd` only in a repo with `.beads/`. The output enters your context. |
-| `/yah:auto` | The launcher's first prompt, so a session starts without you typing. It reads the injected state and runs the step it calls for: continues NEXT through `/yah:start`, asks a `NEEDS-HUMAN` question, checks a PR that waits on you, fixes failing checks or review comments, tracks a newly approved plan with `/yah:phases`, sends a hard question to `/yah:deep` on any tier, and ends with `/yah:wrap`. With no plan it asks what to build; it never invents a task. | One turn to pick the step, then that step's own cost. Hidden from the model, so no listing cost. |
+| `/yah:auto` | The launcher's first prompt, so a session starts without you typing. It reads the injected state and runs the step it calls for. An open plan phase starts `yah run --plan --detach` (autopilot, which goes on after the session closes); `/yah:auto here` does the step hands-on through `/yah:start` instead. It reports a live run, and for one that ended offers a rerun, `/yah:deep` or hands-on work. It asks a `NEEDS-HUMAN` question, writes the answer into NEXT and starts the run again, checks a PR that waits on you, fixes failing checks or review comments, tracks a newly approved plan with `/yah:phases`, sends a hard question to `/yah:deep` on any tier, and ends with `/yah:wrap`. With no plan it asks what to build; it never invents a task. | One turn to pick the step, then that step's own cost. Hidden from the model, so no listing cost. |
 | `/yah:start` | Starts a task: restates the task, phase and first step from the injected state before any tool call, runs one recall on the task's key nouns, allows at most one targeted search, then makes the edit. Offers to create a brain folder if there is none. | One turn plus the recall output. |
-| `/yah:wrap` | Ends a task. Rewrites NEXT in STATE.md, ticks off finished items, writes at most one brain note, commits WIP on the feature branch, stamps NEXT with that commit and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear". | One turn in your session. Writes in your repo. |
+| `/yah:wrap` | Ends a task. Rewrites NEXT in STATE.md, ticks off finished items, writes at most one brain note, commits WIP on the feature branch, stamps NEXT with that commit and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear", and with a plan phase open, says `/yah:auto` hands it to autopilot. | One turn in your session. Writes in your repo. |
 | `/yah:phases` | Turns an approved plan into phases in STATE.md. | One turn. Writes in your repo. |
 | `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). Works on every tier: when the account cannot use Fable, Claude Code runs the agent on the session's model. | Fable usage. See the plan table. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
@@ -94,7 +94,7 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
    ```
    yah shop
    ```
-   It cds into the repo and starts `claude` with `/yah:auto` as the first prompt, so there is nothing to type: it continues NEXT, asks a `NEEDS-HUMAN` question, checks a PR that waits on you, or, with no plan, asks what to build. `yah shop add Apple Pay to the payment form` hands it that task instead. Flags go straight to `claude` with no prompt, e.g. `yah shop --resume <id>`. Run `yah` alone to list projects. If two repos share a folder name, `yah NAME` lists both and refuses; give one a key under `projects` in config.json. Starting from the home folder means project memory does not load. The SessionStart hook tells the model where you are.
+   It cds into the repo and starts `claude` with `/yah:auto` as the first prompt, so there is nothing to type: it starts or reports the detached `yah run` for an open phase (`yah shop here` works hands-on instead), asks a `NEEDS-HUMAN` question, checks a PR that waits on you, or, with no plan, asks what to build. `yah shop add Apple Pay to the payment form` hands it that task instead. Flags go straight to `claude` with no prompt, e.g. `yah shop --resume <id>`. Run `yah` alone to list projects. If two repos share a folder name, `yah NAME` lists both and refuses; give one a key under `projects` in config.json. Starting from the home folder means project memory does not load. The SessionStart hook tells the model where you are.
 2. **The step runs through the yah skills.** `/yah:auto` calls `/yah:start` for a task, `/yah:phases` when a new plan is approved, `/yah:deep` for a hard question and `/yah:wrap` at the end. You can call any of them yourself:
    ```
    /yah:start "add Apple Pay to the payment form"
@@ -108,7 +108,19 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
    ```
 5. **Resume.** The fresh session gets PLAN, PHASE and NEXT injected, so it starts on the next step without reading docs. After `/clear`, type `/yah:auto`; from a terminal, `yah shop` sends it for you. If the statusline says "cache cold", `/clear` beats resuming the old session.
 
-A new multi-phase plan was just approved? Run `/yah:phases` before its first phase. Want steps 2 to 5 repeated without you? See [`yah run`](#hands-free-runs-yah-run).
+A new multi-phase plan was just approved? Run `/yah:phases` before its first phase. Want steps 2 to 5 repeated without you? See [Autopilot](#autopilot).
+
+## Autopilot
+
+You decide at the start; the rest runs without you.
+
+1. **Give it the task.** `yah shop add Apple Pay and refunds`, or `yah shop` and answer what to build. A task that needs several PRs goes to plan mode. Claude explores, then drafts stacked phases, each with a done-when, a branch and a base. It sends the draft to `/yah:deep`, which lists the decisions and risks the plan leaves open.
+2. **Answer everything once.** Before it shows the plan, Claude asks you every one of those decisions, a few questions at a time, and writes the answers under `## Decisions` in the plan file. A headless session can still stop with a `NEEDS-HUMAN` question, but only for what nobody could foresee.
+3. **Approve the plan.** `/yah:phases` writes it to STATE.md and `/yah:auto` starts `yah run --plan --detach`. The session can close; the run goes on in fresh headless sessions, one phase after another (see [`yah run`](#hands-free-runs-yah-run)).
+4. **PRs.** With auto-merge off (the default), each green PR waits for you and the next phase stacks on its branch. With [auto-merge](#auto-merge-opt-in) on, the run merges each green PR it opened and builds the next phase on where it merged.
+5. **Check in.** `yah shop` or `/yah:where` shows the RUN line. While the run lives, `/yah:auto` only reports it and offers to end it. When it stops you get a desktop notification, and `/yah:auto` asks its `NEEDS-HUMAN` question and starts it again, or for a run that stopped offers a rerun, `/yah:deep` on why, or hands-on work.
+
+`yah shop here` opts out: an open phase runs in the session through `/yah:start`, as in the daily loop.
 
 ## The brain
 
@@ -158,10 +170,11 @@ Ranking is word overlap, not semantic search. The title counts 3, tags 2, the TL
 
 ## Hands-free runs: `yah run`
 
-Claude Code cannot `/clear` itself or start a new session from inside one. No hook, skill or tool can. So the wrap, clear, continue loop needs an outside driver, and `yah run` is that driver. Run it in a terminal, not inside Claude Code:
+Claude Code cannot `/clear` itself or start a new session from inside one. No hook, skill or tool can. So the wrap, clear, continue loop needs an outside driver, and `yah run` is that driver. Run it in a terminal, or start it from a session with `--detach`:
 
 ```
-yah run [TARGET] [--plan] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--model M] [--plugin-dir DIR] [--dry-run]
+yah run [TARGET] [--plan] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--model M] [--plugin-dir DIR] [--dry-run] [--detach]
+yah run --stop [--cwd DIR | --project NAME]
 ```
 
 Without the launcher, run `python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/run.py"` with the same arguments (`python` on Windows). Try `--dry-run` first.
@@ -175,6 +188,8 @@ Without the launcher, run `python3 "$HOME/.claude/plugins/marketplaces/you-are-h
 | `--budget USD` | `--max-budget-usd` per session. Default `run_budget_usd`, by tier (below). |
 | `--model M`, `--plugin-dir DIR` | Passed to `claude`. Without `--plugin-dir`, a run.py started from a yah checkout (not from `plugins/cache` or `plugins/marketplaces`) passes `--plugin-dir <checkout>` itself, so each session has `/yah:resume`. `--dry-run` prints which one it used. |
 | `--dry-run` | Prints the resolved argv, the DENY list, the caps and what it would do now. Spawns nothing, but still calls `gh`. |
+| `--detach` | Runs in the background and returns once the run has started (exit 0), or with the run's own exit code if it stopped first. On Windows it has no console window, so closing the terminal or ending the Claude Code session does not end it; elsewhere it gets its own session, so SIGHUP never reaches it. Its output goes to `<data dir>/runs/<project>-<time>.out` beside the `.log`. |
+| `--stop` | Ends the run going in this checkout: the driver, the session it is in and every process under them. The pid file then says exit 130, "ended by yah run --stop", so the RUN line shows the run ended. A session cut off mid-edit can leave uncommitted work in the tree. With no live run it says so and exits 0. `/yah:auto` offers it when a session starts in a checkout a run is working in. |
 
 **The loop.** Each iteration runs one headless session in the repo:
 
@@ -197,8 +212,10 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 | 3 | Stalled: HEAD and NEXT unchanged for 2 iterations in a row. |
 | 4 | The iteration cap, or `run_total_hours` of wall clock. |
 | 7 | Weekly usage at or over `run_week_stop_pct`, or more than `pace_slack` points ahead of pace. |
-| 5 | Refused: not a git repo, on a trunk or the PROD branch with no TARGET, `claude` not on PATH, `gh` missing, an invalid TARGET, a `P<n>` with no such phase, an unknown or ambiguous project, or no way to name the branch the PR targets (no base in the plan, no open PR, no `origin/HEAD` and no `prod` in config), so it cannot be protected. That last check also runs before each iteration. |
-| 1, 130 | run.py itself failed, or you pressed Ctrl-C. |
+| 5 | Refused: not a git repo, on a trunk or the PROD branch with no TARGET, `claude` not on PATH, `gh` missing, an invalid TARGET, a `P<n>` with no such phase, an unknown or ambiguous project, or no way to name the branch the PR targets (no base in the plan, no open PR, no `origin/HEAD` and no `prod` in config), so it cannot be protected. That last check also runs before each iteration. Also another run already going in this checkout (below). |
+| 1, 130 | run.py itself failed, or you pressed Ctrl-C or ran `yah run --stop`. |
+
+**One run per checkout.** A run holds a lock on `<data dir>/runs/<project>-<hash>.pid` (`<project>-<hash>@<worktree>.pid` in a linked worktree; the hash keeps two repos with one folder name apart), a JSON file with its pid, target, log and, once it stops, its exit code and reason. A second run in the same checkout is refused while the first lives. The OS drops the lock when the driver dies, so a pid file whose lock is free is a run that ended, even after a crash or a reboot. `/yah:where`, the session-start block and the statusline show it as the RUN line: while it runs, its target and the log's last line; once it ends, its exit code and reason (for 3 days), or `died` when it was killed before it could say.
 
 #### Whole plans: `--plan`
 

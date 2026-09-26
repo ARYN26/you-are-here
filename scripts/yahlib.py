@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -155,12 +156,178 @@ def project_key(main_root):
     return registered_key(main_root) or Path(main_root).name.lower()
 
 
+def root_tag(root):
+    """8 hex of sha1 of the root: tells apart repos that share a folder name."""
+    return hashlib.sha1(norm(root).encode("utf-8")).hexdigest()[:8]
+
+
 def where_cache_path(main_root):
-    """where-<key>.json for a config.json project, else where-<name>-<8 hex of sha1(root)>.json,
+    """where-<key>.json for a config.json project, else where-<name>-<root_tag>.json,
     so two repos with the same folder name never share a cache."""
-    name = registered_key(main_root) or "{}-{}".format(
-        Path(main_root).name.lower(), hashlib.sha1(norm(main_root).encode("utf-8")).hexdigest()[:8])
+    name = registered_key(main_root) or "{}-{}".format(Path(main_root).name.lower(), root_tag(main_root))
     return data_dir() / "where-{}.json".format(re.sub(r"[^\w.-]", "_", name))
+
+
+# ---------------------------------------------------------------- the `yah run` pid file
+
+LOCK_AT = 1 << 30  # Windows byte locks are mandatory, so the lock sits past the JSON and readers can still read it
+
+
+def run_pid_path(key, top, main_root):
+    """<data dir>/runs/<key>-<root_tag>.pid, so two repos with the same folder name never share a lock,
+    or <key>-<root_tag>@<worktree folder>.pid in a linked worktree: one `yah run` per checkout."""
+    root = main_root or top
+    name = f"{key}-{root_tag(root)}"
+    name = name if norm(top) == norm(root) else f"{name}@{Path(top).name}"
+    return data_dir() / "runs" / (re.sub(r"[^\w.@-]", "_", name) + ".pid")
+
+
+def _lock(fd, unlock=False):
+    """Try once to lock fd (or unlock it); True on success. The OS drops the lock when its process dies."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, LOCK_AT, 0)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK if unlock else msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _release(fd):
+    _lock(fd, unlock=True)  # at once: Windows may take a while to drop a lock on close
+    os.close(fd)
+
+
+def write_run(fd, data):
+    """Rewrite the pid file in place: it cannot be replaced while its run holds it open on Windows."""
+    try:
+        raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        os.lseek(fd, 0, 0)
+        os.write(fd, raw)
+        os.ftruncate(fd, len(raw))
+    except OSError:
+        pass
+
+
+def hold_run(path, data):
+    """Take the checkout's run lock and write data to its pid file. The fd, to keep open for the life of the run,
+    or None while another live run holds it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    for _ in range(5):  # a few tries: run_state (statusline, where.py, --detach's wait) holds the lock for a moment
+        if _lock(fd):
+            break
+        time.sleep(0.02)
+    else:
+        os.close(fd)
+        return None
+    write_run(fd, data)
+    return fd
+
+
+def end_run(path, data):
+    """Write an ended run's data to its pid file, holding the lock only while it writes. False while a live run
+    holds it."""
+    fd = hold_run(path, data)
+    if fd is None:
+        return False
+    _release(fd)
+    return True
+
+
+def run_held(path):
+    """Whether a live run holds the pid file's lock; None when the file cannot be opened."""
+    try:
+        fd = os.open(str(path), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    if _lock(fd):
+        _release(fd)
+        return False
+    os.close(fd)
+    return True
+
+
+def run_state(path):
+    """The pid file's data plus alive, whether its run still holds the lock. None with no pid file, or one caught
+    mid-write."""
+    data = read_json(path)
+    held = run_held(path) if isinstance(data, dict) else None
+    if held is None:
+        return None
+    data["alive"] = held
+    return data
+
+
+def run_status(st):
+    """live, ended or died. A run writes its code a moment before it lets go of the lock, so a code wins."""
+    return "ended" if "code" in st else "live" if st.get("alive") else "died"
+
+
+RUN_SHOW_S = 3 * 86400  # how long an ended run keeps its RUN line
+LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\d (\d\d:\d\d):\d\d ")
+
+
+def log_tail(path, size=4096):
+    """The log's last non-empty line, read from its end only: the statusline reads it on every refresh."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - size))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    return next((ln.strip() for ln in reversed(lines) if ln.strip()), "")
+
+
+def run_info(key, top, main_root, now=None):
+    """The checkout's `yah run` for the RUN line: run_state plus `last`, its log's last line, and for a run that
+    ended, `at`: when (for one that died without saying, its log's last write). None with no run, or one that
+    ended over RUN_SHOW_S ago."""
+    path, now = run_pid_path(key, top, main_root), now or time.time()
+    st = read_json(path)
+    if not isinstance(st, dict) or now - num(st.get("ended"), now) > RUN_SHOW_S:
+        return None  # long over: the statusline skips the lock probe and the log read on every refresh
+    held = run_held(path)
+    if held is None:
+        return None
+    st["alive"] = held
+    log = str(st.get("log") or "")
+    st["last"] = log_tail(log) if log else ""
+    if run_status(st) != "live":
+        at = num(st.get("ended"), None)
+        if at is None:
+            try:
+                at = os.path.getmtime(log)
+            except OSError:
+                at = num(st.get("started"), 0)
+        st["at"] = at
+        if now - at > RUN_SHOW_S:
+            return None
+    return st
+
+
+def ago(secs):
+    secs = max(0, int(secs))
+    return f"{max(1, secs // 60)}m" if secs < 3600 else f"{secs // 3600}h" if secs < 86400 else f"{secs // 86400}d"
+
+
+def run_text(st, now=None):
+    """The RUN line from run_info: a live run's target and last log line; an ended one's exit code and reason."""
+    now = now or time.time()
+    what = (st.get("target") or "current phase") + (" (--plan)" if st.get("plan") else "")
+    last = LOG_STAMP.sub(r"\1 ", st.get("last") or "")
+    last = f", last: {last}" if last else ""
+    status = run_status(st)
+    if status == "ended":
+        return f"{what} ended {ago(now - st['at'])} ago, exit {st['code']}: {st.get('reason') or '-'}"
+    if status == "live":
+        return f"{what} running for {ago(now - num(st.get('started'), now))}, pid {st.get('pid', '?')}{last}"
+    return f"{what} died {ago(now - st['at'])} ago without an exit code, pid {st.get('pid', '?')}{last}"
 
 
 # ---------------------------------------------------------------- subprocess

@@ -21,6 +21,8 @@ from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = ROOT / "scripts" / "run.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+import yahlib  # noqa: E402
 IS_WIN = os.name == "nt"
 NOTIFIER = "osascript" if sys.platform == "darwin" else "powershell" if IS_WIN else "notify-send"
 URL = "https://example.com/pr/12"
@@ -93,6 +95,8 @@ elif role == "claude":
     c = step("claude")
     with open(os.path.join(d, "claude.env"), "w", encoding="utf-8") as f:
         f.write(os.environ.get("YAH_PROTECTED", "-"))
+    with open(os.path.join(d, "claude.detached"), "w", encoding="utf-8") as f:
+        f.write(os.environ.get("YAH_RUN_DETACHED", "-"))
     emit({"type": "system", "subtype": "init", "permissionMode": c.get("mode", "auto")})
     for name, inp in c.get("tools", []):
         emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}})
@@ -252,6 +256,9 @@ class RunTests(unittest.TestCase):
         self.assertIn("--verbose", argv)
         self.assertIn("--max-budget-usd", argv)
 
+    def pidf(self, repo):
+        return self.data / "runs" / yahlib.run_pid_path("shop", str(repo), str(repo)).name
+
     def run_logs(self):
         return sorted((self.data / "runs").glob("*.log"))
 
@@ -275,6 +282,78 @@ class RunTests(unittest.TestCase):
                 self.assertIn(text, self.run_yah(cwd, *args, env=env, code=5))
         self.assertEqual(self.calls("claude"), [])
         self.assertFalse((self.data / "runs").exists())
+
+    # ------------------------------------------------------------ --detach and the pid file
+
+    def test_detach_returns_while_the_run_goes_on_and_holds_the_lock(self):
+        self.script(list=[], view=[view()], required=[{"rc": 0}],
+                    claude=[{"sleep": 6, "commit": True, "close": True, "next": "Start P3.", "tag": "pr-open #12"}])
+        repo = self.repo()
+        out = self.run_yah(repo, "--detach", code=0)
+        pidf = self.pidf(repo)
+        st = yahlib.run_state(pidf)
+        self.assertTrue(st and st["alive"], (st, out))
+        self.assertIn(f"run started in the background: P2, pid {st['pid']}", out)
+        self.assertNotIn("stop (exit", out)
+        self.assertEqual((st["target"], st["branch"], st["plan"]), ("P2", "checkout/payment", False))
+        busy = f"a run is already going in this checkout: pid {st['pid']}, P2"
+        self.assertIn(busy, self.run_yah(repo, code=5))
+        self.assertIn(busy, self.run_yah(repo, "--detach", code=5))
+        t = time.monotonic()
+        while st["alive"] and time.monotonic() - t < 60:
+            time.sleep(0.2)
+            st = yahlib.run_state(pidf) or st
+        self.assertFalse(st["alive"], "the background run did not end")
+        self.assertEqual((st["code"], st["reason"]), (0, GREEN))
+        self.assertIn("[yah] stop (exit 0): " + GREEN, Path(st["out"]).read_text("utf-8"))
+        self.assertIn("stop, exit 0: " + GREEN, Path(st["log"]).read_text("utf-8"))
+        self.assertEqual(Path(st["out"]).with_suffix(".log"), Path(st["log"]))
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+        self.assertEqual((self.fake / "claude.detached").read_text("utf-8"), "-")  # sessions never see the marker
+
+    def test_a_held_pid_file_refuses_and_a_stale_one_does_not(self):
+        self.script(view=[view()], required=[{"rc": 0}])
+        repo = self.repo()
+        pidf = self.pidf(repo)
+        fd = yahlib.hold_run(pidf, {"pid": 4242, "target": "P2", "log": "old.log"})
+        try:
+            for args in ([], ["--detach"]):
+                with self.subTest(args=args):
+                    out = self.run_yah(repo, *args, code=5)
+                    self.assertIn("already going in this checkout: pid 4242, P2, since ?, log old.log", out)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.calls("claude"), [])
+        self.assertEqual(self.run_logs(), [])
+        self.assertIn(GREEN, self.run_yah(repo, "#12", code=0))  # its holder is gone, so the lock is free
+        st = yahlib.run_state(pidf)
+        self.assertEqual((st["alive"], st["target"], st["code"], st["out"]), (False, "#12", 0, ""))
+        self.assertNotEqual(st["pid"], 4242)
+
+    def test_stop_ends_the_run_and_its_tree_and_writes_exit_130(self):
+        repo = self.repo()
+        self.assertIn("[yah] no run is going in this checkout.", self.run_yah(repo, "--stop", code=0))
+        self.assertIn("--stop takes only --cwd or --project", self.run_yah(repo, "P2", "--stop", code=5))
+        self.script(list=[], claude=[{"sleep": 60, "orphan": True}])
+        self.run_yah(repo, "--detach", code=0)
+        pidf, beat = self.pidf(repo), self.fake / "orphan.txt"
+        t = time.monotonic()
+        while not beat.exists() and time.monotonic() - t < 30:
+            time.sleep(0.1)
+        self.assertTrue(beat.exists(), "the session never started its child")
+        pid = yahlib.run_state(pidf)["pid"]
+        out = self.run_yah(repo, "--stop", code=0)
+        self.assertIn(f"[yah] run ended: pid {pid}, P2, log ", out)
+        self.assertLess(self.elapsed, 20)
+        st = yahlib.run_state(pidf)
+        self.assertEqual((st["alive"], st["code"], st["reason"]), (False, 130, "ended by yah run --stop."))
+        self.assertTrue(Path(st["log"]).read_text("utf-8").rstrip().endswith("stop, exit 130: ended by yah run --stop."))
+        size = beat.stat().st_size
+        time.sleep(1)
+        self.assertEqual(beat.stat().st_size, size, "the session's child outlived --stop")
+        text = yahlib.run_text(dict(st, at=st["ended"]))  # the RUN line
+        self.assertEqual(text, "P2 ended 1m ago, exit 130: ended by yah run --stop.")
+        self.assertIn("[yah] no run is going in this checkout.", self.run_yah(repo, "--stop", code=0))
 
     # ------------------------------------------------------------ exit 0 and MODE
 
@@ -403,13 +482,16 @@ class RunTests(unittest.TestCase):
             "claude": [{"commit": True, "tag": "pr-open #12", "next": "Write the emails.",
                         "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
                        {"commit": True, "tag": "pr-open #13", "replace": [[p3, p3.replace("[~]", "[x]") + " | PR #13"]]}]})
-        out = self.run_yah(self.repo(state=state), "--plan", "--iterations", "1", code=0)  # the cap is per phase
+        repo = self.repo(state=state)
+        out = self.run_yah(repo, "--plan", "--iterations", "1", code=0)  # the cap is per phase
         self.assertEqual(self.prompts(), ["/yah:resume P2 build", "/yah:resume P3 build base=checkout/payment"])
         self.assertIn("P2 done: PR #12 open and green. Next: P3 on checkout/payment "
                       "(stacked on P2's PR #12, still open)", out)
         self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green. The merges are yours.", out)
         self.assertIn("2 iterations", out)
         self.assertEqual(len(list((self.data / "runs").glob("*-[12].jsonl"))), 2)  # per-run numbering, no clobber
+        st = yahlib.run_state(self.pidf(repo))  # the RUN line names the phase it went on to
+        self.assertEqual((st["target"], st["plan"], st["code"]), ("P3", True, 0))
 
     def test_plan_builds_on_where_a_stacked_parent_merged(self):
         repo = self.repo(state=STATE.replace("| branch checkout/payment | base main",
@@ -791,6 +873,28 @@ class HelperTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("yah_run", RUN)
         cls.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.mod)
+
+    def test_run_lock_and_pid_file(self):
+        tmp = Path(tempfile.mkdtemp(prefix="yah-lock-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        pidf = tmp / "runs" / "shop.pid"
+        self.assertIsNone(yahlib.run_state(pidf))
+        fd = yahlib.hold_run(pidf, {"pid": 1, "reason": "long " * 50})
+        self.assertIsNotNone(fd)
+        self.assertIsNone(yahlib.hold_run(pidf, {"pid": 2}))  # a second fd conflicts even in the same process
+        self.assertEqual(yahlib.run_state(pidf), {"pid": 1, "reason": "long " * 50, "alive": True})
+        yahlib.write_run(fd, {"pid": 1, "code": 0})  # shorter than before: the old tail is cut
+        self.assertEqual(yahlib.run_state(pidf), {"pid": 1, "code": 0, "alive": True})
+        os.close(fd)
+        self.assertEqual(yahlib.run_state(pidf), {"pid": 1, "code": 0, "alive": False})
+        fd = yahlib.hold_run(pidf, {"pid": 3})
+        self.assertIsNotNone(fd)
+        os.close(fd)
+        main, other = (yahlib.run_pid_path("shop", str(tmp / d / "shop"), str(tmp / d / "shop")).name for d in "ab")
+        self.assertRegex(main, r"^shop-[0-9a-f]{8}\.pid$")
+        self.assertNotEqual(main, other)  # two repos with one folder name never share a lock
+        wt = yahlib.run_pid_path("shop", str(tmp / "wt 2"), str(tmp / "a" / "shop")).name
+        self.assertEqual(wt, main[:-4] + "@wt_2.pid")
 
     def test_targets_and_prod_branch(self):
         pt = self.mod.parse_target

@@ -31,8 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import beads  # noqa: E402
 from yahlib import (NO_WINDOW, claude_dir, config, data_dir, empty_state, find_git, find_tool,  # noqa: E402
-                    first_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs, run, short_of,
-                    utf8_stdout, where_cache_path, write_json)
+                    first_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs, run, run_info,
+                    run_status, run_text, short_of, utf8_stdout, where_cache_path, write_json)
 
 PR_FIELDS = "number,title,headRefName,baseRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt"
 FOOTER = ("This is the current state. Do not read docs to orient; /yah:where shows the full view. "
@@ -591,7 +591,8 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
          "gh_tried": proc is not None, "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
          "auto_merge": config()["auto_merge"],
          "bases": bases, "ancestors": near, "merged_in": merged, "next_stale": stale,
-         "aliases": aliases(str(top), plan.get("spec")) if infer else []}
+         "aliases": aliases(str(top), plan.get("spec")) if infer else [],
+         "run": run_info(key, str(top), str(main_root))}
     s["protected"] = protected(s)
     return s
 
@@ -652,7 +653,7 @@ def render(s, brief=False):
             lines.append(f"{sm['file']} {sm['head']}  NEXT {clip(sm['next'])}{swarn}")
         if not plan and b.get("in_progress"):  # no plan, so no NEXT line: still 6 lines at most
             lines.append("IN PROGRESS " + "; ".join(f"{i['id']} {i['title'][:60]}" for i in b["in_progress"][:2]))
-        tail = []
+        tail = [f"RUN {clip(run_text(s['run']), 120)}"] if s.get("run") else []  # in the tail: still 6 lines
         if prl:
             tail.append("PR " + prl[0])
         if b.get("human"):
@@ -700,6 +701,8 @@ def render(s, brief=False):
                 lines.append(f"DOING   {i['id']}  {i['title'][:70]}")
         if b.get("open_count"):
             lines.append(f"TASKS   {b['open_count']} open, no plan (/yah:phases after a plan is approved)")
+    if s.get("run"):
+        lines.append(f"RUN     {clip(run_text(s['run']))}")
     for i, h in enumerate((b.get("human") or [])[:2]):
         more = f"  (+{len(b['human']) - 2} more)" if i == 1 and len(b["human"]) > 2 else ""
         lines.append(("YOU     " if i == 0 else "        ") + f"{h['id']}  {h['title'][:64]}{more}")
@@ -772,8 +775,11 @@ def home_view(brief):
             what = "no plan"
         pr = (cache.get("prs") or {}).get(branch)
         prs = f"  PR #{pr['number']} {pr['checks']}" if pr else ""
+        ri = s.get("run")
+        status = run_status(ri) if ri else ""
+        run_ = f"  RUN exit {ri['code']}" if status == "ended" else f"  RUN {status}" if status else ""
         dirty = f" +{s['git']['dirty']}" if s["git"]["dirty"] else ""
-        lines.append(f"{key:<10} {clip(branch + dirty, 26):<26} {what}{prs}")
+        lines.append(f"{key:<10} {clip(branch + dirty, 26):<26} {what}{prs}{run_}")
     if len(lines) == 1:
         lines.append("(none yet: start Claude Code in a git repo once, or add projects to config.json)")
     return lines[:6] if brief else lines

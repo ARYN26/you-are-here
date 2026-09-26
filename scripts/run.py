@@ -1,7 +1,8 @@
 """run.py: `yah run`, which chains fresh headless sessions until the phase's PR is open and green.
 
     yah run [TARGET] [--plan] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--dry-run]
-            [--model M] [--plugin-dir DIR]
+            [--model M] [--plugin-dir DIR] [--detach]
+    yah run --stop [--cwd DIR | --project NAME]
 
 --plan goes on past exit 0: once a phase's PR is open and green (or merged) and the phase is closed, it
 pins the next open phase and runs that, until none is left ("plan done", exit 0). The iteration cap is per
@@ -36,8 +37,22 @@ matches sets the exit code:
     7  weekly usage at run_week_stop_pct or over pace + pace_slack
     8  PR merged by yah (auto_merge on; --plan goes on to the next phase instead)
     1  run.py itself failed
+  130  Ctrl-C, or ended by --stop
 
-Logs go to <data dir>/runs/. The driver writes nothing inside the repo.
+Logs go to <data dir>/runs/. The driver writes nothing inside the repo. Each run holds a lock on
+runs/<project>-<hash>.pid (<project>-<hash>@<worktree>.pid in a linked worktree), a JSON file with its pid, target, log and,
+once it stops, its exit code and reason; a second run in the same checkout is refused (exit 5). The OS drops the
+lock when the driver dies, so a pid file whose lock is free is a run that ended. where.py and the statusline show
+it as the RUN line (live: target and the log's last line; ended: exit code and reason) for 3 days.
+
+--detach starts the same command in the background (Windows: CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP, so
+closing the terminal cannot end it; elsewhere: its own session, so SIGHUP never reaches it). Its output goes to
+runs/<name>.out beside its .log. The caller returns 0 once the run holds the lock, or the run's own exit code if
+it stopped first, like a refusal.
+
+--stop ends the checkout's run: the driver, the session it is in and every process under them (taskkill /T on
+Windows; elsewhere the driver is frozen first, so it starts nothing while its tree is found). It then writes exit
+130 to the pid file, so the RUN line says the run ended. A session cut off mid-edit can leave uncommitted work.
 
 What a real `claude -p --output-format stream-json --verbose` stream carries (checked Sep 2026):
   events: system (subtypes hook_started, hook_response, init, thinking_tokens), assistant
@@ -66,11 +81,14 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import where  # noqa: E402
 from statusline import week_pace  # noqa: E402
-from yahlib import (NO_WINDOW, config, data_dir, find_git, find_tool, num, project_key, read_branch,  # noqa: E402
-                    read_json, run, utf8_stdout)
+from yahlib import (NO_WINDOW, config, data_dir, find_git, find_tool, end_run, hold_run, num,  # noqa: E402
+                    project_key, read_branch, read_json, run, run_pid_path, run_state, utf8_stdout, write_run)
 
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
 KEEP_RUNS = 20
+DETACH_WAIT_S = 60  # how long --detach waits for the background run to take its lock
+STOP_WAIT_S = 15  # how long --stop waits for the ended run to let go of its lock
+STOPPED = "ended by yah run --stop."
 TAG = re.compile(r"^\s*YAH-RESULT:\s*(.+?)\s*$", re.M)
 DENY_BASE = ["PowerShell", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push *--force*)", "Bash(git push * -f*)",
              "Bash(git push *+*)", "Bash(gh pr merge*)", "Bash(gh api *merge*)", "Bash(gh repo delete*)",
@@ -549,20 +567,30 @@ def descendants(pid):
     return found
 
 
-def kill_tree(proc):
+def end_tree(pid, freeze=False):
+    """Kill pid and every process under it (taskkill /T on Windows; elsewhere its descendants from `ps`, then its
+    process group). freeze stops pid first, so it starts nothing new while its tree is found."""
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15,
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=15,
                            creationflags=NO_WINDOW)
-        else:
-            for pid in descendants(proc.pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        if freeze:
+            os.kill(pid, signal.SIGSTOP)
+        leader = os.getpgid(pid) == pid  # read before the kill: its group holds children reparented away from it
+        for p in descendants(pid) + [pid]:
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+        if leader:
+            os.killpg(pid, signal.SIGKILL)
     except Exception:
         pass
+
+
+def kill_tree(proc):
+    end_tree(proc.pid)
     try:
         proc.kill()
     except Exception:
@@ -672,12 +700,12 @@ def log(r, line):
 
 
 def prune(runs):
-    """Keep the KEEP_RUNS newest runs: each .log and its per-iteration .jsonl files."""
+    """Keep the KEEP_RUNS newest runs: each .log, its --detach .out and its per-iteration .jsonl files."""
     try:
         logs = sorted(runs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
         for old in logs[KEEP_RUNS:]:
-            for f in [old, *runs.glob(old.stem + "-*.jsonl")]:
-                f.unlink()
+            for f in [old, old.with_suffix(".out"), *runs.glob(old.stem + "-*.jsonl")]:
+                f.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -767,6 +795,67 @@ def refuse(reason):
     return 5
 
 
+def busy(st):
+    st = st or {}
+    since = time.strftime("%H:%M", time.localtime(st["started"])) if st.get("started") else "?"
+    return (f"a run is already going in this checkout: pid {st.get('pid', '?')}, {st.get('target') or 'current phase'}"
+            f", since {since}, log {st.get('log', '?')}. Let it finish, or end it with `yah run --stop`.")
+
+
+def stop_run(pidf):
+    """--stop: end the checkout's run and everything under it, then write its exit code for the RUN line."""
+    st = run_state(pidf)
+    if not st or not st.get("alive"):
+        say("[yah] no run is going in this checkout.")
+        return 0
+    pid, what = int(num(st.get("pid"), 0)), st.get("target") or "current phase"
+    if pid > 0:
+        end_tree(pid, freeze=True)
+    t = time.monotonic()
+    while st.get("alive") and time.monotonic() - t < STOP_WAIT_S:
+        time.sleep(0.1)
+        st = run_state(pidf) or st  # None: caught mid-write
+    if st.get("alive"):
+        say(f"[yah] the run (pid {pid}, {what}) still holds its lock after {STOP_WAIT_S} s. End that pid by hand.")
+        return 1
+    if "code" not in st:  # it may have ended on its own just now: then its own code stands
+        st.pop("alive", None)
+        end_run(pidf, dict(st, ended=int(time.time()), code=130, reason=STOPPED))
+        log(SimpleNamespace(log=st.get("log") or None), f"stop, exit 130: {STOPPED}")
+    say(f"[yah] run ended: pid {pid}, {what}, log {st.get('log', '?')}")
+    return 0
+
+
+def detach(r, pidf, stem):
+    """--detach: start this same command in the background, where closing the terminal or ending the session does not
+    reach it, and return once it holds the run lock. The child knows itself by YAH_RUN_DETACHED, its log stem."""
+    st = run_state(pidf)
+    if st and st.get("alive"):
+        return refuse(busy(st))
+    out = Path(f"{stem}.out")
+    # DETACHED_PROCESS would leave it no console, so every claude, gh and git it starts would open a window.
+    kw = ({"creationflags": NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+          else {"start_new_session": True})
+    with open(out, "wb") as f:
+        proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+                                stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                                env=dict(os.environ, YAH_RUN_DETACHED=str(stem)), **kw)
+    t = time.monotonic()
+    while time.monotonic() - t < DETACH_WAIT_S:
+        st = run_state(pidf)
+        if st and st.get("alive") and st.get("stem") == str(stem):  # not proc.pid: a venv python.exe is a launcher
+            say(f"[yah] run started in the background: {r.label or r.target or 'current phase'}, pid {st.get('pid')}")
+            say(f"[yah] log {st.get('log')} | output {out}")
+            return 0
+        code = proc.poll()
+        if code is not None:  # it stopped before the caller saw it hold the lock: a refusal, or a run already done
+            say(out.read_text("utf-8", "replace").strip())
+            return code
+        time.sleep(0.1)
+    say(f"[yah] the background run (pid {proc.pid}) has not taken its lock after {DETACH_WAIT_S} s. Output: {out}")
+    return 1
+
+
 def no_base(r):
     who = f"phase {r.label}'s PR" if r.label else f"PR #{r.pr}" if r.pr else "this run's PR"
     return NO_BASE.format(who, (r.phase or {}).get("branch") or r.branch or "this branch")
@@ -829,7 +918,14 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="show the argv, DENY list, caps and evaluation")
     ap.add_argument("--model", help="passed to claude as --model")
     ap.add_argument("--plugin-dir", help="passed to claude as --plugin-dir (testing an uninstalled yah checkout)")
+    ap.add_argument("--detach", action="store_true", help="run in the background, output to <data dir>/runs/, and "
+                    "return once it has started")
+    ap.add_argument("--stop", action="store_true", help="end the run going in this checkout, and every process "
+                    "under it")
     a = ap.parse_args()
+    if a.stop and (a.target or a.plan or a.detach or a.dry_run or a.iterations is not None or a.budget is not None
+                   or a.model or a.plugin_dir):
+        return refuse("--stop takes only --cwd or --project.")
     cfg = config()
     target = parse_target(a.target)
     if target is None:
@@ -850,6 +946,9 @@ def main():
     if top is None:
         return refuse(f"not inside a git repo: {cwd}")
     key = project_key(main_root)
+    pidf = run_pid_path(key, str(top), main_root)
+    if a.stop:
+        return stop_run(pidf)
     pcfg = cfg["projects"].get(key) if isinstance(cfg["projects"].get(key), dict) else {}
     trunks = pcfg.get("trunks") or []
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
@@ -893,7 +992,16 @@ def main():
         return dry_run(r)
     runs = data_dir() / "runs"
     runs.mkdir(parents=True, exist_ok=True)
-    r.log = runs / "{}-{}.log".format(re.sub(r"[^\w.-]", "_", key), time.strftime("%Y%m%d-%H%M%S"))
+    child = os.environ.pop("YAH_RUN_DETACHED", "")  # popped, so no claude session it starts inherits it
+    stem = Path(child) if child else runs / "{}-{}".format(re.sub(r"[^\w.-]", "_", key), time.strftime("%Y%m%d-%H%M%S"))
+    if a.detach and not child:
+        return detach(r, pidf, stem)
+    r.log = Path(f"{stem}.log")
+    info = {"pid": os.getpid(), "stem": str(stem), "started": int(time.time()), "top": r.top, "branch": branch,
+            "target": r.label or target, "plan": a.plan, "log": str(r.log), "out": f"{stem}.out" if child else ""}
+    hold = hold_run(pidf, info)
+    if hold is None:
+        return refuse(busy(run_state(pidf)))
     r.log.touch()
     prune(runs)
     try:
@@ -904,6 +1012,8 @@ def main():
             if code is not None:
                 code, reason = advance(r, code, reason)
                 if code is None:  # a new phase: its own stop rules (hours, week, its PR) before its first session
+                    info["target"] = r.label  # the RUN line names the phase it is on
+                    write_run(hold, info)
                     continue
                 break
             if not r.base:  # the PR gh could not read names no base either
@@ -919,6 +1029,9 @@ def main():
             tell(r, line)
     except KeyboardInterrupt:
         code, reason = 130, "interrupted."
+    except Exception as e:  # a detached run has no terminal: the log, the notification and the pid file say it
+        code, reason = 1, f"run.py failed: {e}"
+    write_run(hold, dict(info, ended=int(time.time()), code=code, reason=reason))  # first: finish can fail
     finish(r, code, reason)
     return code
 
