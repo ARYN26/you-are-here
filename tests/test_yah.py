@@ -124,6 +124,12 @@ class Base(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         return out
 
+    def plugin_copy(self, where, rules=None):
+        shutil.copytree(SCRIPTS, where / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+        if rules is not None:
+            (where / "RULES.md").write_text(rules, encoding="utf-8")
+        return where / "scripts"
+
     def transcript(self, tokens):
         f = self.tmp / f"t{tokens}.jsonl"
         rec = {"type": "assistant", "message": {"usage": {"input_tokens": 10, "cache_read_input_tokens": tokens - 10}}}
@@ -216,9 +222,9 @@ class StatuslineTests(Base):
 # ---------------------------------------------------------------- context guard
 
 class GuardTests(Base):
-    def guard(self, tokens=0, prompt="go on", sid="g1"):
+    def guard(self, tokens=0, prompt="go on", sid="g1", scripts=SCRIPTS):
         d = {"session_id": sid, "prompt": prompt, "transcript_path": self.transcript(tokens) if tokens else ""}
-        out, err, rc = self.py("context_guard.py", stdin=json.dumps(d))
+        out, err, rc = self.py("context_guard.py", stdin=json.dumps(d), scripts=scripts)
         self.assertEqual((rc, err), (0, ""))
         return json.loads(out) if out.strip() else None
 
@@ -277,6 +283,31 @@ class GuardTests(Base):
         ctx = self.guard(sid="u2")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("under 5 agents", ctx)
         self.assertNotIn("high over xhigh", ctx)
+
+    def cached(self, name):
+        """A copy of yah in the plugin cache, laid out as Claude Code installs it. Returns its scripts folder."""
+        return self.plugin_copy(self.cfg / "plugins" / "cache" / "you-are-here" / "yah" / name)
+
+    def installed(self, scripts):
+        (self.cfg / "plugins" / "installed_plugins.json").write_text(json.dumps(
+            {"version": 2, "plugins": {"yah@you-are-here": [{"scope": "user", "installPath": str(scripts.parent)}]}}),
+            encoding="utf-8")
+
+    def test_outdated_copy_tells_the_user_once_per_session(self):
+        old, new = self.cached("aaa"), self.cached("bbb")
+        self.installed(old)
+        self.assertIsNone(self.guard(sid="o1", scripts=old))  # the installed copy
+        self.assertIsNone(self.guard(sid="o1"))  # --plugin-dir checkout: nothing installed beside it
+        self.installed(new)  # an update lands mid-session
+        want = {"systemMessage": "yah was updated: run /reload-plugins (or /exit and restart) to load it."}
+        self.assertEqual(self.guard(sid="o1", scripts=old), want)  # the user only; nothing for the model
+        self.assertIsNone(self.guard(sid="o1", scripts=old))
+        self.assertIsNone(self.guard(sid="o2", prompt="/reload-plugins", scripts=old))
+        self.assertEqual(self.guard(sid="o2", scripts=old), want)  # again after /clear
+        self.assertIsNone(self.guard(sid="o3", scripts=new))
+        (self.cfg / "plugins" / "installed_plugins.json").write_text("[]", encoding="utf-8")
+        r = self.guard(210_000, sid="o4", scripts=old)  # unreadable: no notice, other nudges intact
+        self.assertEqual(r["systemMessage"], "Context 210k: wrap now (/yah:wrap, then /clear).")
 
 
 # ---------------------------------------------------------------- where.py
@@ -1012,12 +1043,6 @@ class SetupTests(Base):
 
     def backups(self):
         return list(self.cfg.glob("settings.json.bak-yah-*"))
-
-    def plugin_copy(self, where, rules=None):
-        shutil.copytree(SCRIPTS, where / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
-        if rules is not None:
-            (where / "RULES.md").write_text(rules, encoding="utf-8")
-        return where / "scripts"
 
     def test_dry_run_writes_nothing(self):
         self.settings(self.SETTINGS)
