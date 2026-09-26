@@ -274,11 +274,27 @@ class GuardTests(Base):
         self.assertIsNone(self.guard(sid="g5"))  # once a day, across sessions
 
     def test_ultracode_rules_once_per_session(self):
+        self.config(ultracode="true")  # only a JSON true turns it on
+        self.assertIsNone(self.guard(sid="u0"))
         self.config(ultracode=True)
         r = self.guard(sid="u1")
-        self.assertIn("Ultracode is on", r["hookSpecificOutput"]["additionalContext"])
+        ctx = r["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("[yah] Ultracode is on."))
+        for want in ("lookups on sonnet at low effort", "mechanical stages on opus at medium",
+                     "research and judges on opus at high", "Keep fable out of workflows", "/yah:deep",
+                     "agent count and rough $ cost", "one schema", "branch and PROD rules", "One verifier per finding",
+                     "1,500 characters"):
+            self.assertIn(want, ctx)
+        self.assertLessEqual(len(ctx.split()), 120)
         self.assertNotIn("systemMessage", r)  # model-only: nothing shown to the user
         self.assertIsNone(self.guard(sid="u1"))
+        self.config(ultracode=True, roles={"critic": "mythos high", "scout": "haiku max"})
+        ctx = self.guard(sid="u3")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Keep mythos out of workflows", ctx)
+        self.assertIn("lookups on haiku at low effort", ctx)  # max is refused: the role's default effort
+        self.assertNotIn("fable", ctx)
+        self.config(ultracode=True, roles={"critic": "opus xhigh"})  # the critic shares a workflow model
+        self.assertNotIn("out of workflows", self.guard(sid="u4")["hookSpecificOutput"]["additionalContext"])
         self.state("u2", week=60, pace=30, tokens=1000)
         ctx = self.guard(sid="u2")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("under 5 agents", ctx)
@@ -308,6 +324,45 @@ class GuardTests(Base):
         (self.cfg / "plugins" / "installed_plugins.json").write_text("[]", encoding="utf-8")
         r = self.guard(210_000, sid="o4", scripts=old)  # unreadable: no notice, other nudges intact
         self.assertEqual(r["systemMessage"], "Context 210k: wrap now (/yah:wrap, then /clear).")
+
+
+class RolesTests(Base):
+    def lib(self, **cfg):
+        """A fresh yahlib (nothing cached) reading this config.json."""
+        self.config(**cfg)
+        patcher = mock.patch.dict(os.environ, self.env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        spec = importlib.util.spec_from_file_location("yah_lib", SCRIPTS / "yahlib.py")
+        lib = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lib)
+        return lib
+
+    def test_defaults(self):
+        lib = self.lib()
+        self.assertEqual({name: lib.role(name) for name in lib.ROLES},
+                         {"main": ("opus", "high"), "scout": ("sonnet", "low"), "mechanical": ("opus", "medium"),
+                          "judge": ("opus", "high"), "critic": ("fable", "high")})
+        self.assertEqual(lib.role("nope"), ("opus", "high"))  # an unknown role gets main's
+        self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
+        self.assertIs(lib.config()["ultracode"], False)
+
+    def test_user_roles_merge_one_at_a_time(self):
+        lib = self.lib(roles={"critic": "opus high"}, critic_week_skip_pct=60, ultracode=True)
+        self.assertEqual(lib.role("critic"), ("opus", "high"))
+        self.assertEqual(lib.role("scout"), ("sonnet", "low"))
+        self.assertEqual(lib.config()["critic_week_skip_pct"], 60)
+        self.assertIs(lib.config()["ultracode"], True)
+
+    def test_max_and_junk_fall_back_to_the_role_default(self):
+        lib = self.lib(roles={"critic": "opus max", "judge": "Sonnet", "scout": 5, "main": "haiku turbo",
+                              "mechanical": ""}, critic_week_skip_pct="lots", ultracode=1)
+        self.assertEqual({name: lib.role(name) for name in lib.ROLES},
+                         {"critic": ("opus", "high"), "judge": ("sonnet", "high"), "scout": ("sonnet", "low"),
+                          "main": ("haiku", "high"), "mechanical": ("opus", "medium")})
+        self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
+        self.assertIs(lib.config()["ultracode"], False)
+        self.assertEqual(self.lib(roles="fable max").role("critic"), ("fable", "high"))
 
 
 # ---------------------------------------------------------------- where.py
