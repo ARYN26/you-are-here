@@ -84,7 +84,7 @@ If this project's auto-memory index (`MEMORY.md` in its memory folder under `$CL
 
 The phase's done-when in the plan file (`state.plan.spec`: the path in `## Plan: <name> (<path>)`, or the epic's `spec_id`) is met and the tests pass.
 1. Review the branch diff: run `/code-review --fix`, then `/simplify`, if available. Re-run the tests.
-2. Push the feature branch. Never push a branch in `protected`.
+2. Push the feature branch in a Bash call of its own, with nothing chained to it; open the PR in the next call. Never push a branch in `protected`.
 3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body. Move the phase's log lines into the body.
 4. Record it. STATE.md: mark the phase `[x]`, add `| PR #<N>` and delete its log lines. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open"`.
 5. Claim the next phase and give it a NEXT line, stamped as in step 4. STATE.md: mark it `[~]`. Beads: `bd update <next-id> --claim`.

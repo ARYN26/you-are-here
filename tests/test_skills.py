@@ -138,6 +138,14 @@ class RunnerTests(unittest.TestCase):
                 if "`PY` is" in text:
                     self.assertIn("`py -3` only if both fail", text)
 
+    def test_push_runs_alone_since_deny_globs_match_the_whole_line(self):
+        # E2E 2026-09-26: `git push ... && gh pr create --body "$(cat <<'EOF' ...)"` with a `+` in the body hit
+        # `Bash(git push *+*)`, since a line Claude Code cannot split is matched whole
+        self.assertIn('"Bash(git push *+*)"', (ROOT / "scripts/run.py").read_text("utf-8"))
+        self.assertIn("as a Bash call of its own: nothing chained before or after it, not even `&& gh pr create`",
+                      body("resume"))
+        self.assertIn("Push the feature branch in a Bash call of its own, with nothing chained to it", body("wrap"))
+
 
 class StampTests(unittest.TestCase):
     def test_wrap_stamps_next_and_reads_the_stale_flag(self):
