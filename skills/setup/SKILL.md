@@ -26,9 +26,9 @@ Run `setup.py --tier <tier> --dry-run` and show the output verbatim. It writes n
 
 On yes, run `setup.py --tier <tier> --yes` and show the output. The statusline shows from the next render.
 
-## 3b. Ultracode by default (max20 only, optional)
+## 3b. Quality profile (max20 only, optional)
 
-Only when the tier is `max20`, offer: "Turn ultracode on for every session? It runs xhigh effort with workflows, which costs more per turn. yah keeps it lean: workflows capped at medium size (<10 agents), and a once-per-session rule to use workflows only for genuinely parallel work, with low or medium effort for mechanical stages." On yes, run `setup.py --ultracode --yes` and show the output. `--uninstall` restores the previous values.
+Only when the tier is `max20`, offer: "Turn on the quality profile? Every session starts with ultracode on, which runs xhigh effort with workflows and costs more per turn. `yah run` sessions build at high effort, and each phase gets one critique of its plan before the build and one merge-blocker judge on its green PR, both on Fable (on Opus once Fable's weekly bar is at 50%). yah keeps it lean: workflows capped at medium size (<10 agents), and a once-per-session rule to use workflows only for genuinely parallel work, with the model and effort for each job taken from `roles` in config.json." On yes, run `setup.py --ultracode --yes` and show the output. It changes nothing else. `--uninstall` restores the previous values.
 
 ## 3c. Auto-update (optional)
 

@@ -4,7 +4,7 @@
   context >= wrap_now    "wrap now"
   premium main model     once per session (config.json premium_models)
   weekly % more than pace_slack points ahead of the week's elapsed share: once a day
-  ultracode on (config.json, set by setup.py --ultracode): workflow sizing rules, once per session
+  ultracode on (config.json, set by setup.py --ultracode): workflow sizing rules from config roles, once per session
   a newer yah installed while this session runs the old copy: once per session, until reload
 
 Thresholds come from config.json and its tier preset. Context size comes from the
@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import config, data_dir, plugin_outdated, read_json, utf8_stdout, write_json  # noqa: E402
+from yahlib import config, data_dir, plugin_outdated, read_json, role, utf8_stdout, write_json  # noqa: E402
 
 TAIL_BYTES = 600_000
 SKIP = ("/yah:wrap", "/clear", "/compact", "/exit", "/reload-plugins")
@@ -49,6 +49,19 @@ def transcript_tokens(path):
         if n:
             return n
     return None
+
+
+def ultracode_text():
+    """The workflow sizing rule, with each model and effort taken from config.json roles."""
+    scout, mech, judge, critic, main = (role(r) for r in ("scout", "mechanical", "judge", "critic", "main"))
+    keep = (f"Keep {critic[0]} out of workflows: it runs only as yah run's per-phase critic and judge, or /yah:deep "
+            "when asked. ") if critic[0] not in (scout[0], mech[0], judge[0], main[0]) else ""
+    return ("[yah] Ultracode is on. Questions, single-file edits and reviews of a few files stay in the main thread "
+            "(/code-review for small reviews). Use a workflow only for genuinely parallel work, one agent per "
+            f"independent unit: lookups on {scout[0]} at {scout[1]} effort, mechanical stages on {mech[0]} at "
+            f"{mech[1]}, research and judges on {judge[0]} at {judge[1]}. {keep}Before a Workflow call, give one "
+            "line with its agent count and rough $ cost. Reuse one schema across its agents, and put the branch and "
+            "PROD rules in their prompts. One verifier per finding; reports of 1,500 characters or fewer.")
 
 
 def main():
@@ -99,13 +112,10 @@ def main():
                          "work suggest a fresh session on a standard model, and use /yah:deep for single hard questions.")
         to_user.append(f"Main thread is {name} (premium). Keep it short.")
 
-    ultra = bool(cfg["ultracode"])
+    ultra = cfg["ultracode"]
     if ultra and not flags.get("ultra"):
         flags["ultra"] = True
-        to_claude.append("[yah] Ultracode is on. Questions, single-file edits and reviews of a few files stay in the "
-                         "main thread (/code-review for small reviews). Use a workflow only for genuinely parallel "
-                         "work: one agent per independent unit, low or medium effort for mechanical stages, high for "
-                         "research and judges, one verifier per finding, reports of 1,500 characters or fewer.")
+        to_claude.append(ultracode_text())
 
     if event == "UserPromptSubmit" and not flags.get("outdated") and plugin_outdated():
         flags["outdated"] = True
