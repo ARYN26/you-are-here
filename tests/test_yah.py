@@ -179,6 +179,23 @@ class StatuslineTests(Base):
         rl["seven_day"]["used_percentage"] = 60
         self.assertIn(f"{RED}wk 60%", self.line(rate_limits=rl))
 
+    def test_extra_pools_saved_to_state_and_limits_json(self):
+        now = time.time()
+        rl = {"seven_day_fable": {"used_percentage": 12, "resets_at": now + 86400},  # a guessed key name
+              "seven_day_opus": {"used_percentage": 70}, "odd": "not a pool", "blank": {"resets_at": now}}
+        out = self.line(rate_limits=rl)
+        self.assertNotIn("fable", out)  # under 50%: saved, not shown
+        want = {"seven_day_fable": {"used_pct": 12, "resets_at": round(now + 86400)},
+                "seven_day_opus": {"used_pct": 70, "resets_at": None}}
+        self.assertEqual(json.loads((self.data / "state-s1.json").read_text("utf-8"))["pools"], want)
+        lim = json.loads((self.data / "limits.json").read_text("utf-8"))
+        self.assertEqual((lim["pools"], lim["five_hour"]["used_pct"], lim["seven_day"]["used_pct"]), (want, None, None))
+        (self.data / "limits.json").write_text(json.dumps(dict(lim, ts=1)), encoding="utf-8")
+        rl["seven_day_fable"]["used_percentage"] = 55  # a pool change alone rewrites it
+        self.assertIn(f"{AMBER}wk fable 55%", self.line(rate_limits=rl))
+        lim = json.loads((self.data / "limits.json").read_text("utf-8"))
+        self.assertEqual((lim["pools"]["seven_day_fable"]["used_pct"], lim["ts"] != 1), (55, True))
+
     def test_premium_tag(self):
         out = self.line(model=("claude-fable-5-1", "Fable 5.1"))
         self.assertIn(" FABLE ", out)
@@ -274,11 +291,27 @@ class GuardTests(Base):
         self.assertIsNone(self.guard(sid="g5"))  # once a day, across sessions
 
     def test_ultracode_rules_once_per_session(self):
+        self.config(ultracode="true")  # only a JSON true turns it on
+        self.assertIsNone(self.guard(sid="u0"))
         self.config(ultracode=True)
         r = self.guard(sid="u1")
-        self.assertIn("Ultracode is on", r["hookSpecificOutput"]["additionalContext"])
+        ctx = r["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("[yah] Ultracode is on."))
+        for want in ("lookups on sonnet at low effort", "mechanical stages on opus at medium",
+                     "research and judges on opus at high", "Keep fable out of workflows", "/yah:deep",
+                     "agent count and rough $ cost", "one schema", "branch and PROD rules", "One verifier per finding",
+                     "1,500 characters"):
+            self.assertIn(want, ctx)
+        self.assertLessEqual(len(ctx.split()), 120)
         self.assertNotIn("systemMessage", r)  # model-only: nothing shown to the user
         self.assertIsNone(self.guard(sid="u1"))
+        self.config(ultracode=True, roles={"critic": "mythos high", "scout": "haiku max"})
+        ctx = self.guard(sid="u3")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Keep mythos out of workflows", ctx)
+        self.assertIn("lookups on haiku at low effort", ctx)  # max is refused: the role's default effort
+        self.assertNotIn("fable", ctx)
+        self.config(ultracode=True, roles={"critic": "opus xhigh"})  # the critic shares a workflow model
+        self.assertNotIn("out of workflows", self.guard(sid="u4")["hookSpecificOutput"]["additionalContext"])
         self.state("u2", week=60, pace=30, tokens=1000)
         ctx = self.guard(sid="u2")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("under 5 agents", ctx)
@@ -308,6 +341,47 @@ class GuardTests(Base):
         (self.cfg / "plugins" / "installed_plugins.json").write_text("[]", encoding="utf-8")
         r = self.guard(210_000, sid="o4", scripts=old)  # unreadable: no notice, other nudges intact
         self.assertEqual(r["systemMessage"], "Context 210k: wrap now (/yah:wrap, then /clear).")
+
+
+class RolesTests(Base):
+    def lib(self, **cfg):
+        """A fresh yahlib (nothing cached) reading this config.json."""
+        self.config(**cfg)
+        patcher = mock.patch.dict(os.environ, self.env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        spec = importlib.util.spec_from_file_location("yah_lib", SCRIPTS / "yahlib.py")
+        lib = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lib)
+        return lib
+
+    def test_defaults(self):
+        lib = self.lib()
+        self.assertEqual({name: lib.role(name) for name in lib.ROLES},
+                         {"main": ("opus", "high"), "scout": ("sonnet", "low"), "mechanical": ("opus", "medium"),
+                          "judge": ("opus", "high"), "critic": ("fable", "high")})
+        self.assertEqual(lib.role("nope"), ("opus", "high"))  # an unknown role gets main's
+        self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
+        self.assertIs(lib.config()["ultracode"], False)
+
+    def test_user_roles_merge_one_at_a_time(self):
+        lib = self.lib(roles={"critic": "opus high"}, critic_week_skip_pct=60, ultracode=True)
+        self.assertEqual(lib.role("critic"), ("opus", "high"))
+        self.assertEqual(lib.role("scout"), ("sonnet", "low"))
+        self.assertEqual(lib.config()["critic_week_skip_pct"], 60)
+        self.assertIs(lib.config()["ultracode"], True)
+
+    def test_max_and_junk_fall_back_to_the_role_default(self):
+        lib = self.lib(roles={"critic": "opus max", "judge": "Sonnet", "scout": 5, "main": "haiku turbo",
+                              "mechanical": ""}, critic_week_skip_pct="lots", ultracode=1)
+        self.assertEqual({name: lib.role(name) for name in lib.ROLES},
+                         {"critic": ("opus", "high"), "judge": ("sonnet", "high"), "scout": ("sonnet", "low"),
+                          "main": ("haiku", "high"), "mechanical": ("opus", "medium")})
+        self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
+        self.assertIs(lib.config()["ultracode"], False)
+        self.assertEqual(self.lib(roles="fable max").role("critic"), ("fable", "high"))
+        lib = self.lib(roles={"critic": "max", "judge": "xhigh"})  # an effort alone keeps the role's model
+        self.assertEqual((lib.role("critic"), lib.role("judge")), (("fable", "high"), ("opus", "xhigh")))
 
 
 # ---------------------------------------------------------------- where.py
@@ -1123,19 +1197,52 @@ class SetupTests(Base):
 
     def test_ultracode_opt_in_and_uninstall(self):
         self.settings({**self.SETTINGS, "workflowSizeGuideline": "small"})
-        out, err, rc = self.setup_py("--tier", "max20", "--ultracode", "--yes")
-        self.assertEqual(rc, 0, err)
-        s = self.settings()
-        self.assertEqual((s["ultracode"], s["workflowSizeGuideline"]), (True, "medium"))
-        self.assertEqual({k: s[k] for k in self.SETTINGS}, self.SETTINGS)  # model, effort, env untouched
-        self.assertTrue(json.loads((self.data / "config.json").read_text("utf-8"))["ultracode"])
-        self.assertIn("ultracode  unchanged", self.setup_py("--ultracode", "--yes")[0])
-        self.setup_py("--uninstall")
-        s = self.settings()
-        self.assertNotIn("ultracode", s)
-        self.assertEqual(s["workflowSizeGuideline"], "small")
+        for prior in (None, False, "true"):  # absent, off, and a string that never counted as on
+            with self.subTest(prior=prior):
+                cfg = {"tier": "max20", **({} if prior is None else {"ultracode": prior})}
+                self.config(**cfg)
+                out, err, rc = self.setup_py("--ultracode", "--yes")
+                self.assertEqual(rc, 0, err)
+                s = self.settings()
+                self.assertEqual((s["ultracode"], s["workflowSizeGuideline"]), (True, "medium"))
+                self.assertEqual({k: s[k] for k in self.SETTINGS}, self.SETTINGS)  # model, effort, env untouched
+                self.assertEqual(self.read_config(), {**cfg, "ultracode": True})
+                self.assertIn("ultracode  unchanged", self.setup_py("--ultracode", "--yes")[0])
+                out, err, rc = self.setup_py("--uninstall")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("ultracode  config " + ("removed" if prior is None else "restored"), out)
+                self.assertEqual(self.read_config(), cfg)
+                s = self.settings()
+                self.assertNotIn("ultracode", s)
+                self.assertEqual(s["workflowSizeGuideline"], "small")
 
-    GH = {"source": "github", "repo": "ARYN26/you-are-here"}
+    def test_ultracode_alone_leaves_a_declined_statusline(self):
+        mine = dict(self.SETTINGS, statusLine={"type": "command", "command": "echo mine"})
+        self.settings(mine)
+        out, err, rc = self.setup_py("--ultracode", "--yes")  # --yes must not reach the statusline
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("statusLine", out)
+        self.assertEqual(self.settings(), {**mine, "ultracode": True, "workflowSizeGuideline": "medium"})
+        self.assertEqual(self.read_config(), {"ultracode": True})  # no tier: install never ran
+
+    def test_ultracode_uninstall_resets_an_older_setups_config(self):
+        self.settings(self.SETTINGS)
+        self.setup_py("--ultracode")
+        state = self.data / "setup-state.json"
+        old = json.loads(state.read_text("utf-8"))
+        old.pop("ultracodeConfig")  # an older setup kept no record of config ultracode
+        state.write_text(json.dumps(old), encoding="utf-8")
+        self.setup_py("--uninstall")
+        self.assertEqual(self.read_config(), {})
+
+    def test_ultracode_uninstall_keeps_a_config_ultracode_the_user_set(self):
+        self.settings(self.SETTINGS)
+        self.config(ultracode=True)  # on before setup: the settings change alone must not read as an older setup
+        self.assertEqual(self.setup_py("--ultracode", "--yes")[2], 0)
+        self.setup_py("--uninstall")
+        self.assertEqual(self.read_config(), {"ultracode": True})
+
+    GH ={"source": "github", "repo": "ARYN26/you-are-here"}
 
     def known(self, **entries):
         p = self.cfg / "plugins" / "known_marketplaces.json"

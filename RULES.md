@@ -15,7 +15,7 @@
 - Never switch model mid-session: it rewrites the whole prompt cache. Changing effort does not.
 
 ## Models and agents
-- Use Fable only through /yah:deep, for a single hard, self-contained question.
+- Use Fable only through /yah:deep, for a single hard, self-contained question. With the quality profile on, yah run also uses it once per phase as critic and judge. Never put it in a workflow.
 - Send rote lookups (where X is, what a file, PR or log says) to the scout agent.
 - Run browser and screenshot work in a subagent, never in the main thread.
 - Use parallel agent workflows only for genuinely parallel work. Size them to the work: one agent per independent unit. Keep reports short.

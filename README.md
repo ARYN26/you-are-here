@@ -52,8 +52,8 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops; with `--plan`, through every open phase. The merge is yours unless you turn on [auto-merge](#auto-merge-opt-in). See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
 | PostToolUse guard | The context guard again after each tool call, so wrap nudges reach a headless session, which has only one prompt. | Only inside `yah run` iterations: one local Python run per tool call. Interactive sessions never run it. |
 | Push guard | A PreToolUse hook on Bash and PowerShell that denies force pushes, pushes to protected branches and merges. See [Rails](#hands-free-runs-yah-run). | Only inside `yah run` iterations: one local Python run per Bash call. Interactive sessions never run it. |
-| Ultracode opt-in | Max 20x only, offered by `/yah:setup`: ultracode on in every session with workflows capped at medium size, plus a once-per-session rule for sizing workflows. See [Ultracode on Max 20x](#ultracode-on-max-20x). | About 80 tokens once per session. The spend is ultracode's own: xhigh effort and workflow agents. |
-| Skill and agent listing | The short descriptions Claude Code lists so the model knows these exist, each 92 characters or fewer. `/yah:auto`, `/yah:resume` and `/yah:setup` are hidden from the model. | Measured in one clean A/B pair against a no-plugin session: +593 tokens per turn in total. Of that, the skill listing is about 125 tokens (493 characters), the agent listing about 75 (299 characters) and the SessionStart block about 125; the other ~270 were not attributed (likely wrapper text and noise). Since that run the SessionStart block gained its restate rule (104 characters, about 26 tokens) and the wrap description 7 characters. If you append RULES.md through setup, add about 345 tokens (about 1,380 characters) per turn. |
+| Quality profile opt-in | Max 20x only, offered by `/yah:setup`: ultracode on in every session with workflows capped at medium size, a once-per-session sizing rule that names each job's model and effort from `roles`, and in `yah run` high effort plus one critic and one judge per phase. See [Quality profile](#quality-profile). | About 165 tokens once per session. The rest is the profile's own spend: xhigh effort, workflow agents, and the critic and judge sessions. |
+| Skill and agent listing | The short descriptions Claude Code lists so the model knows these exist, each 92 characters or fewer. `/yah:auto`, `/yah:resume` and `/yah:setup` are hidden from the model. | Measured in one clean A/B pair against a no-plugin session: +593 tokens per turn in total. Of that, the skill listing is about 125 tokens (493 characters), the agent listing about 75 (299 characters) and the SessionStart block about 125; the other ~270 were not attributed (likely wrapper text and noise). Since that run the SessionStart block gained its restate rule (104 characters, about 26 tokens) and the wrap description 7 characters. If you append RULES.md through setup, add about 380 tokens (about 1,515 characters) per turn. |
 | `/yah:setup` and the `yah` launcher | Sets the statusline and your tier. Optionally adds a `yah <project>` shell function that cds into a project and starts `claude` on `/yah:auto`; `yah run` goes to the run driver. | Changes `statusLine` in settings.json, after a backup. Each step asks first. |
 
 ## Install
@@ -64,7 +64,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 /yah:setup
 ```
 
-A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers auto-update (see below), [auto-merge](#auto-merge-opt-in) for `yah run`, the `yah` launcher, and to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md` (about 345 tokens on every turn). Each step needs your yes.
+A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers the [quality profile](#quality-profile) on `max20`, auto-update (see below), [auto-merge](#auto-merge-opt-in) for `yah run`, the `yah` launcher, and to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md` (about 380 tokens on every turn). Each step needs your yes.
 
 You can also run setup from a terminal (use `python` on Windows):
 
@@ -72,7 +72,7 @@ You can also run setup from a terminal (use `python` on Windows):
 python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --tier max5 --dry-run
 ```
 
-Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell|cmd` (prints the snippet), `--install-launcher RCFILE` (a `.cmd` path, or a folder on Windows, gets a whole `yah.cmd`), `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below), `--auto-update` (opt-in, runs on its own: turns on Claude Code's auto-update for yah's marketplace and changes nothing else), `--auto-merge` (opt-in, runs on its own: sets `auto_merge` in config.json and changes nothing else; see [auto-merge](#auto-merge-opt-in)) and `--yes` (no prompts).
+Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell|cmd` (prints the snippet), `--install-launcher RCFILE` (a `.cmd` path, or a folder on Windows, gets a whole `yah.cmd`), `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, runs on its own: turns on the [quality profile](#quality-profile) and changes nothing else), `--auto-update` (opt-in, runs on its own: turns on Claude Code's auto-update for yah's marketplace and changes nothing else), `--auto-merge` (opt-in, runs on its own: sets `auto_merge` in config.json and changes nothing else; see [auto-merge](#auto-merge-opt-in)) and `--yes` (no prompts).
 
 **Updating**
 
@@ -285,7 +285,7 @@ Then, in this order: `gh pr merge <N> --merge --match-head-commit <sha>` (a merg
 | Free | No | n/a | n/a | n/a | n/a | n/a |
 | Pro ($20/mo, $17 yearly) | Yes | Sonnet 5 for most work; Opus 5.5 for hard steps* | Medium or lower | Needs extra-usage credits | Avoid* | `pro` 100k / 120k / 160k |
 | Max 5x ($100/mo) | Yes | Opus 5.5 or Sonnet 5* | Medium* | Up to 50% of the weekly cap, own usage bar. Only via `/yah:deep`* | Only for genuinely parallel work* | `max5` 120k / 150k / 200k (default) |
-| Max 20x ($200/mo) | Yes | Opus 5.5* | High, or ultracode by default via the opt-in* | Up to 50% of the weekly cap, own usage bar. Only via `/yah:deep`* | Ultracode workflows at medium size, for genuinely parallel work* | `max20` 150k / 200k / 260k |
+| Max 20x ($200/mo) | Yes | Opus 5.5* | High, or the quality profile (ultracode by default) via the opt-in* | Up to 50% of the weekly cap, own usage bar. Only via `/yah:deep`, plus the profile's per-phase critic and judge in `yah run`* | Ultracode workflows at medium size, for genuinely parallel work* | `max20` 150k / 200k / 260k |
 | Team standard ($25/mo, $20 yearly) | Yes | Sonnet 5 for most work | Medium or lower | Via credits | Avoid* | `max5`* |
 | Team premium ($125/mo, $100 yearly) | Yes | Sonnet 5 for most work; Opus 5.5 for hard steps* | Medium* | Up to 50% | Only for genuinely parallel work* | `max5`* |
 | Enterprise | Yes | Sonnet 5 for most work; Opus 5.5 for hard steps* | Medium* | Premium seats up to 50%; standard seats use credits | Only for genuinely parallel work* | `max5`* |
@@ -301,17 +301,32 @@ Cells marked * are the author's judgement calls. Prices are as of September 2026
 
 Sources, as of September 2026: [claude.com/pricing](https://claude.com/pricing), support articles [15424964](https://support.claude.com/en/articles/15424964), [11049741](https://support.claude.com/en/articles/11049741) and [17007452](https://support.claude.com/en/articles/17007452), and the Claude Code docs on [model config](https://code.claude.com/docs/en/model-config), [statusline](https://code.claude.com/docs/en/statusline) and [costs](https://code.claude.com/docs/en/costs).
 
-## Ultracode on Max 20x
+## Quality profile
 
-Ultracode runs the main thread at xhigh effort and lets Claude orchestrate workflows of parallel agents. It gives the best results on a Max 20x plan, but a workflow can burn more tokens than doing the same work in the conversation. `/yah:setup` on `max20` offers it as an opt-in (`setup.py --ultracode`). That sets:
+The quality profile has Opus do the work at high effort with ultracode on, and gives Fable two jobs only: critic of each phase's plan, and judge of what should block its merge. Ultracode runs the main thread at xhigh effort and lets Claude orchestrate workflows of parallel agents. It gives the best results on a Max 20x plan, but a workflow can burn more tokens than doing the same work in the conversation. `/yah:setup` on `max20` offers the profile as an opt-in (`setup.py --ultracode`, which runs on its own and leaves the statusline alone). That sets:
 
 - `ultracode: true` in `settings.json`, so every session starts with it on;
 - `workflowSizeGuideline: "medium"`, so workflows stay under 10 agents;
-- `ultracode: true` in yah's `config.json`, which turns on two nudges:
-  - **Once per session:** questions, single-file edits and small reviews stay in the main thread. A workflow is only for genuinely parallel work, with one agent per independent unit, low or medium effort for mechanical stages, high for research and judges, one verifier per finding, and reports of 1,500 characters or fewer.
+- `ultracode: true` in yah's `config.json`, which turns on the profile:
+  - **Once per session:** questions, single-file edits and small reviews stay in the main thread. A workflow is only for genuinely parallel work, with one agent per independent unit, and the model and effort for lookups, mechanical stages, and research and judges come from `roles`. The critic's model stays out of workflows. Before a Workflow call, Claude gives one line with its agent count and rough $ cost. A workflow reuses one schema across its agents and passes on the branch and PROD rules. One verifier per finding, and reports of 1,500 characters or fewer.
   - **When weekly use runs ahead of pace:** keep workflows under 5 agents, and suggest `/effort high` for work that is not parallel. Changing effort does not rewrite the cache.
+  - **In `yah run`:** child sessions start with `--effort` from `roles.main`, and its model unless you pass `--model`. Each phase gets one critique of its plan before the build and one merge-blocker judge on its green PR, on `roles.critic`. When the critic model's own weekly bar is at `critic_week_skip_pct` (50%) or more, both run on `roles.judge` instead. With the profile off, `yah run` passes no `--effort` and runs no critic or judge.
 
-The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own contexts, so the main thread stays short. `yah run` sessions inherit ultracode too, and each one is still capped by `--max-budget-usd`. `--uninstall` puts the previous values back.
+**Roles** are `"model effort"` strings in `config.json`:
+
+| Role | Default | Used for |
+|---|---|---|
+| `main` | `opus high` | `yah run` build sessions |
+| `scout` | `sonnet low` | lookups in workflows |
+| `mechanical` | `opus medium` | mechanical workflow stages |
+| `judge` | `opus high` | research and judges in workflows; the critic and judge when the critic's bar is high |
+| `critic` | `fable high` | `yah run`'s per-phase critique and judge |
+
+Set only the role you want to change: `{"roles": {"critic": "opus high"}}` moves the critic and judge off Fable. Effort must be low, medium, high or xhigh; `max`, junk or a missing value falls back to that role's default. `/yah:deep` stays on Fable either way, because its agent file pins the model.
+
+**The critic's bar.** The statusline saves every extra `rate_limits` pool, such as a per-model weekly bar, into `limits.json` under `pools`. yah looks for a pool whose key contains the critic's model name, such as `seven_day_fable`. That key name is a guess until Claude Code is seen sending one. When no pool matches, the bar counts as unknown, which is treated as under 50%.
+
+The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own contexts, so the main thread stays short. `yah run` sessions inherit ultracode too, and each one is still capped by `--max-budget-usd`. `--uninstall` puts the previous values back, in `config.json` too.
 
 ## What it reads, writes and never does
 
@@ -331,7 +346,7 @@ The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own cont
 | `where-<project>.json` | The last where.py result for a project, read by the statusline and the home view. A repo not registered in `projects` gets `where-<name>-<8-hex path hash>.json`, so two repos with the same folder name don't collide |
 | `state-<session>.json` | The statusline's latest numbers, read by the context guard |
 | `guard-<session>.json`, `guard-daily.json` | Flags so each nudge fires once |
-| `limits.json` | The latest 5-hour and weekly numbers, written by the statusline when they change, read by `yah run` |
+| `limits.json` | The latest 5-hour and weekly numbers, plus any extra pools such as a per-model weekly bar under `pools`, written by the statusline when they change, read by `yah run` |
 | `recall-<session>.flag` | Marks that first-prompt recall already ran |
 | `runs/` | `yah run` logs, the 20 newest runs |
 | `usage-log.csv` | One row per day: date, time, five_hour_pct, week_pct, week_pace_pct, model |
@@ -349,7 +364,7 @@ The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own cont
 
 - blocks a prompt
 - merges a PR, unless you turn on auto-merge. Even then only the `yah run` driver merges, never the model, with a merge commit (never a squash), and it never deletes a protected branch.
-- changes your model, effort, permissions, hooks or env settings, except `ultracode` and `workflowSizeGuideline` when you opt in with `--ultracode`. `yah run` passes its permission mode, DENY list, push guard and PostToolUse guard as flags to its own child sessions only.
+- changes your model, effort, permissions, hooks or env settings. Setup never does, except `ultracode` and `workflowSizeGuideline` when you opt in with `--ultracode`. `yah run` passes its permission mode, DENY list, push guard and PostToolUse guard as flags to its own child sessions only, plus `--effort` and `--model` from `roles` only with the [quality profile](#quality-profile) on.
 
 **Setup touches only:**
 
@@ -442,6 +457,7 @@ yah never needs beads, and beads shows nothing STATE.md does not. A repo that al
   "premium_models": ["fable", "mythos"],
   "recent_days": 14,
   "brain_dir": "docs/brain", "recall_max_chars": 10000,
+  "roles": {"critic": "opus high"}, "critic_week_skip_pct": 50,
   "projects": {"shop": {"path": "/Users/me/code/shop", "prod": "main deploys on push. PRs only.", "trunks": ["main", "release"]}}
 }
 ```
@@ -453,7 +469,9 @@ yah never needs beads, and beads shows nothing STATE.md does not. A repo that al
 | `pace_slack` | How many points the weekly % may run ahead of pace before the once-a-day nudge, or before `yah run` stops. |
 | `premium_models` | Model ids or names that get a red tag in the statusline and a once-per-session nudge. |
 | `auto_merge` | Default `false`. Set by `setup.py --auto-merge`. Only a JSON `true` turns it on; then `yah run` merges a green phase PR it opened. See [auto-merge](#auto-merge-opt-in). |
-| `ultracode` | Set by `setup.py --ultracode`. Adds the once-per-session workflow sizing rule and turns the pace nudge toward smaller workflows. |
+| `ultracode` | Default `false`. Set by `setup.py --ultracode`; only a JSON `true` turns it on. Turns on the [quality profile](#quality-profile): the once-per-session workflow sizing rule, the pace nudge toward smaller workflows, and in `yah run` the `--effort`, critic and judge. |
+| `roles` | `"model effort"` per job: `main`, `scout`, `mechanical`, `judge` and `critic`. Set only the roles you change; the rest keep their defaults (see the [roles table](#quality-profile)). Effort is low, medium, high or xhigh; `max` or junk falls back to the role's default. |
+| `critic_week_skip_pct` | Default 50. With the profile on, when the critic model's own weekly bar is at this % or more, `yah run`'s critic and judge run on `roles.judge` instead. |
 | `recent_days` | How far back the home view looks for repos yah has seen. |
 | `brain_dir` | The brain folder, relative to the repo root. Default `docs/brain`. |
 | `recall_max_chars` | Cap on the recall block. Default 10,000 characters, about 2.5k tokens. |
@@ -469,7 +487,7 @@ yah never needs beads, and beads shows nothing STATE.md does not. A repo that al
 
 - **"Why not ccusage, claude-hud or ccstatusline?"** They show your session; yah shows your project (phase, NEXT, PR) and drives wrap then `/clear`. Run ccusage alongside; Claude Code has one statusline slot, so with another statusline yah's hooks and skills still work but the context guard has no numbers.
 - **"Unattended auto mode is YOLO."** It stops when a PR is open and green, has no merge step unless you opt in (then the driver merges, never a session), hard-blocks merges, trunk pushes and force pushes inside runs, stops after any denial, and assumes branch protection. Not for repos with untrusted commenters.
-- **"Bloat?"** Measured +593 tokens per turn against a no-plugin session (skill listing, agent listing and the SessionStart block), plus about 320 if you append RULES.md. Per prompt, two local script runs of about 35–70 ms that add nothing unless a nudge fires; recall adds its block once. The brain and `yah run` cost nothing until you use them. Separately, claude.ai connectors can change their tool descriptions between sessions, which rewrites the prompt cache whatever plugins you run.
+- **"Bloat?"** Measured +593 tokens per turn against a no-plugin session (skill listing, agent listing and the SessionStart block), plus about 380 if you append RULES.md. Per prompt, two local script runs of about 35–70 ms that add nothing unless a nudge fires; recall adds its block once. The brain and `yah run` cost nothing until you use them. Separately, claude.ai connectors can change their tool descriptions between sessions, which rewrites the prompt cache whatever plugins you run.
 - **"Auto-memory or `/compact` already does this."** Memory holds your preferences; the brain holds repo facts, in the repo, reviewable in PRs, and loads only the few that match, once per session.
 - **"$2,600 in a week is a you problem."** Yes. The fix it argues for is free: write NEXT down, `/clear`, one task per session.
 
@@ -480,7 +498,7 @@ The official cost advice is `/clear` between tasks, because `/compact` is itself
 The notes live in your repo, so they are reviewed in PRs, diffed and grepped, and they open in Obsidian. Recall is local keyword overlap plus changed-file globs, once per session, with no extra process. The trade-off is that it misses notes whose words never come up; INDEX.md is the full list.
 
 **Does it change my settings?**
-Only `statusLine`, after a timestamped backup, with the old value recorded. If you already have a statusline, setup shows it and replaces it only after your yes. It never touches model, effort, permissions, hooks or env, except the two ultracode keys when you pass `--ultracode` and yah's marketplace `autoUpdate` when you pass `--auto-update`. `--uninstall` puts the old values back.
+Only `statusLine`, after a timestamped backup, with the old value recorded. If you already have a statusline, setup shows it and replaces it only after your yes. It never touches model, effort, permissions, hooks or env, except the two ultracode keys when you pass `--ultracode` and yah's marketplace `autoUpdate` when you pass `--auto-update`. `--uninstall` puts the old values back. `yah run` passes `--effort` to its own sessions only with the [quality profile](#quality-profile) on.
 
 **Why Python?**
 Stdlib only, so there is nothing to install beyond Python itself. macOS ships `python3` 3.9 with the Xcode Command Line Tools, so the code avoids 3.10+ syntax. The same files run on macOS, Linux and Windows, and you can read all of them in one sitting.
@@ -489,7 +507,7 @@ Stdlib only, so there is nothing to install beyond Python itself. macOS ships `p
 The statusline is a CLI feature. Hooks and skills load wherever plugins load, but that is untested.
 
 **Is Fable worth it?**
-The author's view: for one hard, self-contained question, yes, which is what `/yah:deep` is for. As the main model on a long session, the author's data says no: that one session was 95% of their Fable spend. On Max plans Fable can use up to half of the weekly cap (it has its own usage bar). On Pro it needs extra-usage credits.
+The author's view: for one hard, self-contained question, yes, which is what `/yah:deep` is for. As the main model on a long session, the author's data says no: that one session was 95% of their Fable spend. The [quality profile](#quality-profile) uses it the same way: one short read-only critique and one judge per phase in `yah run`, on Opus instead once Fable's bar reaches 50%. On Max plans Fable can use up to half of the weekly cap (it has its own usage bar). On Pro it needs extra-usage credits.
 
 **Will this help on Pro?**
 It cannot raise your limits. It shows your 5-hour and weekly use against pace, and the `pro` preset says wrap at 120k. The official advice matters most on Pro: Sonnet 5 for most work, lower effort and `/clear` between tasks. yah makes the last one a habit.
