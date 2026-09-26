@@ -105,7 +105,8 @@ DENY_BASE = ["PowerShell", "Bash(git push --force*)", "Bash(git push -f*)", "Bas
              "Bash(git push *--prune*)", "Bash(git push -d*)", "Bash(git push * -d *)"]
 DENY_BRANCH = ["Bash(git push * {})", "Bash(git push * {} *)", "Bash(git push * HEAD:{}*)", "Bash(git push * *:{}*)",
                "Bash(git push *refs/heads/{}*)"]
-READ_ONLY = ["Edit", "Write", "NotebookEdit"]  # also denied to the profile's critic and judge
+# also denied to the profile's critic and judge: a commit or push would change the PR it judged green
+READ_ONLY = ["Edit", "Write", "NotebookEdit", "Bash(git commit*)", "Bash(git push*)"]
 PR_JSON = ("state,url,reviewDecision,reviews,commits,headRefName,baseRefName,mergeable,mergeStateStatus,isDraft,"
            "author,headRefOid")
 NO_TAG = "session ended without a YAH-RESULT line; is the yah plugin loaded? (--plugin-dir)"
@@ -194,8 +195,11 @@ def claude_argv(r, prompt=None, role=None):
     # the quality profile (config ultracode) runs roles.main; a user --model replaces only its model
     model, effort = role or (r.cfg["roles"]["main"].split() if r.cfg["ultracode"] else (None, None))
     model = model if role else r.model or model
+    # the critique or findings file sits in runs/, outside the repo: let the build read it without a prompt
+    names_file = not role and r.log is not None and (r.critique or r.mode == "fix-findings")
     return (argv + (["--model", model] if model else []) + (["--effort", effort] if effort else [])
-            + (["--plugin-dir", r.plugin_dir] if r.plugin_dir else []))
+            + (["--plugin-dir", r.plugin_dir] if r.plugin_dir else [])
+            + (["--add-dir", r.log.parent.as_posix()] if names_file else []))
 
 
 def guard_settings():
@@ -369,14 +373,20 @@ def plan_phases(r, b):
     return [p for p in b.get("phases") or [] if isinstance(p, dict)] if key == r.plan_key else []
 
 
+def fresh_limits(now):
+    """limits.json (the statusline's rate limits) when it is under 6 h old, else {}."""
+    lim = read_json(data_dir() / "limits.json", {})
+    return lim if isinstance(lim, dict) and now - num(lim.get("ts"), 0) < 6 * 3600 else {}
+
+
 def week_usage(r):
     """(used %, pace %) from the stream's rate_limit_event, else from a limits.json under 6 h old."""
     now = time.time()
     if r.week:
         return r.week[0], week_pace(r.week[1], now)
-    lim = read_json(data_dir() / "limits.json", {})
-    wk = (lim.get("seven_day") or {}) if isinstance(lim, dict) else {}
-    if wk.get("used_pct") is None or now - num(lim.get("ts"), 0) >= 6 * 3600:
+    lim = fresh_limits(now)
+    wk = lim.get("seven_day") or {}
+    if wk.get("used_pct") is None:
         return None
     pace = week_pace(wk.get("resets_at"), now)
     return num(wk["used_pct"], 0), lim.get("pace_pct") if pace is None else pace
@@ -724,9 +734,8 @@ def pool_used(r, model):
     windows, else a limits.json under 6 h old. None when neither has one."""
     hits = [u for k, u in r.pools.items() if model in k.lower()]
     if not hits:
-        lim = read_json(data_dir() / "limits.json", {})
-        fresh = isinstance(lim, dict) and time.time() - num(lim.get("ts"), 0) < 6 * 3600
-        pools = lim.get("pools") if fresh and isinstance(lim.get("pools"), dict) else {}
+        pools = fresh_limits(time.time()).get("pools")
+        pools = pools if isinstance(pools, dict) else {}
         hits = [num(v.get("used_pct"), None) for k, v in pools.items() if model in k.lower() and isinstance(v, dict)]
     hits = [u for u in hits if u is not None]
     return max(hits) if hits else None
@@ -748,21 +757,27 @@ def review_role(r):
 
 def wants_critique(r):
     """The profile critiques a plan phase once per run, before its first build: no PR yet and no phase branch on
-    origin (a remote that cannot be read has none)."""
+    origin (a remote that cannot be read has none). Not when NEXT already waits on you: the build stops there."""
     ph = r.phase or {}
     if not (r.cfg["ultracode"] and r.label and r.mode == "build" and not r.pr and r.label not in r.critiqued
-            and ph.get("status") != "closed"):
+            and ph.get("status") != "closed" and not r.next.startswith("NEEDS-HUMAN:")):
         return False
     b = ph.get("branch")
-    return not (b and run(["git", "ls-remote", "--heads", "origin", b], r.top, timeout=20,
-                          env=dict(os.environ, GIT_TERMINAL_PROMPT="0")))
+    # refs/heads/<b>: a bare <b> would also match the tail of another branch, like old/<b>
+    if b and run(["git", "ls-remote", "--heads", "origin", "refs/heads/" + b], r.top, timeout=20,
+                 env=dict(os.environ, GIT_TERMINAL_PROMPT="0")):
+        r.critiqued.add(r.label)  # its first build is past: no need to ask origin again before each build
+        return False
+    return True
 
 
 def wants_judge(r):
     """The profile judges each PR once per run, when evaluate finds it open and green; not after a session that
-    stopped for you, since the run stops there anyway."""
+    stopped for you, since the run stops there anyway, nor past run_total_hours, where session() would cut it off
+    at once."""
     return bool(r.cfg["ultracode"] and r.pr and r.pr_state == "OPEN" and r.pr not in r.judged
-                and not stopped(r.last, errors=False))
+                and not stopped(r.last, errors=False)
+                and time.monotonic() - r.t0 < r.cfg["run_total_hours"] * 3600)
 
 
 def review(r, target, mode, name, verdict):
@@ -777,7 +792,11 @@ def review(r, target, mode, name, verdict):
     m = None if it["is_error"] else re.fullmatch(verdict, it["tag"], re.I)
     path = r.log.with_name(f"{r.log.stem}-{name}-{mode}.md")
     if m:
-        path.write_text(it["text"], encoding="utf-8")
+        try:
+            path.write_text(it["text"], encoding="utf-8")
+        except OSError as e:  # a skip, like any other failure: it never stops the run
+            m, it["is_error"], it["error"] = None, True, f"could not save {path.name}: {e}"
+    if m:
         said = f"{it['tag']}, {path.name}"
     else:
         said = "skipped: " + (it["error"] if it["is_error"] else f"it ended with YAH-RESULT: {it['tag']}"
@@ -799,7 +818,9 @@ def judge(r):
     m, path = review(r, r.target or r.label or f"#{r.pr}", "judge", r.label or f"PR{r.pr}",
                      r"judge\s+(pass|block)\b.*")
     if m and m.group(1).lower() == "block":
-        r.findings = path
+        # The PR was green, so how the last build ended (an error, no tag, a stall) stopped nothing; left in
+        # place, evaluate would stop on it now instead of running the fix slice.
+        r.findings, r.last, r.stalls = path, None, 0
 
 
 # ---------------------------------------------------------------- stop
@@ -897,13 +918,13 @@ def advance(r, code, reason):
 
 
 def finish(r, code, reason):
-    review = f"${r.review_cost:.2f} over {r.reviews} critic/judge sessions" if r.reviews else ""
+    reviews = f"${r.review_cost:.2f} over {r.reviews} critic/judge sessions" if r.reviews else ""
     log(r, f"stop, exit {code}: {reason} Cost ${r.cost:.2f} over {r.total} iterations"
-        + (f", plus {review}." if review else "."))
+        + (f", plus {reviews}." if reviews else "."))
     notify(f"yah run {r.key}", reason)
     say(f"[yah] stop (exit {code}): {reason}")
     say(f"[yah] PR {r.url or (f'#{r.pr}' if r.pr else 'none')} | cost ${r.cost:.2f} | "
-        f"{r.total} iterations" + (f" | {review}" if review else "") + f" | log {r.log}")
+        f"{r.total} iterations" + (f" | {reviews}" if reviews else "") + f" | log {r.log}")
 
 
 # ---------------------------------------------------------------- main

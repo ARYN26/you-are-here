@@ -852,6 +852,26 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(prompts), 2)
         self.assertEqual(len(self.merges()), 1)
 
+    def test_a_judge_block_after_a_build_that_errored_still_runs_its_fix_slice(self):
+        # the build opened the PR and closed the phase, then ended in an error: the green PR outranks that ending
+        self.config(ultracode=True)
+        self.script(required=[{"rc": 0}], critique=[{"tag": "critique-done"}], **{
+            "view-12": [view()], "judge": [{"tag": "judge block 1"}],
+            "fix-findings": [{"commit": True, "tag": "pr-open #12"}],
+            "claude": [{"commit": True, "close": True, "tag": "pr-open #12",
+                        "result": {"is_error": True, "subtype": "error_max_budget_usd"}}]})
+        self.assertIn(GREEN, self.run_yah(self.repo(), "P2", code=0))
+        prompts = self.prompts()
+        self.assertEqual([p.split(" findings=")[0].split(" critique=")[0] for p in prompts],
+                         ["/yah:resume P2 critique", "/yah:resume P2 build", "/yah:resume P2 judge",
+                          "/yah:resume P2 fix-findings"])
+        runs = (self.data / "runs").resolve()
+        for argv, reads_file in zip(self.calls("claude"), (False, True, False, True)):
+            add = self.flag(argv, "--add-dir")  # the critique or findings file is outside the repo
+            self.assertEqual(add and Path(add).resolve(), runs if reads_file else None)
+            deny = argv[argv.index("--disallowedTools") + 1:argv.index("--max-budget-usd")]
+            self.assertEqual("Bash(git push*)" in deny, not reads_file)  # critic and judge: no commit, no push
+
     def test_a_critique_falls_back_at_the_bar_and_never_stops_the_run(self):
         self.config(ultracode=True)
         repo, now = self.repo(), time.time()
@@ -872,9 +892,20 @@ class RunTests(unittest.TestCase):
                 self.assertIn("critique P2: " + text, self.run_logs()[-1].read_text("utf-8"))
                 self.data.joinpath("limits.json").write_text(json.dumps(  # 7 h old: the bar is unknown
                     {"ts": now - 7 * 3600, "pools": {"seven_day_fable": {"used_pct": 60}}}), encoding="utf-8")
+        state = (repo / "STATE.md").read_text("utf-8")
+        (repo / "STATE.md").write_text(state.replace("- Next: Wire the payment form.",
+                                                     "- Next: NEEDS-HUMAN: Which card processor?"), encoding="utf-8")
+        self.script(claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, code=2)  # NEXT waits on you: the build stops there, so no critique first
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+        (repo / "STATE.md").write_text(state, encoding="utf-8")
         origin = self.tmp / "origin.git"
         self.git(self.tmp, "init", "-q", "--bare", str(origin))
         self.git(repo, "remote", "add", "origin", str(origin))
+        self.git(repo, "push", "-q", "origin", "checkout/payment:refs/heads/old/checkout/payment")
+        self.script(critique=[{"tag": "critique-done"}], claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, code=2)  # old/checkout/payment is another branch: this one is not on origin yet
+        self.assertEqual(self.prompts()[0], "/yah:resume P2 critique")
         self.git(repo, "push", "-q", "origin", "checkout/payment")
         self.script(claude=[{"tag": "needs-human"}])
         self.run_yah(repo, code=2)  # the branch is on origin: its first build is past
