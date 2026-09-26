@@ -752,6 +752,24 @@ class RunTests(unittest.TestCase):
         self.git(repo, "symbolic-ref", "HEAD", "refs/heads/release")
         self.assertIn("PROD branch", self.run_yah(repo, code=5))
 
+    def test_the_profile_sets_model_and_effort_from_roles_main(self):
+        def flags(*args):
+            self.script(claude=[{"tag": "needs-human"}])
+            self.run_yah(repo, "P2", *args, code=2)
+            argv = self.calls("claude")[0]
+            return [(f, argv[argv.index(f) + 1] if f in argv else None) for f in ("--model", "--effort")]
+
+        repo = self.repo()
+        self.assertEqual(flags(), [("--model", None), ("--effort", None)])  # profile off: as before
+        self.assertEqual(flags("--model", "sonnet"), [("--model", "sonnet"), ("--effort", None)])
+        self.config(ultracode=True)
+        self.assertEqual(flags(), [("--model", "opus"), ("--effort", "high")])
+        self.assertEqual(flags("--model", "sonnet"), [("--model", "sonnet"), ("--effort", "high")])
+        self.config(ultracode=True, roles={"main": "sonnet xhigh"})
+        self.assertEqual(flags(), [("--model", "sonnet"), ("--effort", "xhigh")])
+        self.config(ultracode="yes", roles={"main": "sonnet xhigh"})  # only a JSON true turns it on
+        self.assertEqual(flags(), [("--model", None), ("--effort", None)])
+
     def test_no_config_still_protects_where_open_prs_land(self):
         repo = self.repo()
         self.script(claude=[{"tag": "needs-human"}],

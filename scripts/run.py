@@ -178,7 +178,11 @@ def claude_argv(r):
     argv = [r.claude, "-p", prompt, "--permission-mode", "auto", "--permission-prompts", "none",
             "--disallowedTools", *r.deny, "--max-budget-usd", "{:g}".format(r.budget),
             "--output-format", "stream-json", "--verbose", "--settings", guard_settings()]
-    return argv + (["--model", r.model] if r.model else []) + (["--plugin-dir", r.plugin_dir] if r.plugin_dir else [])
+    # the quality profile (config ultracode) runs roles.main; a user --model replaces only its model
+    model, effort = r.cfg["roles"]["main"].split() if r.cfg["ultracode"] else (None, None)
+    model = r.model or model
+    return (argv + (["--model", model] if model else []) + (["--effort", effort] if effort else [])
+            + (["--plugin-dir", r.plugin_dir] if r.plugin_dir else []))
 
 
 def guard_settings():
