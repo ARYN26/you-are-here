@@ -1195,17 +1195,43 @@ class SetupTests(Base):
 
     def test_ultracode_opt_in_and_uninstall(self):
         self.settings({**self.SETTINGS, "workflowSizeGuideline": "small"})
-        out, err, rc = self.setup_py("--tier", "max20", "--ultracode", "--yes")
+        for prior in (None, False, "true"):  # absent, off, and a string that never counted as on
+            with self.subTest(prior=prior):
+                cfg = {"tier": "max20", **({} if prior is None else {"ultracode": prior})}
+                self.config(**cfg)
+                out, err, rc = self.setup_py("--ultracode", "--yes")
+                self.assertEqual(rc, 0, err)
+                s = self.settings()
+                self.assertEqual((s["ultracode"], s["workflowSizeGuideline"]), (True, "medium"))
+                self.assertEqual({k: s[k] for k in self.SETTINGS}, self.SETTINGS)  # model, effort, env untouched
+                self.assertEqual(self.read_config(), {**cfg, "ultracode": True})
+                self.assertIn("ultracode  unchanged", self.setup_py("--ultracode", "--yes")[0])
+                out, err, rc = self.setup_py("--uninstall")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("ultracode  config " + ("removed" if prior is None else "restored"), out)
+                self.assertEqual(self.read_config(), cfg)
+                s = self.settings()
+                self.assertNotIn("ultracode", s)
+                self.assertEqual(s["workflowSizeGuideline"], "small")
+
+    def test_ultracode_alone_leaves_a_declined_statusline(self):
+        mine = dict(self.SETTINGS, statusLine={"type": "command", "command": "echo mine"})
+        self.settings(mine)
+        out, err, rc = self.setup_py("--ultracode", "--yes")  # --yes must not reach the statusline
         self.assertEqual(rc, 0, err)
-        s = self.settings()
-        self.assertEqual((s["ultracode"], s["workflowSizeGuideline"]), (True, "medium"))
-        self.assertEqual({k: s[k] for k in self.SETTINGS}, self.SETTINGS)  # model, effort, env untouched
-        self.assertTrue(json.loads((self.data / "config.json").read_text("utf-8"))["ultracode"])
-        self.assertIn("ultracode  unchanged", self.setup_py("--ultracode", "--yes")[0])
+        self.assertNotIn("statusLine", out)
+        self.assertEqual(self.settings(), {**mine, "ultracode": True, "workflowSizeGuideline": "medium"})
+        self.assertEqual(self.read_config(), {"ultracode": True})  # no tier: install never ran
+
+    def test_ultracode_uninstall_resets_an_older_setups_config(self):
+        self.settings(self.SETTINGS)
+        self.setup_py("--ultracode")
+        state = self.data / "setup-state.json"
+        old = json.loads(state.read_text("utf-8"))
+        old.pop("ultracodeConfig")  # an older setup kept no record of config ultracode
+        state.write_text(json.dumps(old), encoding="utf-8")
         self.setup_py("--uninstall")
-        s = self.settings()
-        self.assertNotIn("ultracode", s)
-        self.assertEqual(s["workflowSizeGuideline"], "small")
+        self.assertEqual(self.read_config(), {})
 
     GH = {"source": "github", "repo": "ARYN26/you-are-here"}
 

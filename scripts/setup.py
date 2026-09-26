@@ -13,8 +13,9 @@
 Merge-only: settings.json is backed up first and only its statusLine key changes (never model,
 effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode, and
 autoUpdate on yah's extraKnownMarketplaces entry with --auto-update. --auto-merge sets only auto_merge
-in config.json. What it changed goes into setup-state.json in the data dir,
-so --uninstall can put things back. --dry-run writes nothing. Re-running is safe.
+in config.json (--ultracode sets ultracode there too); those three run on their own and never touch the
+statusLine. What it changed goes into setup-state.json in the data dir, so --uninstall can put things back.
+--dry-run writes nothing. Re-running is safe.
 """
 import argparse
 import codecs
@@ -305,9 +306,6 @@ def install(a, py, sdir, state, state_file, say):
             save_json(state_file, state, dry)
             say(f"statusLine {ours['command']}  ({sp})")
 
-    if a.ultracode:
-        ultracode(settings, sp, cfg, state, state_file, dry, say)
-
     tier = a.tier or cfg.get("tier") or "max5"
     if cfg.get("tier") == tier:
         say(f"config     unchanged (tier {tier})")
@@ -332,9 +330,10 @@ def install(a, py, sdir, state, state_file, say):
 ULTRA = {"ultracode": True, "workflowSizeGuideline": "medium"}
 
 
-def ultracode(settings, sp, cfg, state, state_file, dry, say):
+def ultracode(settings, sp, state, state_file, dry, say):
     """Opt-in for Max 20x: ultracode on in every session, workflows sized medium (<10 agents). The old values
-    go into setup-state.json so --uninstall can put them back; config.json's ultracode turns on the guard's rules."""
+    go into setup-state.json so --uninstall can put them back; config.json's ultracode turns on the guard's rules,
+    built from config roles (the defaults unless the user set some)."""
     if all(settings.get(k) == v for k, v in ULTRA.items()):
         say("ultracode  unchanged (on, workflows medium)")
     else:
@@ -344,9 +343,15 @@ def ultracode(settings, sp, cfg, state, state_file, dry, say):
         save_json(sp, settings, dry)
         save_json(state_file, state, dry)
         say(f"ultracode  on, workflowSizeGuideline medium  ({sp})")
+    cp = data_dir() / "config.json"
+    cfg = load_obj(cp)
     if cfg.get("ultracode") is not True:
+        # it was off, so config.json holds the user's latest choice: record that, not an older run's
+        state["ultracodeConfig"] = {"added": "ultracode" not in cfg, "prev": cfg.get("ultracode")}
         cfg["ultracode"] = True
-        save_json(data_dir() / "config.json", cfg, dry)
+        save_json(cp, cfg, dry)
+        save_json(state_file, state, dry)
+        say(f"config     ultracode on  ({cp})")
 
 
 UPDATE_OFF = ("DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
@@ -420,15 +425,20 @@ def auto_merge(state, state_file, dry, say):
 
 
 def uninstall(sdir, state, state_file, dry, say):
-    am, cp = state.get("autoMerge"), data_dir() / "config.json"
-    cfg = load_obj(cp) if isinstance(am, dict) else {}
-    if cfg.get("auto_merge") is True:  # still ours: a hand edit since then is the user's choice
-        if am.get("added"):
-            cfg.pop("auto_merge")
-        else:
-            cfg["auto_merge"] = am.get("prev")
-        save_json(cp, cfg, dry)
-        say("automerge  " + ("removed" if am.get("added") else f"restored: {json.dumps(am.get('prev'))}"))
+    # an older setup set config ultracode without a record; it was then only ever setup's, so it goes
+    uc = state.get("ultracodeConfig") or ({"added": True} if isinstance(state.get("ultracode"), dict) else None)
+    recs = [(key, rec, what) for key, rec, what in (("auto_merge", state.get("autoMerge"), "automerge "),
+                                                    ("ultracode", uc, "ultracode  config")) if isinstance(rec, dict)]
+    cp = data_dir() / "config.json"
+    cfg = load_obj(cp) if recs else {}
+    for key, rec, what in recs:
+        if cfg.get(key) is True:  # still ours: a hand edit since then is the user's choice
+            if rec.get("added"):
+                cfg.pop(key)
+            else:
+                cfg[key] = rec.get("prev")
+            save_json(cp, cfg, dry)
+            say(f"{what} " + ("removed" if rec.get("added") else f"restored: {json.dumps(rec.get('prev'))}"))
     sp = claude_dir() / "settings.json"
     settings = load_obj(sp)
     au, ekm = state.get("autoUpdate"), settings.get("extraKnownMarketplaces")
@@ -516,12 +526,14 @@ def main():
         if edit_block(dest, f"{RULES[0]}\n{rules}\n{RULES[1]}", RULES, a.dry_run, say, "rules") is not None:
             record(state, "rules", dest, state_file, a.dry_run)
         return 0
-    if a.auto_update or a.auto_merge:  # on their own, so a yes here never touches a statusline the user kept
+    if a.auto_update or a.auto_merge or a.ultracode:  # on their own: a yes here never touches a kept statusline
+        sp = claude_dir() / "settings.json"
         if a.auto_update:
-            sp = claude_dir() / "settings.json"
             auto_update(load_obj(sp), sp, state, state_file, a.dry_run, say)
         if a.auto_merge:
             auto_merge(state, state_file, a.dry_run, say)
+        if a.ultracode:
+            ultracode(load_obj(sp), sp, state, state_file, a.dry_run, say)
         return 0
 
     py = pick_python(a.python)
