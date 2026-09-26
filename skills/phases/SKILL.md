@@ -32,6 +32,8 @@ Phases are the outermost checkbox lines in `## Plan:`: `[x]` done, `[~]` current
 
 An indented checkbox line under a phase is a sub-task: not a phase, and not counted in done/total. A `[~]` line anywhere else (a sub-task, or under `## Follow-ups`) is work in progress, not a phase; with no plan, `/yah:where` shows it as DOING.
 
+An indented plain line under a phase is its handoff log (`log` in `where.py --json`): `  - Done: <what>`, `  - Tried: <what> failed because <why>`, `  - Decided: <what> because <why>`. `/yah:wrap` writes them, keeps the newest 6, and moves them into the PR body when the phase closes. Do not write any here.
+
 A step only the user can do (a review, a merge, a console step) is its own line that ends with `(you)`, as a phase, a sub-task or under `## Follow-ups`. It names the command that does it when there is one, ready to paste in a terminal: `- [ ] Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user.
 
 `- At:` stamps NEXT so `/yah:where` can flag it once commits land after it; leave it out if the repo tracks STATE.md. Tell the user STATE.md is not committed unless they want it tracked; offer to add it to `.gitignore`.
@@ -55,3 +57,5 @@ Run every `bd` below as `store.bd`, quoted.
 Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py"` and show its output. The PLAN, PHASE and NEXT lines must be right, with no `!` line about an ignored beads epic. Fix STATE.md or the beads if they are not.
 
 Keep phase text short. The plan file holds the detail (goals, done-when, ground rules); STATE.md or beads hold only state and pointers.
+
+In the plan file, give each phase its own section with a heading that starts with `### P<n>` (`### P2 <title>`), and put choices made at planning time under `## Decisions`. Each session reads only those two sections, so a phase without its own section starts with no detail from the plan. If the plan lacks them, tell the user once.

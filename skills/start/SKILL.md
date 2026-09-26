@@ -21,22 +21,24 @@ Phase  <label and title, or "no plan">   NEXT <the NEXT line, or none>
 First  <at most one targeted search, then the edit>
 ```
 
-No `[yah]` block in context: write `Phase  unknown`, then run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --brief` right after the block.
+No `[yah]` block in context: write `Phase  unknown`.
 
-The `[yah]` block and any task text already in context are enough: never re-read STATE.md or run `bd show` or `which bd` for them. If bd is truly needed, run `store.bd` from `where.py --json`, quoted (null: skip bd). Do not read `docs/`, `documents/`, plans or files over 200 lines to orient.
+The `[yah]` block and any task text already in context are enough: never re-read STATE.md or run `bd show` or `which bd` for them. If bd is truly needed, run `store.bd` from `where.py --json`, quoted (null: skip bd). Do not read `docs/`, `documents/`, whole plans or files over 200 lines to orient.
 
 ## 2. Recall
+
+With a plan phase, run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh`. Read `state.phase.log`, then only the `## Decisions` and `### <label>` sections of `state.plan.spec` (`grep -n "^#"` finds them; none: say so in one line).
 
 Query with the task's key nouns, 12 words or fewer, no double quotes:
 
 PY "${CLAUDE_SKILL_DIR}/../../scripts/brain.py" recall --json "<key nouns>"
 
 - **JSON printed:** `matches` are the notes that fit, best first. Add `Notes  <slug>: <why it matters here>` per note that applies. Open `<brain_dir>/<slug>.md` only when its TL;DR is not enough.
-- **Nothing printed:** add this line once per session: "This repo has no brain folder for durable project facts. Create one (`docs/brain` unless config.json sets `brain_dir`)?" Run `brain.py init` only if the user says yes. Never create it unasked.
+- **Nothing printed:** add this line once per session: "This repo has no brain folder for durable project facts. Create one (`docs/brain` unless config.json sets `brain_dir`)?" Run `brain.py init` only if the user says yes.
 
 ## 3. Begin
 
-Do the First step without waiting: the one search, then the edit.
+Do the First step without waiting.
 
 A bug fix adds a negative regression guard in every test suite that covers the changed code: assert the bad output cannot appear (e.g. `assertNotIn("**", out)`), not only that the good output does.
 

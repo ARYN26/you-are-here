@@ -416,6 +416,11 @@ def first_line(text):
     return ""
 
 
+def log_line(ln):
+    """A phase's handoff log line (Done:, Tried:, Decided:) with its list bullet dropped."""
+    return re.sub(r"^[-*+]\s+", "", ln.strip())
+
+
 def short_of(title):
     """A plan's statusline tag: its title's first word, upper case."""
     return ((title or "").split() or ["PLAN"])[0].upper()[:8]

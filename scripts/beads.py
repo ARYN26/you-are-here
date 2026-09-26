@@ -2,8 +2,8 @@
 
 It reads this repo's .beads (bd first, then the committed issues.jsonl) and returns the plan state in the shape
 a STATE.md plan has: the open epic labelled `plan`, its children labelled `phase` (the in_progress one is current,
-its first notes line is NEXT) and beads labelled `human` as waiting on you. It is frozen: it shows nothing STATE.md
-does not. Stdlib only.
+its first notes line is NEXT, the lines after it its handoff log) and beads labelled `human` as waiting on you.
+It is frozen: it shows nothing STATE.md does not. Stdlib only.
 """
 import json
 import os
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import empty_state, find_tool, first_line, norm, pick_phase, repo_dirs, run, short_of  # noqa: E402
+from yahlib import empty_state, find_tool, first_line, log_line, norm, pick_phase, repo_dirs, run, short_of  # noqa: E402
 
 CLAIM = "bd update {} --claim"  # starts a phase, like marking a STATE.md phase [~]
 
@@ -166,6 +166,7 @@ def beads_state(issues):
         return {"id": k["id"], "label": label, "title": title, "status": k.get("status"),
                 "branch": m.get("branch") or "", "base": m.get("base") or "",
                 "pr": (k.get("external_ref") or ""), "next": first_line(k.get("notes")),
+                "log": [log_line(ln) for ln in (k.get("notes") or "").strip().splitlines()[1:] if ln.strip()],
                 "next_sha": str(m.get("next_sha") or "")}
 
     return pick_phase(state, [phase_view(k, i) for i, k in enumerate(kids)])
