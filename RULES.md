@@ -11,6 +11,7 @@
 - One task per session. When the statusline says wrap, run /yah:wrap, then /clear.
 - Prefer /clear to /compact. /compact is itself a large request.
 - End each task with 2-3 plain lines: what changed, what's next, what needs you.
+- Give each step the user must take as the exact command to paste in a terminal, e.g. `gh pr merge 13 --merge`.
 - Never switch model mid-session: it rewrites the whole prompt cache. Changing effort does not.
 
 ## Models and agents

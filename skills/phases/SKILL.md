@@ -32,7 +32,7 @@ Phases are the outermost checkbox lines in `## Plan:`: `[x]` done, `[~]` current
 
 An indented checkbox line under a phase is a sub-task: not a phase, and not counted in done/total. A `[~]` line anywhere else (a sub-task, or under `## Follow-ups`) is work in progress, not a phase; with no plan, `/yah:where` shows it as DOING.
 
-A step only the user can do (a review, a merge, a console step) is its own line that ends with `(you)`, as a phase, a sub-task or under `## Follow-ups`. `/yah:where` lists the open ones as waiting on the user.
+A step only the user can do (a review, a merge, a console step) is its own line that ends with `(you)`, as a phase, a sub-task or under `## Follow-ups`. It names the command that does it when there is one, ready to paste in a terminal: `- [ ] Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user.
 
 `- At:` stamps NEXT so `/yah:where` can flag it once commits land after it; leave it out if the repo tracks STATE.md. Tell the user STATE.md is not committed unless they want it tracked; offer to add it to `.gitignore`.
 

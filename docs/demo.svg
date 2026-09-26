@@ -11,7 +11,7 @@
 <text x="18" y="120"><tspan class="l">NEXT    </tspan><tspan>Wire the Stripe element into PaymentForm.tsx, then run the e2e test.</tspan></text>
 <text x="18" y="139"><tspan class="l">YOU     </tspan><tspan>STATE.md:13  Approve the refund email copy</tspan></text>
 <text x="18" y="158"><tspan class="l">PRs     </tspan><tspan>#12 P2  checkout/payment -&gt; checkout/cart  checks running  stacked on #11: retarget after it merges</tspan></text>
-<text x="18" y="177"><tspan class="l">        </tspan><tspan>#11 P1  checkout/cart -&gt; main  green  merge: you</tspan></text>
+<text x="18" y="177"><tspan class="l">        </tspan><tspan>#11 P1  checkout/cart -&gt; main  green  merge: you, `gh pr merge 11 --merge`</tspan></text>
 <text x="18" y="196"><tspan class="l">PROD    </tspan><tspan>main deploys on push. PRs only.</tspan></text>
 <line x1="18" y1="228" x2="830" y2="228" stroke="#6e7681" stroke-width="1"/>
 <text x="18" y="251"><tspan class="b">Opus 5.5 high</tspan><tspan class="d"> | </tspan><tspan class="a">142k</tspan><tspan class="d"> | </tspan><tspan>5h 31%</tspan><tspan class="d"> | </tspan><tspan>wk 48% (pace 52%)</tspan><tspan class="d"> | </tspan><tspan>checkout/payment</tspan><tspan class="d"> | </tspan><tspan>PR#12</tspan><tspan class="d"> | </tspan><tspan>CHECKOUT P2/4</tspan><tspan class="d"> | </tspan><tspan class="a">1 for you</tspan></text>

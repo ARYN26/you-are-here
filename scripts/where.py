@@ -511,10 +511,13 @@ def pr_lines(prs, branch, state, limit=4, trunks=(), auto=False):
             bits.append("changes requested")
         elif rd == "APPROVED":
             bits.append("approved")
+        # A step left to the user comes with the command that does it, ready to paste in a terminal.
         if p["baseRefName"] in heads:
-            bits.append(f"stacked on #{heads[p['baseRefName']]}: retarget after it merges")
+            bits.append(f"stacked on #{heads[p['baseRefName']]}: retarget after it merges, "
+                        f"`gh pr edit {p['number']} --base {base_of[p['baseRefName']]}`")
         elif not p.get("isDraft") and checks_state(p) == "green":
-            bits.append("auto-merge: on" if auto and p["number"] in phase_by_pr else "merge: you")
+            bits.append("auto-merge: on" if auto and p["number"] in phase_by_pr
+                        else f"merge: you, `gh pr merge {p['number']} --merge`")
         d = age_days(p.get("updatedAt", ""))
         if d >= 2:
             bits.append(f"idle {int(d)}d")
