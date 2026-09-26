@@ -52,7 +52,7 @@ A task that needs several PRs or sessions gets every decision asked now, while t
 ## 4. Start the run
 
 1. If the tree is dirty, say what is uncommitted and ask first: the run's sessions commit whatever is in the tree.
-2. Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach`. A rerun of a run that had no `--plan` (`run.plan` false) is `run.py <run.target> --detach`. Keep `--detach` last; never start a run in the foreground, since it holds this session for hours.
+2. Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach`. A rerun of a run that had no `--plan` (`run.plan` false) is `run.py <run.target> --detach`, with a PR target's `#` dropped (`#12` becomes `12`): the shell reads `#` as a comment and would drop `--detach` with it. Keep `--detach` last; never start a run in the foreground, since it holds this session for hours.
 3. Exit 0: the run holds its lock. Say what it runs and where its log is, that this session can close, and that `/yah:where` or `yah <project>` shows its RUN line. Then stop, and do no work in this checkout while it runs. Any other exit: it stopped at once. Show its output and do not retry.
 
 ## 5. While working

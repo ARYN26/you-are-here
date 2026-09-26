@@ -955,7 +955,8 @@ class RunLineTests(Base):
         sys.path.insert(0, str(SCRIPTS))
         import yahlib
         repo, now = self.state_repo(), time.time()
-        pidf, log = self.data / "runs" / "shop.pid", self.data / "runs" / "shop-1.log"
+        pidf = self.data / "runs" / yahlib.run_pid_path("shop", str(repo), str(repo)).name
+        log = self.data / "runs" / "shop-1.log"
         log.parent.mkdir(parents=True)
         log.write_text("2026-09-25 14:02:00 started\n2026-09-25 14:35:10 iteration 2: $1.20, 30 turns, CONTINUE\n\n",
                        encoding="utf-8")

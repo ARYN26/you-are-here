@@ -40,7 +40,7 @@ matches sets the exit code:
   130  Ctrl-C, or ended by --stop
 
 Logs go to <data dir>/runs/. The driver writes nothing inside the repo. Each run holds a lock on
-runs/<project>.pid (<project>@<worktree>.pid in a linked worktree), a JSON file with its pid, target, log and,
+runs/<project>-<hash>.pid (<project>-<hash>@<worktree>.pid in a linked worktree), a JSON file with its pid, target, log and,
 once it stops, its exit code and reason; a second run in the same checkout is refused (exit 5). The OS drops the
 lock when the driver dies, so a pid file whose lock is free is a run that ended. where.py and the statusline show
 it as the RUN line (live: target and the log's last line; ended: exit code and reason) for 3 days.
@@ -567,20 +567,30 @@ def descendants(pid):
     return found
 
 
-def kill_tree(proc):
+def end_tree(pid, freeze=False):
+    """Kill pid and every process under it (taskkill /T on Windows; elsewhere its descendants from `ps`, then its
+    process group). freeze stops pid first, so it starts nothing new while its tree is found."""
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15,
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=15,
                            creationflags=NO_WINDOW)
-        else:
-            for pid in descendants(proc.pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        if freeze:
+            os.kill(pid, signal.SIGSTOP)
+        leader = os.getpgid(pid) == pid  # read before the kill: its group holds children reparented away from it
+        for p in descendants(pid) + [pid]:
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+        if leader:
+            os.killpg(pid, signal.SIGKILL)
     except Exception:
         pass
+
+
+def kill_tree(proc):
+    end_tree(proc.pid)
     try:
         proc.kill()
     except Exception:
@@ -792,24 +802,6 @@ def busy(st):
             f", since {since}, log {st.get('log', '?')}. Let it finish, or end it with `yah run --stop`.")
 
 
-def end_tree(pid):
-    """Kill pid and every process under it. Elsewhere than Windows pid is frozen first, so it starts nothing new
-    while its tree is found."""
-    try:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=15,
-                           creationflags=NO_WINDOW)
-            return
-        os.kill(pid, signal.SIGSTOP)
-        for p in descendants(pid) + [pid]:
-            try:
-                os.kill(p, signal.SIGKILL)
-            except OSError:
-                pass
-    except Exception:
-        pass
-
-
 def stop_run(pidf):
     """--stop: end the checkout's run and everything under it, then write its exit code for the RUN line."""
     st = run_state(pidf)
@@ -818,7 +810,7 @@ def stop_run(pidf):
         return 0
     pid, what = int(num(st.get("pid"), 0)), st.get("target") or "current phase"
     if pid > 0:
-        end_tree(pid)
+        end_tree(pid, freeze=True)
     t = time.monotonic()
     while st.get("alive") and time.monotonic() - t < STOP_WAIT_S:
         time.sleep(0.1)
@@ -931,7 +923,8 @@ def main():
     ap.add_argument("--stop", action="store_true", help="end the run going in this checkout, and every process "
                     "under it")
     a = ap.parse_args()
-    if a.stop and (a.target or a.plan or a.detach or a.dry_run):
+    if a.stop and (a.target or a.plan or a.detach or a.dry_run or a.iterations is not None or a.budget is not None
+                   or a.model or a.plugin_dir):
         return refuse("--stop takes only --cwd or --project.")
     cfg = config()
     target = parse_target(a.target)
@@ -1038,8 +1031,8 @@ def main():
         code, reason = 130, "interrupted."
     except Exception as e:  # a detached run has no terminal: the log, the notification and the pid file say it
         code, reason = 1, f"run.py failed: {e}"
+    write_run(hold, dict(info, ended=int(time.time()), code=code, reason=reason))  # first: finish can fail
     finish(r, code, reason)
-    write_run(hold, dict(info, ended=int(time.time()), code=code, reason=reason))
     return code
 
 

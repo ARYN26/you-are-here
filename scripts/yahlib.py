@@ -170,8 +170,11 @@ LOCK_AT = 1 << 30  # Windows byte locks are mandatory, so the lock sits past the
 
 
 def run_pid_path(key, top, main_root):
-    """<data dir>/runs/<key>.pid, or <key>@<worktree folder>.pid in a linked worktree: one `yah run` per checkout."""
-    name = key if norm(top) == norm(main_root or top) else f"{key}@{Path(top).name}"
+    """<data dir>/runs/<key>-<8 hex of sha1(root)>.pid, so two repos with the same folder name never share a lock,
+    or <key>-<hex>@<worktree folder>.pid in a linked worktree: one `yah run` per checkout."""
+    root = main_root or top
+    name = "{}-{}".format(key, hashlib.sha1(norm(root).encode("utf-8")).hexdigest()[:8])
+    name = name if norm(top) == norm(root) else f"{name}@{Path(top).name}"
     return data_dir() / "runs" / (re.sub(r"[^\w.@-]", "_", name) + ".pid")
 
 
@@ -206,7 +209,11 @@ def hold_run(path, data):
     or None while another live run holds it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
-    if not _lock(fd):
+    for _ in range(5):  # a few tries: run_state (statusline, where.py, --detach's wait) holds the lock for a moment
+        if _lock(fd):
+            break
+        time.sleep(0.02)
+    else:
         os.close(fd)
         return None
     write_run(fd, data)

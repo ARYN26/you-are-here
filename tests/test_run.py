@@ -256,6 +256,9 @@ class RunTests(unittest.TestCase):
         self.assertIn("--verbose", argv)
         self.assertIn("--max-budget-usd", argv)
 
+    def pidf(self, repo):
+        return self.data / "runs" / yahlib.run_pid_path("shop", str(repo), str(repo)).name
+
     def run_logs(self):
         return sorted((self.data / "runs").glob("*.log"))
 
@@ -287,7 +290,7 @@ class RunTests(unittest.TestCase):
                     claude=[{"sleep": 6, "commit": True, "close": True, "next": "Start P3.", "tag": "pr-open #12"}])
         repo = self.repo()
         out = self.run_yah(repo, "--detach", code=0)
-        pidf = self.data / "runs" / "shop.pid"
+        pidf = self.pidf(repo)
         st = yahlib.run_state(pidf)
         self.assertTrue(st and st["alive"], (st, out))
         self.assertIn(f"run started in the background: P2, pid {st['pid']}", out)
@@ -311,7 +314,7 @@ class RunTests(unittest.TestCase):
     def test_a_held_pid_file_refuses_and_a_stale_one_does_not(self):
         self.script(view=[view()], required=[{"rc": 0}])
         repo = self.repo()
-        pidf = self.data / "runs" / "shop.pid"
+        pidf = self.pidf(repo)
         fd = yahlib.hold_run(pidf, {"pid": 4242, "target": "P2", "log": "old.log"})
         try:
             for args in ([], ["--detach"]):
@@ -333,7 +336,7 @@ class RunTests(unittest.TestCase):
         self.assertIn("--stop takes only --cwd or --project", self.run_yah(repo, "P2", "--stop", code=5))
         self.script(list=[], claude=[{"sleep": 60, "orphan": True}])
         self.run_yah(repo, "--detach", code=0)
-        pidf, beat = self.data / "runs" / "shop.pid", self.fake / "orphan.txt"
+        pidf, beat = self.pidf(repo), self.fake / "orphan.txt"
         t = time.monotonic()
         while not beat.exists() and time.monotonic() - t < 30:
             time.sleep(0.1)
@@ -479,14 +482,15 @@ class RunTests(unittest.TestCase):
             "claude": [{"commit": True, "tag": "pr-open #12", "next": "Write the emails.",
                         "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
                        {"commit": True, "tag": "pr-open #13", "replace": [[p3, p3.replace("[~]", "[x]") + " | PR #13"]]}]})
-        out = self.run_yah(self.repo(state=state), "--plan", "--iterations", "1", code=0)  # the cap is per phase
+        repo = self.repo(state=state)
+        out = self.run_yah(repo, "--plan", "--iterations", "1", code=0)  # the cap is per phase
         self.assertEqual(self.prompts(), ["/yah:resume P2 build", "/yah:resume P3 build base=checkout/payment"])
         self.assertIn("P2 done: PR #12 open and green. Next: P3 on checkout/payment "
                       "(stacked on P2's PR #12, still open)", out)
         self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green. The merges are yours.", out)
         self.assertIn("2 iterations", out)
         self.assertEqual(len(list((self.data / "runs").glob("*-[12].jsonl"))), 2)  # per-run numbering, no clobber
-        st = yahlib.run_state(self.data / "runs" / "shop.pid")  # the RUN line names the phase it went on to
+        st = yahlib.run_state(self.pidf(repo))  # the RUN line names the phase it went on to
         self.assertEqual((st["target"], st["plan"], st["code"]), ("P3", True, 0))
 
     def test_plan_builds_on_where_a_stacked_parent_merged(self):
@@ -886,8 +890,11 @@ class HelperTests(unittest.TestCase):
         fd = yahlib.hold_run(pidf, {"pid": 3})
         self.assertIsNotNone(fd)
         os.close(fd)
-        self.assertEqual(yahlib.run_pid_path("shop", str(tmp / "shop"), str(tmp / "shop")).name, "shop.pid")
-        self.assertEqual(yahlib.run_pid_path("shop", str(tmp / "wt 2"), str(tmp / "shop")).name, "shop@wt_2.pid")
+        main, other = (yahlib.run_pid_path("shop", str(tmp / d / "shop"), str(tmp / d / "shop")).name for d in "ab")
+        self.assertRegex(main, r"^shop-[0-9a-f]{8}\.pid$")
+        self.assertNotEqual(main, other)  # two repos with one folder name never share a lock
+        wt = yahlib.run_pid_path("shop", str(tmp / "wt 2"), str(tmp / "a" / "shop")).name
+        self.assertEqual(wt, main[:-4] + "@wt_2.pid")
 
     def test_targets_and_prod_branch(self):
         pt = self.mod.parse_target
