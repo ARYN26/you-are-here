@@ -30,6 +30,14 @@ On yes, run `setup.py --tier <tier> --yes` and show the output. The statusline s
 
 Only when the tier is `max20`, offer: "Turn ultracode on for every session? It runs xhigh effort with workflows, which costs more per turn. yah keeps it lean: workflows capped at medium size (<10 agents), and a once-per-session rule to use workflows only for genuinely parallel work, with low or medium effort for mechanical stages." On yes, run `setup.py --ultracode --yes` and show the output. `--uninstall` restores the previous values.
 
+## 3c. Auto-update (optional)
+
+Offer: "Turn on auto-update for yah? Claude Code leaves it off for plugins from third-party marketplaces, so yah stays at the version you installed until you run `claude plugin update yah@you-are-here`. With it on, Claude Code fetches new versions in the background once a session starts, and the next session loads them." On yes, run `setup.py --auto-update` and show the output. It changes only that setting. `--uninstall` restores the previous value.
+
+## 3d. Auto-merge (optional)
+
+Offer: "Let `yah run` merge its own PRs? It is off by default, and you merge every PR. With it on, only the `yah run` driver merges, never the model, and only a green PR you authored for a plan phase: at least one check ran and all passed, GitHub says it is mergeable with a clean merge state, it is not a draft, and no change request is newer than its last commit. It makes a merge commit pinned to the commit it checked (never a squash), then retargets any PR stacked on it, then deletes the merged branch, never a protected one. A run that merges ends with exit 8; with `--plan` it goes on to the next phase." On yes, run `setup.py --auto-merge` and show the output. It sets only `auto_merge` in config.json. `--uninstall` restores the previous value.
+
 ## 4. Launcher (optional)
 
 Explain: `yah <project>` opens Claude Code in that project from any folder, so project hooks and memory load; `yah` alone lists projects. On yes, find the shell's rc file (`~/.zshrc`, `~/.bashrc`, `~/.config/fish/config.fish`, or on Windows the path printed by `powershell -NoProfile -Command '$PROFILE'`) and run `setup.py --install-launcher <rcfile>`. On Windows also run it with the `yah.cmd` path that setup printed, so `yah` works in cmd.exe too. Tell the user to open a new terminal.

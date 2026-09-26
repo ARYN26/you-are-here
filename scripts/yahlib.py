@@ -17,7 +17,7 @@ TIERS = {"pro": (100_000, 120_000, 160_000), "max5": (120_000, 150_000, 200_000)
 DEFAULTS = {"tier": "max5", "pace_slack": 15, "premium_models": ["fable", "mythos"], "recent_days": 14,
             "brain_dir": "docs/brain", "recall_max_chars": 10000,
             "run_iterations": 8, "run_iteration_minutes": 45, "run_total_hours": 6,
-            "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "ultracode": False}
+            "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "ultracode": False, "auto_merge": False}
 # tier -> --max-budget-usd per `yah run` iteration, unless run_budget_usd is set.
 RUN_BUDGET = {"pro": 5, "max5": 10, "max20": 15, "api": 5}
 _config = None
@@ -84,6 +84,7 @@ def config():
             cfg[key] = num(cfg[key], DEFAULTS[key])
         cfg["run_budget_usd"] = num(cfg.get("run_budget_usd"), RUN_BUDGET.get(cfg["tier"], RUN_BUDGET["max5"]))
         cfg["brain_dir"] = str(cfg["brain_dir"] or DEFAULTS["brain_dir"]).strip("/\\")
+        cfg["auto_merge"] = cfg["auto_merge"] is True  # merging is opt-in: only a JSON true turns it on
         pm = cfg["premium_models"]
         cfg["premium_models"] = [str(m).lower() for m in ([pm] if isinstance(pm, str) else pm or []) if m]
         if not isinstance(cfg.get("projects"), dict):

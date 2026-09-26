@@ -5,4 +5,4 @@ paths: ["skills/auto/SKILL.md", "scripts/setup.py", "scripts/run.py"]
 status: active
 source: user, 2026-09-25
 ---
-Off unless the user opts in via /yah:setup. When on: every check passed, MERGEABLE, no unanswered change request; merge commit, retarget the stacked PR, then delete the branch.
+Off unless /yah:setup opts in. Only the run driver merges its own phase PR, judged on a read taken after checks pass: a check ran, CLEAN, not draft, not stacked. Merge commit, retarget, then delete.

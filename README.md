@@ -49,7 +49,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | `/yah:phases` | Turns an approved plan into phases in STATE.md. | One turn. Writes in your repo. |
 | `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). Works on every tier: when the account cannot use Fable, Claude Code runs the agent on the session's model. | Fable usage. See the plan table. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
-| `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops; with `--plan`, through every open phase. The merge is yours. See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
+| `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops; with `--plan`, through every open phase. The merge is yours unless you turn on [auto-merge](#auto-merge-opt-in). See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
 | PostToolUse guard | The context guard again after each tool call, so wrap nudges reach a headless session, which has only one prompt. | Only inside `yah run` iterations: one local Python run per tool call. Interactive sessions never run it. |
 | Push guard | A PreToolUse hook on Bash and PowerShell that denies force pushes, pushes to protected branches and merges. See [Rails](#hands-free-runs-yah-run). | Only inside `yah run` iterations: one local Python run per Bash call. Interactive sessions never run it. |
 | Ultracode opt-in | Max 20x only, offered by `/yah:setup`: ultracode on in every session with workflows capped at medium size, plus a once-per-session rule for sizing workflows. See [Ultracode on Max 20x](#ultracode-on-max-20x). | About 80 tokens once per session. The spend is ultracode's own: xhigh effort and workflow agents. |
@@ -64,7 +64,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 /yah:setup
 ```
 
-A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers the `yah` launcher and offers to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md` (about 320 tokens on every turn). Each step needs your yes.
+A plugin cannot set the statusline, so `/yah:setup` does it. It asks your tier, shows a dry run, and applies only after you say yes. Then it offers auto-update (see below), [auto-merge](#auto-merge-opt-in) for `yah run`, the `yah` launcher, and to append [RULES.md](RULES.md) to `~/.claude/CLAUDE.md` (about 320 tokens on every turn). Each step needs your yes.
 
 You can also run setup from a terminal (use `python` on Windows):
 
@@ -72,11 +72,11 @@ You can also run setup from a terminal (use `python` on Windows):
 python3 "$HOME/.claude/plugins/marketplaces/you-are-here/scripts/setup.py" --tier max5 --dry-run
 ```
 
-Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell|cmd` (prints the snippet), `--install-launcher RCFILE` (a `.cmd` path, or a folder on Windows, gets a whole `yah.cmd`), `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below) and `--yes` (no prompts).
+Flags: `--tier pro|max5|max20|api`, `--dry-run`, `--uninstall`, `--python CMD`, `--launcher bash|zsh|fish|powershell|cmd` (prints the snippet), `--install-launcher RCFILE` (a `.cmd` path, or a folder on Windows, gets a whole `yah.cmd`), `--install-rules [FILE]` (appends RULES.md as a marked block; default `CLAUDE.md` in the Claude config folder), `--ultracode` (opt-in, see below), `--auto-update` (opt-in, runs on its own: turns on Claude Code's auto-update for yah's marketplace and changes nothing else), `--auto-merge` (opt-in, runs on its own: sets `auto_merge` in config.json and changes nothing else; see [auto-merge](#auto-merge-opt-in)) and `--yes` (no prompts).
 
 **Updating**
 
-yah sets no version number, so every commit to main counts as a new version. Claude Code does not auto-update third-party marketplaces unless you turn it on: `/plugin` → **Marketplaces** → `you-are-here` → **Enable auto-update**. Without that, update by hand with `claude plugin update yah@you-are-here` (or `/plugin` → **Installed** → yah → **Update now**), then run `/reload-plugins` or start a new session. The statusline and the launcher run from the marketplace clone, so they pick up the update too.
+yah sets no version number, so every commit to main counts as a new version. Claude Code does not auto-update third-party marketplaces unless you turn it on, and a plugin author cannot change that default. `/yah:setup` offers to turn it on for you (`setup.py --auto-update`), or do it yourself: `/plugin` → **Marketplaces** → `you-are-here` → **Enable auto-update**. Without that, update by hand with `claude plugin update yah@you-are-here` (or `/plugin` → **Installed** → yah → **Update now**), then run `/reload-plugins` or start a new session. The statusline and the launcher run from the marketplace clone, so they pick up the update too.
 
 Running a fork of yah, or another plugin with the same hooks? Disable it while yah is installed (`/plugin disable <name>`); otherwise every hook and skill listing runs twice.
 
@@ -191,8 +191,9 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 | Exit | When |
 |---|---|
 | 6 | The PR was merged or closed. With `--plan`, a merged PR whose phase is closed moves on to the next phase instead. |
-| 0 | The PR is open, its checks pass (or it has none), no CHANGES_REQUESTED review is newer than the head commit, and the phase is closed (or TARGET was a PR). "The merge is yours." With `--plan`: no open phase is left, "plan done", with each phase's PR. |
-| 2 | The last session needs you: it ended in an error (a timeout included), a permission was denied during it, it ended `needs-human` or `blocked`, or it ended without a `YAH-RESULT:` line (usually the plugin was not loaded). The denial or question is printed. |
+| 8 | With `auto_merge` on, where 0 would stop: the PR met every [auto-merge](#auto-merge-opt-in) rule and yah merged it, "merged by yah". With `--plan`, the run goes on to the next phase instead. |
+| 0 | The PR is open, its checks pass (or it has none), no CHANGES_REQUESTED review is newer than the head commit, and the phase is closed (or TARGET was a PR). "The merge is yours." With `auto_merge` on, it also says which merge rule was not met. With `--plan`: no open phase is left, "plan done", with each phase's PR. |
+| 2 | The last session needs you: it ended in an error (a timeout included), a permission was denied during it, it ended `needs-human` or `blocked`, or it ended without a `YAH-RESULT:` line (usually the plugin was not loaded). Also a failed auto-merge step. The denial or question is printed. |
 | 3 | Stalled: HEAD and NEXT unchanged for 2 iterations in a row. |
 | 4 | The iteration cap, or `run_total_hours` of wall clock. |
 | 7 | Weekly usage at or over `run_week_stop_pct`, or more than `pace_slack` points ahead of pace. |
@@ -201,7 +202,7 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 
 #### Whole plans: `--plan`
 
-`yah run --plan` keeps going where a plain run stops. When the phase's PR is open and green (or merged) and its phase is closed, it pins the next open phase and runs that. It stops with exit 0, "plan done", when no open phase is left in the plan it started on (another `## Plan:` below is not run). It stops with exit 2 when the next phase is marked `(you)`, or when the finished phase's last session asked for you or hit a denial. It never merges: each green PR waits for you, and the finished phase's branch is protected for the rest of the run.
+`yah run --plan` keeps going where a plain run stops. When the phase's PR is open and green (or merged) and its phase is closed, it pins the next open phase and runs that. It stops with exit 0, "plan done", when no open phase is left in the plan it started on (another `## Plan:` below is not run). It stops with exit 2 when the next phase is marked `(you)`, or when the finished phase's last session asked for you or hit a denial. Unless `auto_merge` is on, it never merges: each green PR waits for you, and the finished phase's branch is protected for the rest of the run.
 
 A new phase's base comes from the plan. There are two exceptions, and in both `/yah:resume` gets `base=<branch>` and writes it to the phase line:
 - If the plan's base is another phase's branch whose PR has merged, the phase builds on where that PR merged, since the branch may be gone.
@@ -209,7 +210,25 @@ A new phase's base comes from the plan. There are two exceptions, and in both `/
 
 The iteration cap is per phase. `run_total_hours` and the weekly pace hold for the whole run. `--dry-run` prints the phase order with each base.
 
-**Rails.** Every iteration gets two layers. Neither is a sandbox (see Limits). run.py never passes `--bare`, `bypassPermissions` or `--dangerously-skip-permissions`. Protected branches are `main`, `master`, your `trunks` (default also `develop` and `dev`), the branch your `prod` text names, and, with no config needed, what where.py infers from git alone: the plan's phase bases, the branch open PRs land on (cached, so a closed PR still counts), `origin/HEAD`, and on a work branch the nearest branch on its first-parent chain, the one it was cut from (a branch merged into it, like a docs PR, is not one). When that chain holds only trunks, the nearest branch merged into it is protected too: a base synced in with `git merge` looks just like a merged docs PR to git. The set only grows during a run, including the base of the PR it follows.
+#### Auto-merge: opt-in
+
+Off by default: a run stops at a green PR and the merge is yours. `/yah:setup` offers to turn it on (`setup.py --auto-merge`, which sets `auto_merge: true` in config.json). Only a JSON `true` counts; `"true"` or `1` leaves it off. `/yah:where` then shows `auto-merge: on` on a green phase PR instead of `merge: you`.
+
+With it on, the driver merges, never the model: `gh pr merge` stays on the DENY list and the push guard still denies it in every session. The driver merges only when all of these hold:
+- at least one check ran, and every check passed;
+- GitHub says it is `MERGEABLE`, with merge state `CLEAN` or `HAS_HOOKS`;
+- it is not a draft;
+- no CHANGES_REQUESTED review is newer than the head commit;
+- you opened it: its author is your `gh` user;
+- it is the PR of the plan phase the run is on;
+- it does not target another phase's branch (a stacked PR waits until the PR below it merges and it is retargeted);
+- the last session did not end in an error, a denial, `needs-human` or `blocked`.
+
+It reads the PR again once its checks pass and judges only that read, since the wait for checks can be long: a review, a draft or a new commit that lands during the wait stops the merge.
+
+Then, in this order: `gh pr merge <N> --merge --match-head-commit <sha>` (a merge commit, never a squash, and only if the head has not moved); each open PR based on the merged branch is retargeted to the merged PR's base; the merged branch is deleted on GitHub, never a protected one. Retargeting comes first because GitHub closes a PR whose base branch is deleted, which is also why it never passes `--delete-branch`. The run stops with exit 8, "merged by yah"; with `--plan` it goes on, and the next phase builds on the merged PR's base. A rule not met leaves the PR to you (exit 0 says which), and a failed merge step stops the run with exit 2.
+
+**Rails.** Every iteration gets two layers. Neither is a sandbox (see Limits). run.py never passes `--bare`, `bypassPermissions` or `--dangerously-skip-permissions`. Protected branches are `main`, `master`, your `trunks` (default also `develop` and `dev`), the branch your `prod` text names, and, with no config needed, what where.py infers from git alone: the plan's phase bases, the branch open PRs land on (cached, so a closed PR still counts), `origin/HEAD`, and on a work branch the nearest branch on its first-parent chain, the one it was cut from (a branch merged into it, like a docs PR, is not one). When that chain holds only trunks, the nearest branch merged into it is protected too: a base synced in with `git merge` looks just like a merged docs PR to git. The set only grows during a run, including the base of the PR it follows. No session can merge; with `auto_merge` on, the driver merges between sessions (see [Auto-merge](#auto-merge-opt-in)).
 
 - **Push guard.** `scripts/push_guard.py`, a PreToolUse hook on Bash and PowerShell, added through `--settings` for run iterations only. It parses each command, including `git -C path push`, `git -c key=value push`, `cd x && git push` and combined short flags like `-uf`, and denies:
   - force pushes, `+` refspecs, `--mirror`, `--all`, `--delete`/`-d`, `:branch` deletes, wildcard refspecs and `--prune`;
@@ -305,20 +324,23 @@ The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own cont
 
 **Writes in your repo only when you ask.** That means `/yah:wrap`, `/yah:phases`, a yes to a brain folder in `/yah:start`, and `yah run`, whose sessions follow `/yah:wrap`. The run driver itself writes nothing in the repo. The wrap skill tells Claude to commit only on the feature branch and never to commit `.env*` files.
 
-**Network.** yah's scripts make no network calls of their own and send no telemetry. The only network traffic is `gh` (if installed) reading PRs and checks, and the push and PR that `/yah:wrap` makes when a phase is complete, in your session or in a `yah run` session.
+**Network.** yah's scripts make no network calls of their own and send no telemetry. The only network traffic is `gh` (if installed) reading PRs and checks, and the push and PR that `/yah:wrap` makes when a phase is complete, in your session or in a `yah run` session. With `auto_merge` on, the `yah run` driver also merges, retargets and deletes a branch through `gh`.
 
-**Pushes and merges.** In an interactive session, "push only the feature branch, never a trunk or PROD, never merge" is an instruction in the `/yah:wrap` skill, not a block. The hard blocks, the push guard and the DENY list, exist only inside `yah run`. Either way, turn on branch protection.
+**Pushes and merges.** In an interactive session, "push only the feature branch, never a trunk or PROD, never merge" is an instruction in the `/yah:wrap` skill, not a block. The hard blocks, the push guard and the DENY list, exist only inside `yah run`. Either way, turn on branch protection. yah merges only when you opt in with `setup.py --auto-merge`, and then only the `yah run` driver merges, never the model (see [auto-merge](#auto-merge-opt-in)).
 
 **Never**
 
 - blocks a prompt
+- merges a PR, unless you turn on auto-merge. Even then only the `yah run` driver merges, never the model, with a merge commit (never a squash), and it never deletes a protected branch.
 - changes your model, effort, permissions, hooks or env settings, except `ultracode` and `workflowSizeGuideline` when you opt in with `--ultracode`. `yah run` passes its permission mode, DENY list, push guard and PostToolUse guard as flags to its own child sessions only.
 
 **Setup touches only:**
 
 - `statusLine` in `settings.json`, after saving `settings.json.bak-yah-YYYYmmdd-HHMMSS`. The old value goes into `setup-state.json`.
-- `config.json` in the data folder (the tier, and `ultracode` if you opt in).
+- `config.json` in the data folder (the tier, and `ultracode` or `auto_merge` if you opt in).
 - With `--ultracode` only: `ultracode` and `workflowSizeGuideline` in `settings.json`, after a backup. The old values go into `setup-state.json`.
+- With `--auto-update` only: `autoUpdate: true` on yah's `extraKnownMarketplaces` entry in `settings.json`, after a backup (the entry is added with the source Claude Code recorded if it is missing). The old value goes into `setup-state.json`.
+- With `--auto-merge` only: `auto_merge: true` in `config.json`. The old value goes into `setup-state.json`.
 - Optionally, your shell rc (a block between `# >>> you-are-here >>>` and `# <<< you-are-here <<<`) and `~/.claude/CLAUDE.md` (RULES.md appended in a marked block). Each happens only after your yes. Setup never rewrites an rc file that isn't valid UTF-8; it prints the snippet for you to paste instead.
 
 **Hooks.** Claude Code runs hooks in `sh` on macOS and Linux and in Git Bash on Windows, so one POSIX command covers all three:
@@ -413,6 +435,7 @@ yah never needs beads, and beads shows nothing STATE.md does not. A repo that al
 | `amber`, `wrap_soon`, `wrap_now` | Override the preset. Context turns amber at `amber`, red with "wrap" at `wrap_soon`, and the guard nudges again at `wrap_now`. The guard re-arms below `amber`. |
 | `pace_slack` | How many points the weekly % may run ahead of pace before the once-a-day nudge, or before `yah run` stops. |
 | `premium_models` | Model ids or names that get a red tag in the statusline and a once-per-session nudge. |
+| `auto_merge` | Default `false`. Set by `setup.py --auto-merge`. Only a JSON `true` turns it on; then `yah run` merges a green phase PR it opened. See [auto-merge](#auto-merge-opt-in). |
 | `ultracode` | Set by `setup.py --ultracode`. Adds the once-per-session workflow sizing rule and turns the pace nudge toward smaller workflows. |
 | `recent_days` | How far back the home view looks for repos yah has seen. |
 | `brain_dir` | The brain folder, relative to the repo root. Default `docs/brain`. |
@@ -428,7 +451,7 @@ yah never needs beads, and beads shows nothing STATE.md does not. A repo that al
 **Common objections, one line each**
 
 - **"Why not ccusage, claude-hud or ccstatusline?"** They show your session; yah shows your project (phase, NEXT, PR) and drives wrap then `/clear`. Run ccusage alongside; Claude Code has one statusline slot, so with another statusline yah's hooks and skills still work but the context guard has no numbers.
-- **"Unattended auto mode is YOLO."** It stops when a PR is open and green, has no merge step, hard-blocks merges, trunk pushes and force pushes inside runs, stops after any denial, and assumes branch protection. Not for repos with untrusted commenters.
+- **"Unattended auto mode is YOLO."** It stops when a PR is open and green, has no merge step unless you opt in (then the driver merges, never a session), hard-blocks merges, trunk pushes and force pushes inside runs, stops after any denial, and assumes branch protection. Not for repos with untrusted commenters.
 - **"Bloat?"** Measured +593 tokens per turn against a no-plugin session (skill listing, agent listing and the SessionStart block), plus about 320 if you append RULES.md. Per prompt, two local script runs of about 35–70 ms that add nothing unless a nudge fires; recall adds its block once. The brain and `yah run` cost nothing until you use them. Separately, claude.ai connectors can change their tool descriptions between sessions, which rewrites the prompt cache whatever plugins you run.
 - **"Auto-memory or `/compact` already does this."** Memory holds your preferences; the brain holds repo facts, in the repo, reviewable in PRs, and loads only the few that match, once per session.
 - **"$2,600 in a week is a you problem."** Yes. The fix it argues for is free: write NEXT down, `/clear`, one task per session.
@@ -440,7 +463,7 @@ The official cost advice is `/clear` between tasks, because `/compact` is itself
 The notes live in your repo, so they are reviewed in PRs, diffed and grepped, and they open in Obsidian. Recall is local keyword overlap plus changed-file globs, once per session, with no extra process. The trade-off is that it misses notes whose words never come up; INDEX.md is the full list.
 
 **Does it change my settings?**
-Only `statusLine`, after a timestamped backup, with the old value recorded. If you already have a statusline, setup shows it and replaces it only after your yes. It never touches model, effort, permissions, hooks or env, except the two ultracode keys when you pass `--ultracode`. `--uninstall` puts the old values back.
+Only `statusLine`, after a timestamped backup, with the old value recorded. If you already have a statusline, setup shows it and replaces it only after your yes. It never touches model, effort, permissions, hooks or env, except the two ultracode keys when you pass `--ultracode` and yah's marketplace `autoUpdate` when you pass `--auto-update`. `--uninstall` puts the old values back.
 
 **Why Python?**
 Stdlib only, so there is nothing to install beyond Python itself. macOS ships `python3` 3.9 with the Xcode Command Line Tools, so the code avoids 3.10+ syntax. The same files run on macOS, Linux and Windows, and you can read all of them in one sitting.

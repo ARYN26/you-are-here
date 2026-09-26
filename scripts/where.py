@@ -469,7 +469,8 @@ def prod_line(s):
     return ""
 
 
-def pr_lines(prs, branch, state, limit=4, trunks=()):
+def pr_lines(prs, branch, state, limit=4, trunks=(), auto=False):
+    """auto: config.json's auto_merge, so a green phase PR says `yah run` merges it, not you."""
     if not prs:
         return [], {}
     trunks = DEFAULT_TRUNKS | set(trunks)
@@ -513,7 +514,7 @@ def pr_lines(prs, branch, state, limit=4, trunks=()):
         if p["baseRefName"] in heads:
             bits.append(f"stacked on #{heads[p['baseRefName']]}: retarget after it merges")
         elif not p.get("isDraft") and checks_state(p) == "green":
-            bits.append("merge: you")
+            bits.append("auto-merge: on" if auto and p["number"] in phase_by_pr else "merge: you")
         d = age_days(p.get("updatedAt", ""))
         if d >= 2:
             bits.append(f"idle {int(d)}d")
@@ -588,6 +589,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
          "store": store(sm, main_root, plan, ignored, bz),
          "ignored_plan": ignored, "beads_source": bz["source"], "state_md": sm, "prs": prs,
          "gh_tried": proc is not None, "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
+         "auto_merge": config()["auto_merge"],
          "bases": bases, "ancestors": near, "merged_in": merged, "next_stale": stale,
          "aliases": aliases(str(top), plan.get("spec")) if infer else []}
     s["protected"] = protected(s)
@@ -624,7 +626,7 @@ def render(s, brief=False):
         if g.get("base") and g.get("base_ahead") is not None:
             sync.append(f"{g['base_ahead']} ahead of {g['base']}")
         sync.append("no upstream")
-    prl, _ = pr_lines(s["prs"], branch, b, limit=2 if brief else 4, trunks=s["trunks"])
+    prl, _ = pr_lines(s["prs"], branch, b, limit=2 if brief else 4, trunks=s["trunks"], auto=s.get("auto_merge"))
     off_branch = phase["branch"] if phase and phase.get("branch") and phase["branch"] != branch else ""
     st = s.get("next_stale")
     stale = f"NEXT predates {st['commits']} commit{'' if st['commits'] == 1 else 's'} on {st['branch']}: " \

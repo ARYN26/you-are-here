@@ -879,6 +879,28 @@ class PrLinesTests(unittest.TestCase):
         lines, _ = w.pr_lines(prs, "main", None, limit=2)
         self.assertEqual(lines[-1], "+2 more (gh pr list)")
 
+    def test_auto_merge_marks_only_a_green_phase_pr(self):
+        w = load_where()
+        green = [{"conclusion": "SUCCESS"}]
+        prs = [{"number": 1, "headRefName": "p/1", "baseRefName": "main", "statusCheckRollup": green},
+               {"number": 2, "headRefName": "docs", "baseRefName": "main", "statusCheckRollup": green},
+               {"number": 3, "headRefName": "p/3", "baseRefName": "main", "statusCheckRollup": green, "isDraft": True},
+               {"number": 4, "headRefName": "p/4", "baseRefName": "main", "statusCheckRollup": [{"conclusion": "FAILURE"}]}]
+        phases = {"phases": [{"label": f"P{n}", "pr": "", "branch": f"p/{n}"} for n in (1, 3, 4)]}
+
+        def by(auto):
+            lines, _ = w.pr_lines(prs, "main", phases, limit=10, auto=auto)
+            return {int(re.match(r"#(\d+)", ln).group(1)): ln for ln in lines}
+
+        on, off = by(True), by(False)
+        self.assertIn("auto-merge: on", on[1])
+        self.assertNotIn("merge: you", on[1])
+        self.assertIn("merge: you", on[2])  # not a phase PR: yah run never merges it
+        for n in (3, 4):  # a draft or a red PR: nobody merges it yet
+            self.assertNotIn("merge", on[n])
+        self.assertIn("merge: you", off[1])
+        self.assertFalse(any("auto-merge" in ln for ln in off.values()), off)
+
     def test_prod_is_inferred_from_where_prs_land(self):
         w = load_where()
         prs = [{"headRefName": "feat/a", "baseRefName": "live"}, {"headRefName": "feat/b", "baseRefName": "feat/a"},
@@ -900,6 +922,29 @@ class PrLinesTests(unittest.TestCase):
         near = {**s, "landing": ["main"], "ancestors": ["feat/q"]}
         self.assertTrue(w.prod_line(near).startswith("`feat/q` inferred: this branch was cut from it."))
         self.assertEqual(w.prod_line({**near, "ancestors": ["feat/q", "main"]}), "")  # as near a trunk: say nothing
+
+
+class AutoMergeWhereTests(Base):
+    def test_only_a_json_true_turns_auto_merge_on(self):
+        w = load_where()
+        repo = self.beads_repo()
+        prs = [{"number": 7, "headRefName": "checkout/payment", "baseRefName": "checkout/cart",
+                "statusCheckRollup": [{"conclusion": "SUCCESS"}]}]
+        for value, on in ((True, True), ("true", False), (1, False), (None, False)):
+            with self.subTest(auto_merge=value):
+                self.config(**({} if value is None else {"auto_merge": value}))
+                s = json.loads(self.where(repo, "--json"))
+                self.assertIs(s["auto_merge"], on)
+                s["prs"] = prs  # the same view gh would give, through render: --brief and the full view agree
+                for brief in (False, True):
+                    text = "\n".join(w.render(s, brief=brief))
+                    self.assertIn("#7  P2  checkout/payment -> checkout/cart  green", text)
+                    if on:
+                        self.assertIn("auto-merge: on", text)
+                        self.assertNotIn("merge: you", text)
+                    else:
+                        self.assertNotIn("auto-merge", text)
+                        self.assertIn("merge: you", text)
 
 
 # ---------------------------------------------------------------- setup.py
@@ -933,8 +978,12 @@ class SetupTests(Base):
         self.settings(self.SETTINGS)
         (self.home / ".bashrc").write_text("export A=1\n", encoding="utf-8")
         scripts = self.plugin_copy(self.tmp / "plugin", rules="# Rules\n")
+        (self.cfg / "plugins").mkdir()
+        (self.cfg / "plugins" / "known_marketplaces.json").write_text(
+            json.dumps({"you-are-here": {"source": {"source": "github", "repo": "ARYN26/you-are-here"}}}), "utf-8")
         before = self.snapshot()
-        for args in (["--tier", "max20", "--yes"], ["--install-launcher", str(self.home / ".bashrc")],
+        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--auto-merge"],
+                     ["--install-launcher", str(self.home / ".bashrc")],
                      ["--install-rules"], ["--uninstall"]):
             out, err, rc = self.setup_py("--dry-run", *args, scripts=scripts)
             self.assertEqual(rc, 0, err)
@@ -1005,6 +1054,117 @@ class SetupTests(Base):
         s = self.settings()
         self.assertNotIn("ultracode", s)
         self.assertEqual(s["workflowSizeGuideline"], "small")
+
+    GH = {"source": "github", "repo": "ARYN26/you-are-here"}
+
+    def known(self, **entries):
+        p = self.cfg / "plugins" / "known_marketplaces.json"
+        p.parent.mkdir(exist_ok=True)
+        p.write_text(json.dumps(entries), encoding="utf-8")
+        return p
+
+    def no_update_env(self):
+        for v in ("DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                  "FORCE_AUTOUPDATE_PLUGINS", "CLAUDE_CODE_PLUGIN_CACHE_DIR"):
+            self.env.pop(v, None)
+
+    def test_auto_update_opt_in_and_uninstall(self):
+        self.no_update_env()
+        other = {"source": {"source": "github", "repo": "someone/else"}}
+        original = dict(self.SETTINGS, statusLine={"type": "command", "command": "echo mine"},
+                        extraKnownMarketplaces={"other": other, "you-are-here": {"source": self.GH}})
+        self.settings(original)
+        known = self.known(**{"you-are-here": {"source": self.GH, "installLocation": "x"}})
+        known_before = known.read_bytes()
+        out, err, rc = self.setup_py("--auto-update", "--yes")  # --yes must not reach the statusline
+        self.assertEqual(rc, 0, err)
+        self.assertIn("autoupdate on for you-are-here", out)
+        self.assertNotIn("auto-update off", out)
+        s = self.settings()
+        self.assertEqual(s["extraKnownMarketplaces"], {"other": other,
+                                                       "you-are-here": {"source": self.GH, "autoUpdate": True}})
+        self.assertEqual({k: v for k, v in s.items() if k != "extraKnownMarketplaces"},
+                         {k: v for k, v in original.items() if k != "extraKnownMarketplaces"})
+        self.assertEqual(known.read_bytes(), known_before)  # Claude Code's own record is never written
+        self.assertIn("autoupdate unchanged (on for you-are-here)", self.setup_py("--auto-update")[0])
+        self.setup_py("--uninstall")
+        self.assertEqual(self.settings(), original)
+
+    def test_auto_update_adds_a_missing_entry_and_uninstall_removes_it(self):
+        self.no_update_env()
+        self.known(**{"you-are-here": {"source": self.GH, "autoUpdate": False}})
+        out, err, rc = self.setup_py("--auto-update", "--yes")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.settings(), {"extraKnownMarketplaces":  # no statusLine, no config.json
+                                           {"you-are-here": {"source": self.GH, "autoUpdate": True}}})
+        self.assertFalse((self.data / "config.json").exists())
+        self.setup_py("--uninstall")
+        self.assertEqual(self.settings(), {})
+
+    def test_auto_update_leaves_settings_alone_when_it_cannot_or_need_not_apply(self):
+        self.no_update_env()
+        for why, known, expect in (
+                ("not installed", {}, "not an installed marketplace"),
+                ("local", {"you-are-here": {"source": {"source": "directory", "path": "/src/yah"}}}, "loads in place"),
+                ("already on", {"you-are-here": {"source": self.GH, "autoUpdate": True}}, "autoupdate unchanged")):
+            with self.subTest(why):
+                self.settings(self.SETTINGS)
+                self.known(**known)
+                out, err, rc = self.setup_py("--auto-update", "--yes")
+                self.assertEqual(rc, 0, err)
+                self.assertIn(expect, out)
+                self.assertNotIn("extraKnownMarketplaces", self.settings())
+
+    def test_auto_update_warns_when_an_env_var_turns_updates_off(self):
+        self.no_update_env()
+        self.known(**{"you-are-here": {"source": self.GH}})
+        self.env["DISABLE_AUTOUPDATER"] = "0"  # a 0 turns nothing off
+        self.assertNotIn("auto-update off", self.setup_py("--auto-update", "--yes")[0])
+        self.env["DISABLE_AUTOUPDATER"] = "1"
+        self.assertIn("WARNING    DISABLE_AUTOUPDATER", self.setup_py("--auto-update", "--yes")[0])
+        self.env["FORCE_AUTOUPDATE_PLUGINS"] = "0"
+        self.assertIn("WARNING    DISABLE_AUTOUPDATER", self.setup_py("--auto-update", "--yes")[0])
+        self.env["FORCE_AUTOUPDATE_PLUGINS"] = "1"
+        self.assertNotIn("auto-update off", self.setup_py("--auto-update", "--yes")[0])
+
+    def test_auto_update_rerun_after_a_hand_edit_restores_the_latest_choice(self):
+        self.no_update_env()
+        self.known(**{"you-are-here": {"source": self.GH}})
+        self.settings({"extraKnownMarketplaces": {"you-are-here": {"source": self.GH}}})
+        self.setup_py("--auto-update")
+        self.settings({})  # the user deletes the entry by hand, then runs setup again
+        self.setup_py("--auto-update")
+        self.setup_py("--uninstall")
+        self.assertEqual(self.settings(), {})  # not a leftover {"source": ...} entry
+
+    def read_config(self):
+        return json.loads((self.data / "config.json").read_text("utf-8"))
+
+    def test_auto_merge_opt_in_and_uninstall(self):
+        self.settings(self.SETTINGS)
+        for prior in (None, False, "true"):  # absent, off, and a string that never counted as on
+            with self.subTest(prior=prior):
+                cfg = {"tier": "max20", **({} if prior is None else {"auto_merge": prior})}
+                self.config(**cfg)
+                out, err, rc = self.setup_py("--auto-merge", "--yes")  # --yes must not reach the statusline
+                self.assertEqual(rc, 0, err)
+                self.assertIn("automerge  on:", out)
+                self.assertNotIn("statusLine", out)
+                self.assertEqual(self.read_config(), {**cfg, "auto_merge": True})
+                self.assertEqual(self.settings(), self.SETTINGS)
+                out = self.setup_py("--auto-merge", "--yes")[0]
+                self.assertIn("automerge  unchanged (on)", out)
+                out, err, rc = self.setup_py("--uninstall")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("automerge  removed" if prior is None else "automerge  restored", out)
+                self.assertEqual(self.read_config(), cfg)
+                self.assertEqual(self.settings(), self.SETTINGS)
+
+    def test_auto_merge_uninstall_keeps_a_later_hand_edit(self):
+        self.setup_py("--auto-merge")
+        self.config(auto_merge=False)  # the user turns it off by hand
+        self.assertNotIn("automerge", self.setup_py("--uninstall")[0])
+        self.assertEqual(self.read_config(), {"auto_merge": False})
 
     def test_launcher_block(self):
         rc_file = self.home / ".bashrc"
