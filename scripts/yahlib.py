@@ -106,6 +106,8 @@ def role_text(value, default):
     """A clean "model effort" string. A missing model, or an effort outside EFFORTS (max, junk), comes from default."""
     model, effort = default.split()
     words = value.lower().split() if isinstance(value, str) else []
+    if words and words[0] in EFFORTS + ("max",):  # an effort alone ("xhigh", "max") names no model
+        words = [model] + words
     if words:
         model = words[0]
     if len(words) > 1 and words[1] in EFFORTS:

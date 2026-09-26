@@ -380,6 +380,8 @@ class RolesTests(Base):
         self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
         self.assertIs(lib.config()["ultracode"], False)
         self.assertEqual(self.lib(roles="fable max").role("critic"), ("fable", "high"))
+        lib = self.lib(roles={"critic": "max", "judge": "xhigh"})  # an effort alone keeps the role's model
+        self.assertEqual((lib.role("critic"), lib.role("judge")), (("fable", "high"), ("opus", "xhigh")))
 
 
 # ---------------------------------------------------------------- where.py
@@ -1233,7 +1235,14 @@ class SetupTests(Base):
         self.setup_py("--uninstall")
         self.assertEqual(self.read_config(), {})
 
-    GH = {"source": "github", "repo": "ARYN26/you-are-here"}
+    def test_ultracode_uninstall_keeps_a_config_ultracode_the_user_set(self):
+        self.settings(self.SETTINGS)
+        self.config(ultracode=True)  # on before setup: the settings change alone must not read as an older setup
+        self.assertEqual(self.setup_py("--ultracode", "--yes")[2], 0)
+        self.setup_py("--uninstall")
+        self.assertEqual(self.read_config(), {"ultracode": True})
+
+    GH ={"source": "github", "repo": "ARYN26/you-are-here"}
 
     def known(self, **entries):
         p = self.cfg / "plugins" / "known_marketplaces.json"

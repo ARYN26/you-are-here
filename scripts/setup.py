@@ -334,6 +334,7 @@ def ultracode(settings, sp, state, state_file, dry, say):
     """Opt-in for Max 20x: ultracode on in every session, workflows sized medium (<10 agents). The old values
     go into setup-state.json so --uninstall can put them back; config.json's ultracode turns on the guard's rules,
     built from config roles (the defaults unless the user set some)."""
+    legacy = isinstance(state.get("ultracode"), dict) and "ultracodeConfig" not in state  # an older setup's run
     if all(settings.get(k) == v for k, v in ULTRA.items()):
         say("ultracode  unchanged (on, workflows medium)")
     else:
@@ -352,6 +353,10 @@ def ultracode(settings, sp, state, state_file, dry, say):
         save_json(cp, cfg, dry)
         save_json(state_file, state, dry)
         say(f"config     ultracode on  ({cp})")
+    elif not legacy and "ultracodeConfig" not in state:
+        # already on before setup touched it: record that, so --uninstall's older-setup fallback leaves it on
+        state["ultracodeConfig"] = {"added": False, "prev": True}
+        save_json(state_file, state, dry)
 
 
 UPDATE_OFF = ("DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
@@ -430,15 +435,17 @@ def uninstall(sdir, state, state_file, dry, say):
     recs = [(key, rec, what) for key, rec, what in (("auto_merge", state.get("autoMerge"), "automerge "),
                                                     ("ultracode", uc, "ultracode  config")) if isinstance(rec, dict)]
     cp = data_dir() / "config.json"
-    cfg = load_obj(cp) if recs else {}
+    cfg, changed = (load_obj(cp) if recs else {}), False
     for key, rec, what in recs:
         if cfg.get(key) is True:  # still ours: a hand edit since then is the user's choice
             if rec.get("added"):
                 cfg.pop(key)
             else:
                 cfg[key] = rec.get("prev")
-            save_json(cp, cfg, dry)
+            changed = True
             say(f"{what} " + ("removed" if rec.get("added") else f"restored: {json.dumps(rec.get('prev'))}"))
+    if changed:
+        save_json(cp, cfg, dry)
     sp = claude_dir() / "settings.json"
     settings = load_obj(sp)
     au, ekm = state.get("autoUpdate"), settings.get("extraKnownMarketplaces")

@@ -106,14 +106,18 @@ def week_pace(resets_at, now):
     return round(100 * (1 - left / WEEK_S))
 
 
+def pool_entry(used, resets_at):
+    """One rate-limit pool as saved in limits.json and state: used % and reset time in epoch seconds."""
+    r = to_epoch(resets_at)
+    return {"used_pct": used, "resets_at": None if r is None else round(r)}
+
+
 def save_limits(now, rl, five, week, pace, pools):
     """limits.json for other tools; rewritten only when a number changes. `pools` holds the extra
     rate_limits pools by their key (seven_day_opus, ...)."""
-    def pool(key, used):
-        r = to_epoch((rl.get(key) or {}).get("resets_at"))
-        return {"used_pct": used, "resets_at": None if r is None else round(r)}
-    new = {"five_hour": pool("five_hour", five), "seven_day": pool("seven_day", week), "pace_pct": pace,
-           "pools": pools}
+    new = {key: pool_entry(used, (rl.get(key) or {}).get("resets_at"))
+           for key, used in (("five_hour", five), ("seven_day", week))}
+    new.update(pace_pct=pace, pools=pools)
     path = data_dir() / "limits.json"
     old = read_json(path, {}) or {}
     if {k: old.get(k) for k in new} != new:
@@ -198,8 +202,7 @@ def main():
         p = pct(val.get("used_percentage"))
         if p is None:
             continue
-        r = to_epoch(val.get("resets_at"))
-        pools[key] = {"used_pct": p, "resets_at": None if r is None else round(r)}
+        pools[key] = pool_entry(p, val.get("resets_at"))
         if p >= 50:
             parts.append(color(f"{key.replace('seven_day_', 'wk ').replace('_', ' ')} {p:.0f}%", AMBER if p < 85 else RED))
 
