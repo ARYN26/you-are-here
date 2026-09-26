@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import beads  # noqa: E402
 from yahlib import (NO_WINDOW, claude_dir, config, data_dir, empty_state, find_git, find_tool,  # noqa: E402
-                    first_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs, run, run_info,
+                    first_line, log_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs, run, run_info,
                     run_status, run_text, short_of, utf8_stdout, where_cache_path, write_json)
 
 PR_FIELDS = "number,title,headRefName,baseRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt"
@@ -151,9 +151,28 @@ def md_scan(lines):
     return heads, items, prose
 
 
-def md_plan(file, head, items, nxt):
+def md_log(lines, n):
+    """The plain lines indented under the phase line at line n, bullets dropped: the handoff log wrap keeps for the
+    next session. Checkbox lines there are sub-tasks, skipped but not an end; a blank line is not an end either."""
+    def indent(ln):
+        t = ln.expandtabs(4)
+        return len(t) - len(t.lstrip())
+    top, log = indent(lines[n - 1]), []
+    for ln in lines[n:]:
+        s = ln.strip()
+        if not s:
+            continue
+        if indent(ln) <= top or s.startswith(("```", "~~~")):
+            break
+        if not md_line(ln):
+            log.append(log_line(s))
+    return log
+
+
+def md_plan(file, head, items, nxt, lines):
     """A `## Plan: Title (spec)` section as a plan: its phase lines (the least indented checkbox lines, normally
-    unindented) with id file:line. Lines indented under a phase are its sub-tasks, not phases."""
+    unindented) with id file:line. Lines indented under a phase are its sub-tasks, not phases, or, when they are
+    not checkboxes, its handoff `log`."""
     m = re.match(r"Plan:\s*(.*?)\s*(?:\(([^)]*)\))?$", head, re.I)
     title, spec = (m.group(1), m.group(2) or "") if m else (head, "")
     views = []
@@ -161,7 +180,7 @@ def md_plan(file, head, items, nxt):
         lm = re.match(r"(P\d+)\b[\s:.-]*(.*)", text)
         label, name = (lm.group(1), lm.group(2)) if lm else (f"P{len(views) + 1}", text)
         v = {"id": f"{file}:{n}", "label": label, "title": name or text, "status": status,
-             "branch": "", "base": "", "pr": "", "next": ""}
+             "branch": "", "base": "", "pr": "", "next": "", "log": md_log(lines, n)}
         for p in fields:
             fm = re.match(r"(branch|base)\s+(\S+)$", p, re.I)
             pr = re.match(r"PR\s*#?(\d+)$", p, re.I)
@@ -222,7 +241,7 @@ def state_md(top, main_root=None):
         # The plan with a phase in progress, else one with an open phase, else the first. A finished plan
         # left above the next one does not hide it.
         parsed = [p for p in (md_plan(name, heads[i][1], [(n, ml) for n, sec, ml in items
-                                                           if sec == i and n in phase_lines], out["next"])
+                                                           if sec == i and n in phase_lines], out["next"], lines)
                               for i in plans) if p]
         out.update(next((p for p in parsed if p["phase"]), None) or
                    next((p for p in parsed if p["next_phase"]), None) or (parsed[0] if parsed else {}))
