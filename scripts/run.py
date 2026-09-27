@@ -132,9 +132,6 @@ def brief(value, n=60):
 
 # ---------------------------------------------------------------- setup
 
-prod_branch = where.prod_branch
-
-
 def protected(branches, prod=""):
     """The branches no iteration may push: where.py's protected set, the PROD branch, main and master."""
     return sorted({str(b) for b in branches if b} | {"main", "master"} | ({prod} if prod else set()))
@@ -1098,12 +1095,12 @@ def main():
     pcfg = cfg["projects"].get(key) if isinstance(cfg["projects"].get(key), dict) else {}
     trunks = pcfg.get("trunks") or []
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
-    prod = prod_branch(str(pcfg.get("prod") or ""), str(top))
     branch = read_branch(git_dir) if git_dir else None
     gh_path = find_tool("gh")
     # where.py's protected set covers a repo with no config.json: the plan's phase bases, where open PRs land
     # (or landed when gh last saw any), origin/HEAD and the branch HEAD was cut from, beside the trunks.
     s = where.collect(str(top), use_gh=bool(gh_path)) or {}
+    prod = (s.get("prod_branches") or [""])[0]  # the first branch config.json's prod text names in this repo
     fence = protected(trunks | set(s.get("protected") or []), prod)
     if not target and not a.plan and branch in fence:  # --plan pins its phase from the plan, like P<n>
         return refuse(f"you are on {branch}, a trunk or the PROD branch. Check out the phase branch first, "

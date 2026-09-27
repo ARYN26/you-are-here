@@ -464,16 +464,16 @@ def aliases(top, spec):
 def prod_branches(prod, top=None):
     """The branches a PROD line names: its `backticked` words, then each other word that is a local or origin
     branch in top (one git call), in text order. Prose is not a branch: "Public repo X. main is live" names main.
-    With no top, only the backticked words."""
-    ticked = re.findall(r"`([^`\s]+)`", prod or "")
-    words = [w.rstrip("./-") for w in re.findall(r"[\w./-]+", re.sub(r"`[^`]*`", " ", prod or ""))]
-    have = existing(top, words) if top else {}
-    return list(dict.fromkeys(ticked + [w for w in words if w in have]))
-
-
-def prod_branch(prod, top=None):
-    """The first branch a PROD line names (see prod_branches), or ""."""
-    return next(iter(prod_branches(prod, top)), "")
+    A code span with spaces (`git push origin release`) is read as prose, origin/<b> names <b>, and a sentence-case
+    word names its lower-case branch ("Release ships" names release). HEAD is never one, though origin/HEAD is a
+    ref. With no top, only the backticked words."""
+    ticked = [t.removeprefix("origin/") for t in re.findall(r"`([^`\s]+)`", prod or "")]
+    words = [w.rstrip("./-").removeprefix("origin/")
+             for w in re.findall(r"[\w./-]+", re.sub(r"`[^`\s]+`", " ", prod or ""))]
+    pairs = [(w, w[:1].lower() + w[1:]) for w in words]
+    have = existing(top, [c for p in pairs for c in p]) if top else {}
+    found = [next((c for c in p if c in have), "") for p in pairs]
+    return [b for b in dict.fromkeys(ticked + found) if b and b != "HEAD"]
 
 
 def trunk_set(s):
@@ -486,7 +486,7 @@ def protected(s):
     only a trunk, the nearest branch merged in (a synced base). Fails closed: each source only adds."""
     return sorted(trunk_set(s) | set(s.get("landing") or []) | set(s.get("bases") or [])
                   | set(s.get("ancestors") or []) | set(s.get("merged_in") or [])
-                  | set(s.get("prod_branches") or prod_branches(s.get("prod"))))
+                  | set(s.get("prod_branches") or []))
 
 
 def prod_line(s):
