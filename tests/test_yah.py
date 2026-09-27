@@ -616,6 +616,21 @@ class WhereTests(Base):
         self.assertIn("!       phase branch is checkout/payment, you are on main", full)
         self.assertIn("PROD    main deploys on push. PRs only.", full)
 
+    def test_prod_prose_names_only_real_branches(self):
+        repo = self.state_repo(branch="feat/x")
+        self.git(repo, "branch", "release")
+        self.git(repo, "branch", "main")
+        text = "Public repo acme/shop. main is what users install; Vercel deploys release on push."
+        self.config(projects={"shop": {"prod": text}})
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["prod_branches"], ["main", "release"])  # release was the first word's blind spot
+        self.assertIn("release", s["protected"])
+        for word in ("Public", "repo", "Vercel", "acme/shop", "feat/x"):
+            self.assertNotIn(word, s["protected"])
+        self.assertIn(f"PROD    {text}", self.where(repo))  # the warning itself is shown as written
+        self.config(projects={"shop": {"prod": "Deploys `live`, which does not exist yet; release mirrors it."}})
+        self.assertEqual(json.loads(self.where(repo, "--json"))["prod_branches"], ["live", "release"])
+
     def test_state_md_plan(self):
         repo = self.state_repo()
         brief = self.where(repo, "--brief")

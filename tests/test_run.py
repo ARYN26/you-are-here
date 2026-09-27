@@ -1058,9 +1058,21 @@ class HelperTests(unittest.TestCase):
     def test_targets_and_prod_branch(self):
         pt = self.mod.parse_target
         self.assertEqual([pt(""), pt("p2"), pt("#12"), pt("12"), pt("x")], ["", "P2", "#12", "#12", None])
-        pb = self.mod.prod_branch
+        pb, pbs = self.mod.prod_branch, self.mod.where.prod_branches
         self.assertEqual([pb("main deploys on push."), pb("Vercel builds `release` only"), pb("")],
-                         ["main", "release", ""])
+                         ["", "release", ""])  # with no repo, only a backticked word names a branch
+        public = "Public repo ARYN26/you-are-here. main is what users install; push only tested commits."
+        with tempfile.TemporaryDirectory() as d:
+            ident = ["-c", "user.name=T", "-c", "user.email=t@example.com"]
+            for args in (["init", "-q"], ["symbolic-ref", "HEAD", "refs/heads/main"],
+                         [*ident, "commit", "-q", "--allow-empty", "-m", "init"], ["branch", "release"],
+                         ["branch", "feat/x"]):
+                subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+            self.assertEqual([pb("main deploys on push.", d), pb(public, d), pb("Vercel deploys release.", d)],
+                             ["main", "main", "release"])
+            self.assertNotIn("Public", pbs(public, d))
+            self.assertEqual(pbs(public, d), ["main"])
+            self.assertEqual(pbs("Ships `live`; feat and main mirror release.", d), ["live", "main", "release"])
 
     def test_plugin_source(self):
         ps = self.mod.plugin_source

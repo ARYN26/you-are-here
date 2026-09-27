@@ -461,10 +461,19 @@ def aliases(top, spec):
     return [(f"/{p}:{n}", f"/yah:{n}") for p, n in pairs]
 
 
-def prod_branch(prod):
-    """The branch a PROD line names: a `backticked` word, else its first word."""
-    m = re.search(r"`([^`\s]+)`", prod or "") or re.match(r"\s*([\w./-]+)", prod or "")
-    return m.group(1) if m else ""
+def prod_branches(prod, top=None):
+    """The branches a PROD line names: its `backticked` words, then each other word that is a local or origin
+    branch in top (one git call), in text order. Prose is not a branch: "Public repo X. main is live" names main.
+    With no top, only the backticked words."""
+    ticked = re.findall(r"`([^`\s]+)`", prod or "")
+    words = [w.rstrip("./-") for w in re.findall(r"[\w./-]+", re.sub(r"`[^`]*`", " ", prod or ""))]
+    have = existing(top, words) if top else {}
+    return list(dict.fromkeys(ticked + [w for w in words if w in have]))
+
+
+def prod_branch(prod, top=None):
+    """The first branch a PROD line names (see prod_branches), or ""."""
+    return next(iter(prod_branches(prod, top)), "")
 
 
 def trunk_set(s):
@@ -476,7 +485,8 @@ def protected(s):
     land (the last gh run's too when gh sees none), origin/HEAD, the branch HEAD was cut from, and when that is
     only a trunk, the nearest branch merged in (a synced base). Fails closed: each source only adds."""
     return sorted(trunk_set(s) | set(s.get("landing") or []) | set(s.get("bases") or [])
-                  | set(s.get("ancestors") or []) | set(s.get("merged_in") or []) | ({prod_branch(s["prod"])} - {""}))
+                  | set(s.get("ancestors") or []) | set(s.get("merged_in") or [])
+                  | set(s.get("prod_branches") or prod_branches(s.get("prod"))))
 
 
 def prod_line(s):
@@ -584,7 +594,8 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     # "Cut from" only means something on a work branch: on main, a branch merged with --no-ff is an ancestor too.
     # Checked against the cached landing here so the git walk overlaps gh, and against the live one below.
     trunks = trunk_set({"trunks": cfg.get("trunks")})
-    trunkish = trunks | set(bases) | set(cached) | {prod_branch(cfg.get("prod"))}
+    prods = prod_branches(cfg.get("prod"), str(top) if infer else None)
+    trunkish = trunks | set(bases) | set(cached) | set(prods)
     near, merged = nearest_bases(str(top), g["branch"], mine, trunks) \
         if infer and g["branch"] and g["branch"] not in trunkish else ([], [])
     plan, phase = (state or {}).get("plan") or {}, (state or {}).get("phase") or {}
@@ -615,7 +626,8 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     s = {"key": key, "top": str(top), "main_root": str(main_root), "git": g, "state": state,
          "store": store(sm, main_root, plan, ignored, bz),
          "ignored_plan": ignored, "beads_source": bz["source"], "state_md": sm, "prs": prs,
-         "gh_tried": proc is not None, "prod": cfg.get("prod", ""), "trunks": cfg.get("trunks", []), "landing": land,
+         "gh_tried": proc is not None, "prod": cfg.get("prod", ""), "prod_branches": prods,
+         "trunks": cfg.get("trunks", []), "landing": land,
          "auto_merge": config()["auto_merge"],
          "bases": bases, "ancestors": near, "merged_in": merged, "next_stale": stale,
          "aliases": aliases(str(top), plan.get("spec")) if infer else [],

@@ -1098,7 +1098,7 @@ def main():
     pcfg = cfg["projects"].get(key) if isinstance(cfg["projects"].get(key), dict) else {}
     trunks = pcfg.get("trunks") or []
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
-    prod = prod_branch(str(pcfg.get("prod") or ""))
+    prod = prod_branch(str(pcfg.get("prod") or ""), str(top))
     branch = read_branch(git_dir) if git_dir else None
     gh_path = find_tool("gh")
     # where.py's protected set covers a repo with no config.json: the plan's phase bases, where open PRs land
