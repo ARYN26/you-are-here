@@ -1058,9 +1058,27 @@ class HelperTests(unittest.TestCase):
     def test_targets_and_prod_branch(self):
         pt = self.mod.parse_target
         self.assertEqual([pt(""), pt("p2"), pt("#12"), pt("12"), pt("x")], ["", "P2", "#12", "#12", None])
-        pb = self.mod.prod_branch
-        self.assertEqual([pb("main deploys on push."), pb("Vercel builds `release` only"), pb("")],
-                         ["main", "release", ""])
+        pbs = self.mod.where.prod_branches
+        self.assertEqual([pbs("main deploys on push."), pbs("Vercel builds `release` only"), pbs("")],
+                         [[], ["release"], []])  # with no repo, only a backticked word names a branch
+        public = "Public repo ARYN26/you-are-here. main is what users install; push only tested commits."
+        with tempfile.TemporaryDirectory() as d:
+            ident = ["-c", "user.name=T", "-c", "user.email=t@example.com"]
+            for args in (["init", "-q"], ["symbolic-ref", "HEAD", "refs/heads/main"],
+                         [*ident, "commit", "-q", "--allow-empty", "-m", "init"], ["branch", "release"],
+                         ["branch", "feat/x"], ["update-ref", "refs/remotes/origin/main", "HEAD"],
+                         ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]):
+                subprocess.run(["git", "-C", d, *args], check=True, capture_output=True)
+            self.assertEqual([pbs("main deploys on push.", d), pbs("Vercel deploys release.", d)],
+                             [["main"], ["release"]])
+            self.assertNotIn("Public", pbs(public, d))
+            self.assertEqual(pbs(public, d), ["main"])
+            self.assertEqual(pbs("Ships `live`; feat and main mirror release.", d), ["live", "main", "release"])
+            # origin/HEAD is no branch (a push of HEAD must stay allowed); a spaced code span is prose;
+            # origin/<b> is <b>; a sentence-case word is its lower-case branch
+            self.assertEqual(pbs("Never reset HEAD or `HEAD`. Run `git push origin release` by hand.", d), ["release"])
+            self.assertEqual(pbs("Ships from origin/main and `origin/release`.", d), ["release", "main"])
+            self.assertEqual(pbs("Release deploys on push.", d), ["release"])
 
     def test_plugin_source(self):
         ps = self.mod.plugin_source

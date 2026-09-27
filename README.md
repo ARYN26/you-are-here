@@ -503,7 +503,7 @@ yah never needs beads, and beads shows nothing STATE.md does not. A repo that al
 | `run_*` | The `yah run` caps. See [Caps](#hands-free-runs-yah-run). |
 | `projects` | Optional. The home view lists these plus any repo yah saw in the last `recent_days`. No registration is needed. |
 | `path` | Where `yah <project>` goes. |
-| `prod` | The warning shown as the PROD line. `yah run` also denies pushes to the branch it names (the first `backticked` word, else the first word). Without it, where.py infers the branch open PRs land on, shows it as PROD when it is not an ordinary trunk, and `/yah:wrap` and `yah run` protect it. |
+| `prod` | The warning shown as the PROD line. `yah run` also denies pushes to the branches it names: each `backticked` word, and each other word that is a local or origin branch (`origin/release` and a sentence-case "Release" both name release), so prose like "Public repo" names none. Without it, where.py infers the branch open PRs land on, shows it as PROD when it is not an ordinary trunk, and `/yah:wrap` and `yah run` protect it. |
 | `trunks` | Long-lived branches, never treated as stacking targets. Defaults: main, master, develop, dev. |
 
 ## FAQ
