@@ -462,18 +462,19 @@ def aliases(top, spec):
     return [(f"/{p}:{n}", f"/yah:{n}") for p, n in pairs]
 
 
-def prod_branches(prod, top=None):
+def prod_branches(prod, top=None, skip=()):
     """The branches a PROD line names: its `backticked` words, then each other word that is a local or origin
     branch in top (one git call), in text order. Prose is not a branch: "Public repo X. main is live" names main.
     A code span with spaces (`git push origin release`) is read as prose, origin/<b> names <b>, and a sentence-case
     word names its lower-case branch ("Release ships" names release). HEAD is never one, though origin/HEAD is a
-    ref. With no top, only the backticked words."""
+    ref. A prose word in skip (a plan's phase branch) is never one either, or `yah run` could not commit on it;
+    a backticked one still is. With no top, only the backticked words."""
     ticked = [t.removeprefix("origin/") for t in re.findall(r"`([^`\s]+)`", prod or "")]
     words = [w.rstrip("./-").removeprefix("origin/")
              for w in re.findall(r"[\w./-]+", re.sub(r"`[^`\s]+`", " ", prod or ""))]
     pairs = [(w, w[:1].lower() + w[1:]) for w in words]
     have = existing(top, [c for p in pairs for c in p]) if top else {}
-    found = [next((c for c in p if c in have), "") for p in pairs]
+    found = [next((c for c in p if c in have and c not in skip), "") for p in pairs]
     return [b for b in dict.fromkeys(ticked + found) if b and b != "HEAD"]
 
 
@@ -596,7 +597,10 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     # "Cut from" only means something on a work branch: on main, a branch merged with --no-ff is an ancestor too.
     # Checked against the cached landing here so the git walk overlaps gh, and against the live one below.
     trunks = trunk_set({"trunks": cfg.get("trunks")})
-    prods = prod_branches(cfg.get("prod"), str(top) if infer else None)
+    # A prose PROD word that is a phase branch, of any STATE.md plan since a run follows the one it started on,
+    # is the work branch, not PROD.
+    work = mine | {v.get("branch") for p in plans for v in p.get("phases") or []}
+    prods = prod_branches(cfg.get("prod"), str(top) if infer else None, work - {"", None})
     trunkish = trunks | set(bases) | set(cached) | set(prods)
     near, merged = nearest_bases(str(top), g["branch"], mine, trunks) \
         if infer and g["branch"] and g["branch"] not in trunkish else ([], [])

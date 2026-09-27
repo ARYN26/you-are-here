@@ -1096,6 +1096,10 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(pbs("Never reset HEAD or `HEAD`. Run `git push origin release` by hand.", d), ["release"])
             self.assertEqual(pbs("Ships from origin/main and `origin/release`.", d), ["release", "main"])
             self.assertEqual(pbs("Release deploys on push.", d), ["release"])
+            # a phase branch in prose is the run's work branch, not PROD; backticked it still is
+            self.assertEqual(pbs("Release deploys on push; main too.", d, {"release"}), ["main"])
+            self.assertNotIn("release", pbs("main and release ship.", d, {"release"}))
+            self.assertEqual(pbs("Ships `feat/x`; feat/x and release mirror it.", d, {"feat/x", "release"}), ["feat/x"])
 
     def test_plugin_source(self):
         ps = self.mod.plugin_source
