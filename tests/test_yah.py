@@ -884,6 +884,8 @@ class WhereTests(Base):
             with self.subTest(case=case):
                 s = json.loads(self.where(self.repo({"STATE.md": text}, name=f"r{i}"), "--json"))
                 self.assertEqual(s["state"]["plan"]["title"], "New")
+                self.assertNotIn("plans", s)  # every plan with its phases is for run.py, not the --json view
+                self.assertNotIn("plans", s["state_md"])
         s = json.loads(self.where(self.repo({"STATE.md": done}, name="all-done"), "--json"))
         self.assertEqual((s["state"]["plan"]["title"], s["state"]["phase"], s["state"]["next_phase"]), ("Old", None, None))
 

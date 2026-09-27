@@ -350,7 +350,7 @@ def refresh(r, s=None):
     s = s or where.collect(r.top, use_gh=bool(r.gh) and not r.pr) or {}
     guard(r, s.get("protected") or [])
     b = s.get("state") or {}
-    r.phases = plan_phases(r, b)
+    r.phases = plan_phases(r, s)
     if r.label is None and not r.target and r.phases:  # empty TARGET: pin the phase that is current now
         r.label = (b.get("phase") or b.get("next_phase") or {}).get("label")
     r.phase = next((p for p in r.phases if p.get("label") == r.label), None) if r.label else None
@@ -360,14 +360,18 @@ def refresh(r, s=None):
         r.pr = pr_from_where(s, r.phase, {d[1] for d in r.done})
 
 
-def plan_phases(r, b):
-    """The phases of the plan this run started on (pinned at the first read). Once that plan has no open phase,
-    where.py shows the next `## Plan:` with one, and its P<n> labels are not this run's."""
-    plan = b.get("plan") or {}
-    key = (plan.get("id"), plan.get("spec") or plan.get("title"))
+def plan_phases(r, s):
+    """The phases of the plan this run started on (pinned at the first read), even when where.py shows another:
+    a `## Plan:` with a [~] phase wins its view over this plan's open ones, and its P<n> labels are not this
+    run's. A plan gone from STATE.md has no phases."""
+    def key(b):
+        plan = b.get("plan") or {}
+        return plan.get("id"), plan.get("spec") or plan.get("title")
+    b = s.get("state") or {}
     if r.plan_key is None:
-        r.plan_key = key
-    return [p for p in b.get("phases") or [] if isinstance(p, dict)] if key == r.plan_key else []
+        r.plan_key = key(b)
+    mine = next((p for p in [b, *(s.get("plans") or [])] if isinstance(p, dict) and key(p) == r.plan_key), {})
+    return [p for p in mine.get("phases") or [] if isinstance(p, dict)]
 
 
 def fresh_limits(now):
@@ -890,7 +894,7 @@ def advance(r, code, reason):
     r.done.append((r.label, r.pr, "merged by yah" if code == 8 else "merged" if merged else "green"))
     s = where.collect(r.top, use_gh=bool(r.gh)) or {}
     done = [d[0] for d in r.done]
-    nxt = next((p for p in plan_phases(r, s.get("state") or {})
+    nxt = next((p for p in plan_phases(r, s)
                 if p.get("status") != "closed" and p.get("label") not in done), None)
     parts = ", ".join(f"{label} PR #{pr} {how}" for label, pr, how in r.done)
     if nxt is None:

@@ -575,6 +575,23 @@ class RunTests(unittest.TestCase):
                 self.assertIn(text, self.run_yah(self.repo(name=f"shop{i}", state=state), "--plan", code=code))
                 self.assertEqual(len(self.calls("claude")), 1)
 
+    def test_plan_keeps_its_phases_when_where_shows_another_plan_in_progress(self):
+        # Once P2 closes, where.py shows Admin (its [~] phase beats Checkout's open P3): the run still goes on to P3
+        state = STATE.replace("- [ ] P3 Emails", "- [ ] P3 Emails | branch checkout/emails") \
+            + "\n## Plan: Admin (docs/plans/admin.md)\n- [~] P1 Roles | branch admin/roles | base main\n"
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        p3 = "- [ ] P3 Emails | branch checkout/emails"
+        self.script(list=[], required=[{"rc": 0}], **{
+            "view-12": [view()],
+            "view-13": [view(headRefName="checkout/emails", baseRefName="checkout/payment")],
+            "claude": [{"commit": True, "tag": "pr-open #12", "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"]]},
+                       {"commit": True, "tag": "pr-open #13", "replace": [[p3, p3.replace("[ ]", "[x]") + " | PR #13"]]}]})
+        out = self.run_yah(self.repo(state=state), "--plan", code=0)
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build", "/yah:resume P3 build base=checkout/payment"])
+        self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green. The merges are yours.", out)
+        self.assertNotIn("plan done: P2 PR #12 green.", out)
+        self.assertNotIn("P1", " ".join(self.prompts()))
+
     def test_weekly_usage_stops_with_exit_7(self):
         repo, now = self.repo(), time.time()
         self.data.mkdir()
