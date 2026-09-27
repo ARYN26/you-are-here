@@ -250,6 +250,7 @@ def state_md(top, main_root=None):
                               for i in plans) if p]
         out.update(next((p for p in parsed if p["phase"]), None) or
                    next((p for p in parsed if p["next_phase"]), None) or (parsed[0] if parsed else {}))
+        out["plans"] = parsed  # every plan, for a run that follows the one it started on
         return out
     return None
 
@@ -580,6 +581,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
     bz = beads.read(top, main_root, use_bd)
     sm = state_md(top, main_root)
     md = {k: sm.pop(k) for k in empty_state()} if sm else None
+    plans = sm.pop("plans") if sm else []
     state = merge(md, bz["state"])
     lost = bz["state"] if md and md["plan"] and bz["state"] and bz["state"]["plan"] else None  # a hidden beads epic
     ignored = {k: lost["plan"][k] for k in ("id", "title", "source")} if lost else None
@@ -631,7 +633,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
          "auto_merge": config()["auto_merge"],
          "bases": bases, "ancestors": near, "merged_in": merged, "next_stale": stale,
          "aliases": aliases(str(top), plan.get("spec")) if infer else [],
-         "run": run_info(key, str(top), str(main_root))}
+         "run": run_info(key, str(top), str(main_root)), "plans": plans}
     s["protected"] = protected(s)
     return s
 
@@ -865,7 +867,8 @@ def main():
     s = collect(cwd, use_bd=not a.no_bd, use_gh=not a.no_gh)
     write_cache(s)
     if a.json:
-        print(json.dumps(s, indent=1, ensure_ascii=False, default=str))
+        # `plans` is every STATE.md plan with its phases, for run.py; `state` already has the one that counts
+        print(json.dumps({k: v for k, v in s.items() if k != "plans"}, indent=1, ensure_ascii=False, default=str))
     else:
         print("\n".join(render(s, brief=a.brief)))
 
