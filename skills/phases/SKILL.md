@@ -58,4 +58,4 @@ Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py"` and show its output. The P
 
 Keep phase text short. The plan file holds the detail (goals, done-when, ground rules); STATE.md or beads hold only state and pointers.
 
-In the plan file, give each phase its own section with a heading that starts with `### P<n>` (`### P2 <title>`), and put choices made at planning time under `## Decisions`. Each session reads only those two sections, so a phase without its own section starts with no detail from the plan. If the plan lacks them, tell the user once.
+In the plan file, give each phase its own section with a heading that starts with `### P<n>` (`### P2 <title>`), and put choices made at planning time under `## Decisions`. Each session reads only those two sections, so a phase without its own section starts with no detail from the plan. If the plan lacks them, tell the user once. A phase section may also carry an `After it merges:` line and a `Files:` block (shape in /yah:auto section 3 step 2); `/yah:tree` draws them, and a plan without them still runs.

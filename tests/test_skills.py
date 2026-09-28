@@ -8,6 +8,8 @@ They also keep beads frozen: STATE.md is the plan state, and beads only a repo t
 """
 import json
 import re
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -367,6 +369,25 @@ class AutoTests(unittest.TestCase):
         # never the old hands-on ending: an approved plan goes to the run, not a foreground first phase
         self.assertNotIn("start its first phase", self.body)
         self.assertNotIn("`yah:start`", plan)
+
+    def test_the_plan_rule_example_parses_as_the_phase_map_reads_it(self):
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        for field in ("`After it merges:`", "`Files:`", "End the block with a blank line"):
+            self.assertIn(field, plan)
+        example = plan.split("```", 2)[1].strip("\n")
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import phasemap
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "plan.md"
+            lines = [ln.strip() for ln in example.splitlines()]
+            spec.write_text("### P1 Pay\nbranch `x/pay` | base `main`\n" + "\n".join(lines)
+                            + "\n\n- **Tests** in tests/pay.test.ts\n", "utf-8")
+            [ph] = phasemap.plan_sections(spec)
+        self.assertEqual(ph["after"], "checkout takes Apple Pay.")
+        self.assertEqual([(e["mark"], e["path"]) for e in ph["files"]],
+                         [("+", "src/pay/applepay.ts"), ("~", "src/pay/PaymentForm.tsx"), (">", "src/pay/card.ts")])
+        self.assertIn("`After it merges:`", body("phases"))
+        self.assertIn("`Files:`", body("phases"))
 
     def test_only_a_tiny_task_stays_in_session_everything_else_is_planned(self):
         rows = self.rows()

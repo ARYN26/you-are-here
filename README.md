@@ -34,7 +34,7 @@ This is one person's week, not a benchmark. yah makes the habits that avoid it v
 
 ## What you get
 
-A statusline, three hooks, seven skills, two agents and an optional run driver with two hooks of its own. Stdlib Python, MIT licensed.
+A statusline, three hooks, eight skills, two agents and an optional run driver with two hooks of its own. Stdlib Python, MIT licensed.
 
 | Piece | What it does | What it costs you |
 |---|---|---|
@@ -47,6 +47,7 @@ A statusline, three hooks, seven skills, two agents and an optional run driver w
 | `/yah:start` | Starts a task: restates the task, phase and first step from the injected state before any tool call, runs one recall on the task's key nouns, allows at most one targeted search, then makes the edit. Offers to create a brain folder if there is none. | One turn plus the recall output. |
 | `/yah:wrap` | Ends a task. Rewrites NEXT in STATE.md, ticks off finished items, writes at most one brain note, commits WIP on the feature branch, stamps NEXT with that commit and saves durable lessons to memory. When the phase is done it runs a review if available, pushes, opens the PR and claims the next phase. Ends with "Safe to /clear", and with a plan phase open, says `/yah:auto` hands it to autopilot. | One turn in your session. Writes in your repo. |
 | `/yah:phases` | Turns an approved plan into phases in STATE.md. | One turn. Writes in your repo. |
+| `/yah:tree` | The phase map: `/yah:tree plan` stacks the phases on their bases with status, PR and what each changes once merged; `/yah:tree P<n>` adds that phase's file tree, from its branch diff once it has commits, else from the plan's `Files:` block. | Runs git, plus `gh` unless `--no-gh`. Hidden from the model, so no listing cost. |
 | `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). Works on every tier: when the account cannot use Fable, Claude Code runs the agent on the session's model. | Fable usage. See the plan table. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
 | `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops; with `--plan`, through every open phase. The merge is yours unless you turn on [auto-merge](#auto-merge-opt-in). See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
@@ -418,6 +419,7 @@ Windows has `python`. macOS and Linux fail on it instantly and fall through to `
 |---|---|
 | `scripts/yahlib.py` | Shared helpers: data folder, config and tier presets, git lookup, JSON io, the plan-state shape |
 | `scripts/where.py` | Builds the where view from git, STATE.md and gh, and tells `/yah:phases` and `/yah:wrap` where the plan is written |
+| `scripts/phasemap.py` | The phase map behind `/yah:tree`: the phase stack, and a phase's file tree from the plan's `Files:` block or its branch diff |
 | `scripts/beads.py` | The beads adapter, only for a repo that already uses beads: reads `.beads/` into the same shape as STATE.md |
 | `scripts/statusline.py` | The statusline. Never runs git, gh or bd |
 | `scripts/context_guard.py` | The nudges: UserPromptSubmit, and PostToolUse inside `yah run` |
@@ -426,7 +428,7 @@ Windows has `python`. macOS and Linux fail on it instantly and fall through to `
 | `scripts/push_guard.py` | The PreToolUse push guard inside `yah run` |
 | `scripts/setup.py` | Setup and `--uninstall` |
 | `hooks/hooks.json` | SessionStart and UserPromptSubmit wiring |
-| `skills/*/SKILL.md` | `/yah:auto`, `/yah:where`, `/yah:start`, `/yah:wrap`, `/yah:phases`, `/yah:deep`, `/yah:resume`, `/yah:setup` |
+| `skills/*/SKILL.md` | `/yah:auto`, `/yah:where`, `/yah:start`, `/yah:wrap`, `/yah:phases`, `/yah:tree`, `/yah:deep`, `/yah:resume`, `/yah:setup` |
 | `agents/scout.md`, `agents/deep.md` | The two agents |
 | `RULES.md` | Optional CLAUDE.md snippet |
 
@@ -462,6 +464,7 @@ For larger repos:
 - With several `## Plan:` sections, yah follows the one with a phase in progress, else the first with an open phase. A finished plan can stay below the next one.
 - An open checkbox line that ends in `(you)`, after the title or after the fields, waits on you wherever it is in the file (code blocks aside): `/yah:where` lists it as `STATE.md:<line>` and the statusline counts it. Follow-ups go under `## Follow-ups` as checkbox lines, not prose.
 - The current phase's NEXT is the `- Next:` line of the newest dated entry. An untracked STATE.md stamps it with a `- At: <sha>` line under it, which `/yah:wrap` writes; a tracked one is stamped by its own last non-merge commit on the branch, so merging the base does not restamp it. Merge commits never count as work NEXT predates. If the phase base is gone (merged and deleted), commits on any other branch are left out instead.
+- In the plan file, a `### P<n>` section may carry an `After it merges:` line and a `Files:` block (`+ path — note` new, `~` changed, `-` removed, `> old -> new` renamed), which `/yah:tree` draws. Both are optional.
 - Dated entries without a plan section still show as STATE and NEXT.
 - `/yah:wrap` keeps only the 5 newest dated entries.
 
