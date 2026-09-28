@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import run  # noqa: E402
+from yahlib import norm, run  # noqa: E402
 
 HEAD = re.compile(r"#{1,3} ")
 PHASE = re.compile(r"### +(P\d+)\b[ \t:.-]*(.*?)\s*$")
@@ -322,7 +322,8 @@ def render_stack(phases, trunk="", brief=False):
             walk(kids[i], prefix + more)
 
     for base, ids in roots.items():
-        out += [] if brief else [base]
+        if not brief:
+            out.append(base)
         walk(ids, "")
     if brief:
         return out
@@ -407,20 +408,16 @@ def phase_entries(ph, top):
     return got, gaps, ref
 
 
-def phase_tree(ph, top):
-    """A phase's tree block: its heading, the tree of the phase branch's files (not the checkout's), then gaps."""
+def phase_tree(ph, top, listed=None):
+    """A phase's tree block: its heading, the tree of the phase branch's files (not the checkout's), then gaps.
+    `listed` caches each ref's file list across the phases of one map."""
     entries, gaps, ref = phase_entries(ph, top)
-    ls_cmd = ["git", "ls-tree", "-r", "--name-only", "-z", ref] if ref else ["git", "ls-files", "-z"]
-    ls = (run(ls_cmd, top, timeout=15) or "").split("\0")
-    tree = render_tree(entries, ls)
+    listed = {} if listed is None else listed
+    if ref not in listed:
+        cmd = ["git", "ls-tree", "-r", "--name-only", "-z", ref] if ref else ["git", "ls-files", "-z"]
+        listed[ref] = (run(cmd, top, timeout=15) or "").split("\0")
+    tree = render_tree(entries, listed[ref])
     return [f"{ph['label']} files" + ("" if tree else ": none named in the plan yet")] + tree + gaps
-
-
-def same_file(a, b):
-    try:
-        return bool(a and b) and Path(a).resolve() == Path(b).resolve()
-    except (OSError, ValueError):
-        return False
 
 
 def map_lines(s, target="", brief=False, spec=""):
@@ -433,7 +430,7 @@ def map_lines(s, target="", brief=False, spec=""):
     own = Path(s["top"]) / Path(own).expanduser() if own else ""  # joining keeps an absolute spec as is
     if spec:
         spec = Path(s["top"]) / Path(spec).expanduser()
-        if not same_file(spec, own):
+        if not own or norm(spec) != norm(own):
             state = {}
     else:
         spec = own
@@ -445,17 +442,16 @@ def map_lines(s, target="", brief=False, spec=""):
         if not p.get("pr") and heads.get(p.get("branch")):
             p["pr"] = f"#{heads[p['branch']]}"
     target = (target or (state.get("phase") or {}).get("label") or "plan").strip()
-    lines = render_stack(phases, brief=brief)
-    if target.lower() == "plan":
+    t, lines = target.lower(), render_stack(phases, brief=brief)
+    if t == "plan":
         return lines
-    if target.lower() == "all":
-        for ph in phases:
-            lines += [""] + phase_tree(ph, s["top"])
-        return lines
-    ph = next((p for p in phases if p["label"].lower() == target.lower()), None)
-    if not ph:
+    picked = phases if t == "all" else [p for p in phases if p["label"].lower() == t]
+    if not picked:
         return lines + ["", f"no phase {target} in this plan"]
-    return lines + [""] + phase_tree(ph, s["top"])
+    listed = {}
+    for ph in picked:
+        lines += [""] + phase_tree(ph, s["top"], listed)
+    return lines
 
 
 def main(argv=None):
