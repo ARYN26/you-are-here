@@ -1358,6 +1358,19 @@ class PhaseMapCliTests(Base):
         self.map("plan", "--brief", "--into", str(fresh))
         self.assertEqual(fresh.read_text("utf-8"), block + "\n")
 
+    def test_into_skips_a_quoted_or_orphan_marker(self):
+        phasemap = load_phasemap()
+        new = "<!-- yah:map -->\nnew\n<!-- /yah:map -->"
+        quoted = "It swaps only the `<!-- yah:map -->` section.\n\n<!-- yah:map -->\nold\n<!-- /yah:map -->\n"
+        self.assertEqual(phasemap.put_map(quoted, new), f"It swaps only the `<!-- yah:map -->` section.\n\n{new}\n")
+        orphan = "<!-- yah:map -->\nhand-edited\n\nKeep me\n\n<!-- yah:map -->\r\nold\r\n<!-- /yah:map -->\r\n"
+        self.assertEqual(phasemap.put_map(orphan, new),
+                         f"<!-- yah:map -->\nhand-edited\n\nKeep me\n\n{new}\n")  # the old END line's \r goes too
+        missing = Path(self.tmp) / "none.md"
+        out, err, rc = self.py("phasemap.py", "--no-gh", "P1", "--into", str(missing), cwd=self.tmp)
+        self.assertEqual((rc, out, missing.exists()), (0, "", False))
+        self.assertIn("no map to write into", err)
+
     def where(self, *args, scripts=SCRIPTS):
         out, err, rc = self.py("where.py", "--no-gh", "--no-bd", *args, cwd=self.r, scripts=scripts)
         self.assertEqual((rc, err), (0, ""))

@@ -283,6 +283,8 @@ class TreeTests(unittest.TestCase):
         self.assertIn('PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" P<n> --into <file>', step)
         self.assertIn("`--body-file <file>`, never `--body`", step)  # an inline body can trip the deny rules
         self.assertIn("gh pr edit <N> --body-file <file>", step)
+        record = step.split("4. Record it.", 1)[1].split("\n5.", 1)[0]  # the map redrawn once the phase is [x]
+        self.assertIn("refresh the PR's map as in step 3", record)
         wrap_step = body("resume").split("## 4. Test, then wrap", 1)[1].split("## 5.", 1)[0]
         refresh = wrap_step.split("After a fix-findings push", 1)[1]
         for want in ("gh pr view <n> --json body -q .body", "scripts/phasemap.py\" <label> --into <file>",

@@ -662,6 +662,7 @@ def map_view(s, brief=False):
     """phasemap's lines for the plan: in brief one line per phase, else the stack with after lines and the current
     phase's tree. A failure gives one line, never an exception."""
     try:
+        sys.modules.setdefault("where", sys.modules[__name__])  # run as a script, phasemap's `import where` reuses it
         from phasemap import map_lines  # lazy: phasemap imports this module
         lines = map_lines(s, "plan" if brief else "", brief=brief)
     except Exception as e:  # noqa: BLE001 - the view must not die on the map

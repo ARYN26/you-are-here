@@ -337,14 +337,17 @@ def render_stack(phases, trunk="", brief=False):
 
 MARKER = "<!-- yah:map -->"
 END = "<!-- /yah:map -->"
+# The section: a MARKER line to the next END line with no MARKER line between, so a marker quoted mid-line in
+# prose, or an orphan MARKER line left above, is never part of it.
+SECTION = re.compile(rf"^{re.escape(MARKER)}[ \t\r]*\n(?:(?!^{re.escape(MARKER)}[ \t\r]*$).)*?^{re.escape(END)}[ \t\r]*$",
+                     re.M | re.S)
 
 
 def put_map(body, block):
     """body with its yah:map section replaced by block, or block appended when it has none."""
-    i = body.find(MARKER)
-    j = body.find(END, i)
-    if i >= 0 and j >= 0:
-        return body[:i] + block + body[j + len(END):]
+    m = SECTION.search(body)
+    if m:
+        return body[:m.start()] + block + body[m.end():]
     return (body.rstrip("\n") + "\n\n" if body.strip() else "") + block + "\n"
 
 
@@ -472,13 +475,16 @@ def main(argv=None):
     s = collect(a.cwd or ".", use_gh=not a.no_gh, infer=False)  # the map needs no branch-ancestry walk
     if not s and a.spec:  # outside a repo a plan still maps, from its Files: blocks alone
         s = {"top": str(Path(a.cwd or ".").resolve())}
-    lines = map_lines(s, a.target, a.brief, a.spec or "") if s else []
+    spec = str((Path(a.cwd or ".") / Path(a.spec).expanduser()).resolve()) if a.spec else ""  # relative to cwd
+    lines = map_lines(s, a.target, a.brief, spec) if s else []
     if lines and (a.pr or a.into):
         lines = [MARKER, "```text", *lines, "```", END]
     if lines and a.into:
         f = Path(a.into)
         f.write_text(put_map(f.read_text("utf-8") if f.is_file() else "", "\n".join(lines)), "utf-8")
         print(f"[yah] map written into {f}")
+    elif a.into:
+        print(f"[yah] no map to write into {a.into}: no plan with phases here", file=sys.stderr)
     elif lines:
         print("\n".join(lines))
 
