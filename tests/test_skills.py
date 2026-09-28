@@ -351,6 +351,34 @@ class AutoTests(unittest.TestCase):
         self.assertNotIn("start its first phase", self.body)
         self.assertNotIn("`yah:start`", plan)
 
+    def test_only_a_tiny_task_stays_in_session_everything_else_is_planned(self):
+        rows = self.rows()
+        for start in ("A task was given", "A NEXT with no plan"):
+            row = rows[self.row(start)]
+            self.assertIn("Tiny", row)
+            self.assertIn("`yah:start`", row)
+            self.assertIn("**plan it** (section 3)", row)  # a one-PR task is planned too, then run
+            self.assertLess(row.index("Tiny"), row.index("**plan it**"))
+        self.assertIn("one PR or several", rows[self.row("A task was given")])
+        self.assertNotIn("If it needs several PRs", self.body)  # the old split sent one-PR tasks to the session
+        self.assertNotIn("this one stays hands-on", self.body)
+
+    def test_a_merged_next_with_no_step_after_it_asks_what_to_build(self):
+        rows, waits, empty = self.rows(), self.row("NEXT waits on the user"), self.row("No plan and no NEXT")
+        self.assertIn('Merged, and NEXT names nothing after it: use the "No plan and no NEXT" row', rows[waits])
+        self.assertIn("a merge that already happened", rows[empty])
+        self.assertIn("ask: wait, or stack", rows[waits])
+        self.assertIn("the waiting PR's branch as its base", rows[waits])
+        self.assertIn("**plan it** (section 3)", rows[waits])
+
+    def test_an_open_plan_is_parked_before_a_new_one_is_tracked(self):
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        park = plan.index("park it first")
+        self.assertLess(park, plan.index("`yah:phases`"))  # parked first, so the new plan is the one with `[~]`
+        self.assertIn("no run is live", plan)  # a live run's plan is never parked under it
+        self.assertIn("`  - Parked: NEXT was <NEXT>`", plan)  # wrap's step 6 item 6 claims this exact line
+        self.assertIn("goes back to `[ ]`", plan)
+
     def test_deep_on_every_tier_and_merges_stay_the_users(self):
         self.assertIn("every plan tier", self.body)
         self.assertIn("Never merge a PR yourself", self.body)
