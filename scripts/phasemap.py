@@ -285,13 +285,15 @@ def pr_tag(pr):
 def render_stack(phases, trunk="", brief=False):
     """The phases as lines: each under the branch it starts from, as `[x]`/`[~]`/`[ ]`, label, title, branch and
     PR, with its after line (else `done when:`) below, then a merge-order line. A phase stacks on the phase whose
-    branch is its base; one with no base starts from `trunk` (default: the first base given, else `main`).
-    `brief` drops the after lines, so each phase is one line. No phases gives []."""
+    branch is its base; one with no base starts from `trunk` (default: the first base given that is no phase's
+    branch, else `main`).
+    `brief` gives only the phase lines, one per phase: no after lines, base lines or merge-order line. No phases
+    gives []."""
     phases = [p for p in phases or [] if p.get("label")]
     if not phases:
         return []
-    trunk = trunk or next((p["base"] for p in phases if p.get("base")), "") or "main"
     at = {p["branch"]: i for i, p in reversed(list(enumerate(phases))) if p.get("branch")}
+    trunk = trunk or next((p["base"] for p in phases if p.get("base") and p["base"] not in at), "") or "main"
     up = [at.get(p.get("base") or trunk) for p in phases]
     for i in range(len(phases)):  # a phase based on itself, or a loop of bases, starts from its base instead
         seen, j = {i}, up[i]
@@ -320,8 +322,10 @@ def render_stack(phases, trunk="", brief=False):
             walk(kids[i], prefix + more)
 
     for base, ids in roots.items():
-        out.append(base)
+        out += [] if brief else [base]
         walk(ids, "")
+    if brief:
+        return out
     into = next(iter(roots)) if len(roots) == 1 else ""
     line = "merge order: " + " -> ".join(order) + (f" into {into}" if into else ", each into its base")
     if any(u is not None for u in up):
