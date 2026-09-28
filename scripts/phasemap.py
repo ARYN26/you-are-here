@@ -336,6 +336,16 @@ def render_stack(phases, trunk="", brief=False):
 # ---------------------------------------------------------------- CLI
 
 MARKER = "<!-- yah:map -->"
+END = "<!-- /yah:map -->"
+
+
+def put_map(body, block):
+    """body with its yah:map section replaced by block, or block appended when it has none."""
+    i = body.find(MARKER)
+    j = body.find(END, i)
+    if i >= 0 and j >= 0:
+        return body[:i] + block + body[j + len(END):]
+    return (body.rstrip("\n") + "\n\n" if body.strip() else "") + block + "\n"
 
 
 def phases_of(state, plan):
@@ -454,6 +464,7 @@ def main(argv=None):
     ap.add_argument("target", nargs="?", default="", help="P<n> for that phase's tree, plan for the stack only, all for every tree (default: the phase)")
     ap.add_argument("--brief", action="store_true", help="one line per phase, no after lines")
     ap.add_argument("--pr", action="store_true", help="markdown for a PR description, between yah:map markers")
+    ap.add_argument("--into", metavar="FILE", help="PR body file: replace its yah:map section, or append one (implies --pr)")
     ap.add_argument("--no-gh", action="store_true", help="skip gh pr list")
     ap.add_argument("--spec", help="map this plan file, as in plan mode before it is tracked")
     ap.add_argument("--cwd", help="run as if started in this directory")
@@ -462,9 +473,13 @@ def main(argv=None):
     if not s and a.spec:  # outside a repo a plan still maps, from its Files: blocks alone
         s = {"top": str(Path(a.cwd or ".").resolve())}
     lines = map_lines(s, a.target, a.brief, a.spec or "") if s else []
-    if lines and a.pr:
-        lines = [MARKER, "```text", *lines, "```", MARKER.replace("yah:", "/yah:")]
-    if lines:
+    if lines and (a.pr or a.into):
+        lines = [MARKER, "```text", *lines, "```", END]
+    if lines and a.into:
+        f = Path(a.into)
+        f.write_text(put_map(f.read_text("utf-8") if f.is_file() else "", "\n".join(lines)), "utf-8")
+        print(f"[yah] map written into {f}")
+    elif lines:
         print("\n".join(lines))
 
 

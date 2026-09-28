@@ -66,7 +66,7 @@ Stop the slice as soon as:
 
 Run the tests that cover what you changed, with the project's usual command (README, CLAUDE.md, package.json, Makefile or CI config). A failure you cannot fix in this slice goes into NEXT.
 
-Then follow /yah:wrap. It rewrites NEXT, writes at most one brain note, and commits WIP on the branch; when the phase is complete it pushes and opens or updates the PR into `base`. In fix-checks, address-review and fix-findings, the PR exists: after the commit, `git push -u origin <branch>` so it updates.
+Then follow /yah:wrap. It rewrites NEXT, writes at most one brain note, and commits WIP on the branch; when the phase is complete it pushes and opens or updates the PR into `base`. In fix-checks, address-review and fix-findings, the PR exists: after the commit, `git push -u origin <branch>` so it updates. After a fix-findings push, make the PR's map match the final code: `gh pr view <n> --json body -q .body` into a temp file outside the repo, `PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" <label> --into <file>` (it replaces only the `<!-- yah:map -->` section), then `gh pr edit <n> --body-file <file>`.
 - Never force-push, never merge a PR, never push a forbidden branch, never delete a branch.
 - Never stage `.env*`, credentials or secrets.
 - Never start or stop a run (`run.py`), and skip wrap's step 6.5: yah run already drives this session.

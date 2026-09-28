@@ -1345,6 +1345,19 @@ class PhaseMapCliTests(Base):
         self.assertEqual(out[-1], "marks: * named in the plan")
         self.assertEqual(self.map("P9")[-1], "no phase P9 in this plan")
 
+    def test_into_replaces_the_map_section_of_a_pr_body_file(self):
+        block = "\n".join(self.map("plan", "--brief", "--pr"))
+        body = Path(self.tmp) / "body.md"  # outside the repo, as wrap and resume write it
+        body.write_text("Adds the renderer.\n\n- Done: tests\n", "utf-8")
+        self.assertEqual(self.map("plan", "--brief", "--into", str(body)), [f"[yah] map written into {body}"])
+        self.assertEqual(body.read_text("utf-8"), f"Adds the renderer.\n\n- Done: tests\n\n{block}\n")
+        body.write_text("Top\n\n<!-- yah:map -->\nstale\n<!-- /yah:map -->\n\nBottom\n", "utf-8")
+        self.map("plan", "--brief", "--into", str(body))  # fix-findings: only the section changes
+        self.assertEqual(body.read_text("utf-8"), f"Top\n\n{block}\n\nBottom\n")
+        fresh = Path(self.tmp) / "new.md"
+        self.map("plan", "--brief", "--into", str(fresh))
+        self.assertEqual(fresh.read_text("utf-8"), block + "\n")
+
     def where(self, *args, scripts=SCRIPTS):
         out, err, rc = self.py("where.py", "--no-gh", "--no-bd", *args, cwd=self.r, scripts=scripts)
         self.assertEqual((rc, err), (0, ""))

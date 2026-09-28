@@ -278,6 +278,17 @@ class TreeTests(unittest.TestCase):
         self.assertIn("Show the output as is, in a code block", text)
         self.assertTrue((ROOT / "scripts/phasemap.py").is_file())
 
+    def test_phase_prs_carry_the_map_through_a_body_file(self):
+        step = body("wrap").split("## 6. Only if the phase is complete", 1)[1].split("## 6.5", 1)[0]
+        self.assertIn('PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" P<n> --into <file>', step)
+        self.assertIn("`--body-file <file>`, never `--body`", step)  # an inline body can trip the deny rules
+        self.assertIn("gh pr edit <N> --body-file <file>", step)
+        wrap_step = body("resume").split("## 4. Test, then wrap", 1)[1].split("## 5.", 1)[0]
+        refresh = wrap_step.split("After a fix-findings push", 1)[1]
+        for want in ("gh pr view <n> --json body -q .body", "scripts/phasemap.py\" <label> --into <file>",
+                     "`<!-- yah:map -->` section", "gh pr edit <n> --body-file <file>"):
+            self.assertIn(want, refresh, want)
+
 
 class AutoTests(unittest.TestCase):
     """/yah:auto is the launcher's first prompt: it routes to the other skills and never makes up work."""
