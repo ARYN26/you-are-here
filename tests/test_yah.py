@@ -1091,6 +1091,7 @@ branch yah/map-surfaces · base yah/map
 - **`scripts/where.py`**: calls `plan_sections(path)` with (`base`) and `/yah:tree`.
 - **Docs** (README.md, skills/wrap/SKILL.md, `skills/resume/SKILL.md`, section 3)
   - nested (`scripts/run.py:40-60`)
+- Done when `/yah:where` shows the stack.
 
 ## Risks
 - **`not/a/phase.py`**
@@ -1123,8 +1124,9 @@ class PhaseMapTests(unittest.TestCase):
         self.assertEqual([(e["mark"], e["old"], e["path"], e["note"]) for e in p1["files"]],
                          [("+", "", "scripts/phasemap.py", "the renderer"), ("~", "", "scripts/where.py", "calls it"),
                           ("-", "", "old/gone.py", "removed"), (">", "docs/a.md", "docs/b.md", "renamed")])
-        self.assertEqual((p2["label"], p2["branch"], p2["base"], p2["after"]),
-                         ("P2", "yah/map-surfaces", "yah/map", ""))
+        self.assertEqual((p2["label"], p2["branch"], p2["base"], p2["after"], p2["done"]),
+                         ("P2", "yah/map-surfaces", "yah/map", "", "`/yah:where` shows the stack."))
+        self.assertEqual(p1["done"], "")
 
     def test_bullet_fallback(self):
         p2 = self.sections(PLAN_MAP)[1]
@@ -1191,6 +1193,43 @@ class PhaseMapTests(unittest.TestCase):
         self.assertEqual(len(self.m.render_tree(entries, ls, cap=10)), 10)
         fits = self.m.render_tree(entries[:29], ls[:29])  # ".", 58 lines and the legend: nothing cut
         self.assertEqual((len(fits), fits[-2]), (60, "    `-- ~ f.py"))
+
+    def test_stack_from_the_plan_and_state(self):
+        p1, p2 = self.sections(PLAN_MAP)
+        p1.update(status="closed", pr="gh-24")
+        p2.update(status="in_progress", pr="")
+        p3 = {"label": "P3", "title": "Side", "status": "open", "branch": "yah/side", "base": "", "pr": "#30"}
+        self.assertEqual(self.m.render_stack([p1, p2, p3]), [
+            "main",
+            "|-- [x] P1 Renderer  yah/map  #24",
+            "|   |   after: `/yah:tree` shows the map.",
+            "|   `-- [~] P2 Surfaces  yah/map-surfaces",
+            "|           done when: `/yah:where` shows the stack.",  # no after line: the done-when stands in
+            "`-- [ ] P3 Side  yah/side  #30",  # no base: it starts from the first base given
+            "merge order: P1 -> P2 -> P3 into main; retarget a stacked PR onto main once the one below it merges",
+        ])
+        self.assertEqual(self.m.render_stack([p1, p2, p3], brief=True), [
+            "main", "|-- [x] P1 Renderer  yah/map  #24", "|   `-- [~] P2 Surfaces  yah/map-surfaces",
+            "`-- [ ] P3 Side  yah/side  #30",
+            "merge order: P1 -> P2 -> P3 into main; retarget a stacked PR onto main once the one below it merges",
+        ])
+
+    def test_stack_bases_loops_and_empty(self):
+        a = {"label": "P1", "title": "", "branch": "a", "base": "b"}  # a loop of bases: the first phase in it
+        b = {"label": "P2", "title": "B", "branch": "b", "base": "a", "status": "weird"}  # starts from its base
+        c = {"label": "P3", "branch": "c", "base": "dev"}
+        self.assertEqual(self.m.render_stack([a, b, c]), [
+            "b", "`-- [ ] P1  a", "    `-- [ ] P2 B  b", "dev", "`-- [ ] P3  c",
+            "merge order: P1 -> P2 -> P3, each into its base; retarget a stacked PR onto its base once the one"
+            " below it merges",
+        ])
+        self.assertEqual(self.m.render_stack([{"label": "P1", "branch": "a", "base": "a"}])[:2], ["a", "`-- [ ] P1  a"])
+        self.assertEqual(self.m.render_stack([{"label": "P1", "base": ""}]),
+                         ["main", "`-- [ ] P1", "merge order: P1 into main"])
+        self.assertEqual(self.m.render_stack([{"label": "P1"}], trunk="dev")[0], "dev")
+        self.assertEqual(self.m.render_stack([]), [])
+        self.assertEqual(self.m.render_stack(None), [])
+        self.assertEqual([self.m.pr_tag(x) for x in ("#7", "gh-7", "7", "", None, "x7")], ["#7", "#7", "#7", "", "", ""])
 
 
 class PhaseChangesTests(Base):

@@ -3,6 +3,7 @@
     plan_sections(path)            the plan file's `### P<n>` sections: title, branch, base, after line, files
     actual_changes(base, branch)   what the branch changed since it left its base, as the same file entries
     render_tree(entries, files)    the file tree those entries make of the repo, folded to fit about 60 lines
+    render_stack(phases)           the phases stacked on their bases, with status, PR and after line, then merge order
 
 A plan section may carry an `After it merges: <plain words>` line and a `Files:` block, one line per path:
 `+ path — note` (new), `~ path — note` (changed), `- path — note` (removed), `> old -> new — note` (renamed).
@@ -20,6 +21,7 @@ HEAD = re.compile(r"#{1,3} ")
 PHASE = re.compile(r"### +(P\d+)\b[ \t:.-]*(.*?)\s*$")
 BRANCH = re.compile(r"\bbranch\s+`?([^`|·\s]+)`?")
 BASE = re.compile(r"\bbase\s+`?([^`|·\s]+)`?")
+DONE = re.compile(r"\s*(?:[-*]\s+)?(?:\*\*)?Done when(?:\*\*)?[:\s]\s*(.*?)\s*$")
 AFTER = re.compile(r"\s*(?:\*\*)?After it merges:(?:\*\*)?\s*(.*?)\s*$")
 FILES = re.compile(r"\s*(?:\*\*)?Files:(?:\*\*)?\s*$")
 ENTRY = re.compile(r"\s*([+~>-])\s+(\S.*?)\s*$")
@@ -76,7 +78,8 @@ def bullet_paths(lines):
 
 def section(label, title, body):
     """One phase from its heading and the lines under it."""
-    ph = {"label": label, "title": title, "branch": "", "base": "", "after": "", "files": [], "planned": False}
+    ph = {"label": label, "title": title, "branch": "", "base": "", "after": "", "done": "", "files": [],
+          "planned": False}
     first = next((ln for ln in body if ln.strip()), "")
     if not BULLET.match(first) and not FILES.match(first):
         bm, sm = BRANCH.search(first), BASE.search(first)
@@ -103,6 +106,9 @@ def section(label, title, body):
         elif FILES.match(ln) and block is None:
             block, ph["planned"] = True, True
         else:
+            dm = DONE.match(ln)
+            if dm and not ph["done"]:
+                ph["done"] = dm.group(1)
             prose.append(ln)
     if not ph["planned"]:
         ph["files"] = bullet_paths(prose)
@@ -110,7 +116,8 @@ def section(label, title, body):
 
 
 def plan_sections(path):
-    """The plan's phases in order, each {label, title, branch, base, after, files, planned}. `planned` is True
+    """The plan's phases in order, each {label, title, branch, base, after, done, files, planned}. `done` is the
+    done-when, for a plan without an after line. `planned` is True
     when the section has a `Files:` block. A missing or unreadable plan gives []; a `### P<n>` in a fence is not
     a phase."""
     try:
@@ -261,3 +268,59 @@ def render_tree(entries, ls_files, cap=60):
             line += f", {len(cut)} touched: " + ", ".join(cut[:3]) + (f", +{len(cut) - 3} more" if len(cut) > 3 else "")
         rows = rows[:keep] + [(line, "")]
     return [r for r, _ in rows] + [legend]
+
+
+BOX = {"closed": "[x]", "in_progress": "[~]"}  # where.py's phase status; anything else is [ ]
+
+
+def pr_tag(pr):
+    """`#12` from a phase's `#12`, `gh-12` or `12`; "" for none."""
+    m = re.fullmatch(r"(?:#|gh-)?(\d+)", str(pr or "").strip())
+    return f"#{m.group(1)}" if m else ""
+
+
+def render_stack(phases, trunk="", brief=False):
+    """The phases as lines: each under the branch it starts from, as `[x]`/`[~]`/`[ ]`, label, title, branch and
+    PR, with its after line (else `done when:`) below, then a merge-order line. A phase stacks on the phase whose
+    branch is its base; one with no base starts from `trunk` (default: the first base given, else `main`).
+    `brief` drops the after lines, so each phase is one line. No phases gives []."""
+    phases = [p for p in phases or [] if p.get("label")]
+    if not phases:
+        return []
+    trunk = trunk or next((p["base"] for p in phases if p.get("base")), "") or "main"
+    at = {p["branch"]: i for i, p in reversed(list(enumerate(phases))) if p.get("branch")}
+    up = [at.get(p.get("base") or trunk) for p in phases]
+    for i in range(len(phases)):  # a phase based on itself, or a loop of bases, starts from its base instead
+        seen, j = {i}, up[i]
+        while j is not None and j not in seen:
+            seen.add(j)
+            j = up[j]
+        if j is not None:
+            up[i] = None
+    kids = {i: [k for k in range(len(phases)) if up[k] == i] for i in range(len(phases))}
+    roots = {}
+    for i, p in enumerate(phases):
+        if up[i] is None:
+            roots.setdefault(p.get("base") or trunk, []).append(i)
+    out, order = [], []
+
+    def walk(ids, prefix):
+        for n, i in enumerate(ids):
+            p, last = phases[i], n == len(ids) - 1
+            conn, more = ("`-- ", "    ") if last else ("|-- ", "|   ")
+            head = " ".join(x for x in (BOX.get(p.get("status"), "[ ]"), p["label"], p.get("title") or "") if x)
+            out.append(prefix + conn + "  ".join(x for x in (head, p.get("branch") or "", pr_tag(p.get("pr"))) if x))
+            order.append(p["label"])
+            after = f"after: {p['after']}" if p.get("after") else f"done when: {p['done']}" if p.get("done") else ""
+            if after and not brief:
+                out.append(prefix + more + ("|   " if kids[i] else "    ") + after)
+            walk(kids[i], prefix + more)
+
+    for base, ids in roots.items():
+        out.append(base)
+        walk(ids, "")
+    into = next(iter(roots)) if len(roots) == 1 else ""
+    line = "merge order: " + " -> ".join(order) + (f" into {into}" if into else ", each into its base")
+    if any(u is not None for u in up):
+        line += f"; retarget a stacked PR onto {into or 'its base'} once the one below it merges"
+    return out + [line]
