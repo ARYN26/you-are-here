@@ -1227,6 +1227,14 @@ class PhaseMapTests(unittest.TestCase):
         self.assertEqual(self.m.render_stack([{"label": "P1", "base": ""}]),
                          ["main", "`-- [ ] P1", "merge order: P1 into main"])
         self.assertEqual(self.m.render_stack([{"label": "P1"}], trunk="dev")[0], "dev")
+        c = {"label": "P0", "branch": "c", "base": "a"}  # stacks on a loop, is not in it: stays under P1
+        self.assertEqual(self.m.render_stack([c, a, b])[:4],
+                         ["b", "`-- [ ] P1  a", "    |-- [ ] P0  c", "    `-- [ ] P2 B  b"])
+        (p1,) = self.sections("### P1 A\n**Branch:** `x/a` · Base: main\n")
+        self.assertEqual((p1["branch"], p1["base"]), ("x/a", "main"))
+        s = {"top": str(self.tmp), "prs": [{"headRefName": "yah/map-surfaces", "number": 31}],
+             "state": {"phases": [{"label": "P2", "branch": "yah/map-surfaces", "base": "yah/map", "pr": ""}]}}
+        self.assertEqual(self.m.map_lines(s, "plan")[1], "`-- [ ] P2  yah/map-surfaces  #31")  # PR from gh
         self.assertEqual(self.m.render_stack([]), [])
         self.assertEqual(self.m.render_stack(None), [])
         self.assertEqual([self.m.pr_tag(x) for x in ("#7", "gh-7", "7", "", None, "x7")], ["#7", "#7", "#7", "", "", ""])
@@ -1272,6 +1280,19 @@ class PhaseChangesTests(Base):
         self.assertEqual(self.changes("main", "nope"), [])
         self.assertEqual(self.changes("", "p1"), [])
         self.assertEqual(self.m.actual_changes("main", "p1", str(self.tmp)), [])  # not a repo
+
+    def test_a_stale_local_base_does_not_pull_in_origins_commits(self):
+        self.git(self.r, "switch", "-q", "-c", "upstream")
+        (self.r / "theirs.py").write_text("t\n", "utf-8")
+        self.commit("merged on origin, not pulled")
+        self.git(self.r, "update-ref", "refs/remotes/origin/main", "upstream")
+        self.git(self.r, "switch", "-q", "-c", "p1")
+        (self.r / "mine.py").write_text("m\n", "utf-8")
+        self.commit("p1")
+        self.git(self.r, "branch", "-q", "-D", "upstream")
+        ph = {"base": "main", "branch": "p1", "files": [], "planned": False}
+        entries, gaps, ref = self.m.phase_entries(ph, str(self.r))
+        self.assertEqual(([e["path"] for e in entries], gaps, ref), (["mine.py"], [], "refs/heads/p1"))
 
 
 class PhaseMapCliTests(Base):

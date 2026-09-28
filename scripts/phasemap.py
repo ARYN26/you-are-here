@@ -19,8 +19,8 @@ from yahlib import run  # noqa: E402
 
 HEAD = re.compile(r"#{1,3} ")
 PHASE = re.compile(r"### +(P\d+)\b[ \t:.-]*(.*?)\s*$")
-BRANCH = re.compile(r"\bbranch\s+`?([^`|·\s]+)`?")
-BASE = re.compile(r"\bbase\s+`?([^`|·\s]+)`?")
+BRANCH = re.compile(r"(?i)\bbranch[:*]*\s+`?([^`|·\s]+)`?")  # `branch x`, `Branch: x`, `**Branch:** x`
+BASE = re.compile(r"(?i)\bbase[:*]*\s+`?([^`|·\s]+)`?")
 DONE = re.compile(r"\s*(?:[-*]\s+)?(?:\*\*)?Done when(?:\*\*)?[:\s]\s*(.*?)\s*$")
 AFTER = re.compile(r"\s*(?:\*\*)?After it merges:(?:\*\*)?\s*(.*?)\s*$")
 FILES = re.compile(r"\s*(?:\*\*)?Files:(?:\*\*)?\s*$")
@@ -295,7 +295,7 @@ def render_stack(phases, trunk="", brief=False):
         while j is not None and j not in seen:
             seen.add(j)
             j = up[j]
-        if j is not None:
+        if j == i:  # only a phase in the loop; one that merely stacks on a loop stays under it
             up[i] = None
     kids = {i: [k for k in range(len(phases)) if up[k] == i] for i in range(len(phases))}
     roots = {}
@@ -342,12 +342,15 @@ def phases_of(state, plan):
     return out + [dict(p, status="open") for p in plan if p["label"] in by]
 
 
-def first_ref(top, *names):
-    """The first of `names` that git knows as a commit, else ""."""
-    for name in names:
-        if name and run(["git", "rev-parse", "-q", "--verify", f"{name}^{{commit}}"], top):
-            return name
-    return ""
+def phase_refs(top, base, branch):
+    """(fork, branch ref) for a phase: the branch (local first, else origin's) and where it left its base, the
+    newest common ancestor with the local base or origin's, so a stale local base does not pull in commits the
+    branch took from origin. ("", "") when either is missing."""
+    from where import existing
+    refs = existing(top, [base, branch]) if base and branch else {}
+    ref = (refs.get(branch) or [""])[0]
+    fork = run(["git", "merge-base", ref, *refs[base]], top) if ref and refs.get(base) else None
+    return (fork or "").strip(), ref
 
 
 def covers(planned, path):
@@ -356,15 +359,14 @@ def covers(planned, path):
 
 
 def phase_entries(ph, top):
-    """(entries, gaps) for a phase's tree. Before it has commits: the plan's files. After: what the branch changed
-    since its base, with the plan's notes kept, and gap lines naming planned paths not touched yet and touched
-    paths the plan's `Files:` block does not name."""
+    """(entries, gaps, ref) for a phase's tree. Before it has commits: the plan's files and ref "". After: what the
+    branch changed since its base, with the plan's notes kept, gap lines naming planned paths not touched yet and
+    touched paths the plan's `Files:` block does not name, and the branch ref whose files the tree lists."""
     plan = ph.get("files") or []
-    base = first_ref(top, ph.get("base"), f"origin/{ph.get('base')}" if ph.get("base") else "")
-    branch = first_ref(top, ph.get("branch"), f"origin/{ph.get('branch')}" if ph.get("branch") else "")
-    got = actual_changes(base, branch, top) if base and branch else []
+    fork, ref = phase_refs(top, ph.get("base"), ph.get("branch"))
+    got = actual_changes(fork, ref, top) if fork else []
     if not got:
-        return plan, []
+        return plan, [], ""
     notes = {}
     for e in plan:
         for p in (e["path"], e.get("old")):
@@ -372,7 +374,7 @@ def phase_entries(ph, top):
                 notes.setdefault(clean(p), e["note"])
     got = [dict(e, note=notes.get(clean(e["path"]), notes.get(clean(e["old"]), ""))) for e in got]
     if not ph.get("planned"):
-        return got, []
+        return got, [], ref
     planned = {clean(e["path"]) for e in plan} | {clean(e.get("old")) for e in plan if e.get("old")}
     done = {clean(e["path"]) for e in got} | {clean(e["old"]) for e in got if e["old"]}
     gaps = []
@@ -382,7 +384,7 @@ def phase_entries(ph, top):
     for words, paths in (("planned, not touched yet", todo), ("touched, not in the plan", extra)):
         if paths:
             gaps.append(f"{words}: " + ", ".join(paths[:6]) + (f", +{len(paths) - 6} more" if len(paths) > 6 else ""))
-    return got, gaps
+    return got, gaps, ref
 
 
 def map_lines(s, target="", brief=False):
@@ -395,6 +397,10 @@ def map_lines(s, target="", brief=False):
     phases = phases_of(state, plan_sections(str(Path(spec).expanduser())) if spec else [])
     if not phases:
         return []
+    heads = {p.get("headRefName"): p.get("number") for p in s.get("prs") or [] if isinstance(p, dict)}
+    for p in phases:  # a phase whose STATE.md line names no PR takes the open one from its branch
+        if not p.get("pr") and heads.get(p.get("branch")):
+            p["pr"] = f"#{heads[p['branch']]}"
     target = (target or (state.get("phase") or {}).get("label") or "plan").strip()
     lines = render_stack(phases, brief=brief)
     if target.lower() == "plan":
@@ -402,8 +408,9 @@ def map_lines(s, target="", brief=False):
     ph = next((p for p in phases if p["label"].lower() == target.lower()), None)
     if not ph:
         return lines + ["", f"no phase {target} in this plan"]
-    entries, gaps = phase_entries(ph, s["top"])
-    ls = (run(["git", "ls-files", "-z"], s["top"], timeout=15) or "").split("\0")
+    entries, gaps, ref = phase_entries(ph, s["top"])  # the tree lists the phase branch's files, not the checkout's
+    ls_cmd = ["git", "ls-tree", "-r", "--name-only", "-z", ref] if ref else ["git", "ls-files", "-z"]
+    ls = (run(ls_cmd, s["top"], timeout=15) or "").split("\0")
     tree = render_tree(entries, ls)
     head = f"{ph['label']} files" + ("" if tree else ": none named in the plan yet")
     return lines + ["", head] + tree + gaps
@@ -421,7 +428,7 @@ def main(argv=None):
     ap.add_argument("--no-gh", action="store_true", help="skip gh pr list")
     ap.add_argument("--cwd", help="run as if started in this directory")
     a = ap.parse_args(argv)
-    s = collect(a.cwd or ".", use_gh=not a.no_gh)
+    s = collect(a.cwd or ".", use_gh=not a.no_gh, infer=False)  # the map needs no branch-ancestry walk
     lines = map_lines(s, a.target, a.brief) if s else []
     if lines and a.pr:
         lines = [MARKER, "```text", *lines, "```", MARKER.replace("yah:", "/yah:")]
