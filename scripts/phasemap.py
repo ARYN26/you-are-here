@@ -25,7 +25,7 @@ DONE = re.compile(r"\s*(?:[-*]\s+)?(?:\*\*)?Done when(?:\*\*)?[:\s]\s*(.*?)\s*$"
 AFTER = re.compile(r"\s*(?:\*\*)?After it merges:(?:\*\*)?\s*(.*?)\s*$")
 FILES = re.compile(r"\s*(?:\*\*)?Files:(?:\*\*)?\s*$")
 ENTRY = re.compile(r"\s*([+~>-])\s+(\S.*?)\s*$")
-NOTE = re.compile(r"\s+(?:—|--|-)\s+|\s*—\s*")  # the em dash, or `--`/` - ` in a plan typed in ASCII
+NOTE = re.compile(r"\s*—\s*|\s+--?\s+")  # the em dash, or `--`/` - ` in a plan typed in ASCII
 BULLET = re.compile(r"\s*[-*]\s+(.*)$")
 STATUS = {"A": "+", "C": "+", "M": "~", "T": "~", "D": "-", "R": ">"}  # git's --name-status letters as marks
 BOLD = re.compile(r"\*\*`([^`]+)`\*\*")
@@ -84,7 +84,7 @@ def section(label, title, body):
     if not BULLET.match(first) and not FILES.match(first):
         bm, sm = BRANCH.search(first), BASE.search(first)
         ph["branch"], ph["base"] = (bm.group(1) if bm else ""), (sm.group(1) if sm else "")
-    prose, fence, block = [], False, None  # block: None before `Files:`, then True while its lines run
+    prose, fence, block = [], False, False  # block: True while the `Files:` lines run
     for ln in body:
         if is_fence(ln):
             fence = not fence
@@ -103,7 +103,7 @@ def section(label, title, body):
         am = AFTER.match(ln)
         if am and not ph["after"]:
             ph["after"] = am.group(1)
-        elif FILES.match(ln) and block is None:
+        elif FILES.match(ln) and not ph["planned"]:
             block, ph["planned"] = True, True
         else:
             dm = DONE.match(ln)
@@ -211,10 +211,13 @@ def touched(n):
     return any(n["files"].values()) or any(d["entry"] or touched(d) for d in n["dirs"].values())
 
 
-def tail(e, path):
-    """What follows a name: the rename's old path, the note, and the path it tags for the cut line."""
+def tail(e):
+    """What follows a name: the rename's old path, then the note."""
     old = f" (from {e['old']})" if e.get("old") else ""
-    return old + (f" -- {e['note']}" if e.get("note") else ""), path
+    return old + (f" -- {e['note']}" if e.get("note") else "")
+
+
+LINKS = {True: ("`-- ", "    "), False: ("|-- ", "|   ")}  # (connector, child prefix) for a last or other child
 
 
 def tree_lines(n, prefix, at):
@@ -227,21 +230,21 @@ def tree_lines(n, prefix, at):
     out = []
     for i, (kind, name, val) in enumerate(kids):
         last = i == len(kids) - 1
-        conn, more = ("`-- ", "    ") if last else ("|-- ", "|   ")
+        conn, more = LINKS[last]
         path = f"{at}{name}"
         if kind == "r":
             out.append((f"{prefix}{conn}({val} other file{'s' * (val != 1)}, untouched)", ""))
         elif kind == "f":
-            text, tag = tail(val, path)
-            out.append((f"{prefix}{conn}{val['mark']} {name}{text}", tag))
+            out.append((f"{prefix}{conn}{val['mark']} {name}{tail(val)}", path))
         else:
-            e, size = val["entry"], count(val)
+            e = val["entry"]
             mark = f"{e['mark']} " if e else ""
-            text, tag = tail(e, path + "/") if e else ("", "")
+            text, tag = (tail(e), path + "/") if e else ("", "")
             if touched(val):
                 out.append((f"{prefix}{conn}{mark}{name}/{text}", tag))
                 out += tree_lines(val, prefix + more, path + "/")
             else:
+                size = count(val)
                 files = f"{size} file{'s' * (size != 1)}"
                 fold = f" ({files})" if e and size else ("" if e else f" ({files}, untouched)")
                 out.append((f"{prefix}{conn}{mark}{name}/{fold}{text}", tag))
@@ -307,7 +310,7 @@ def render_stack(phases, trunk="", brief=False):
     def walk(ids, prefix):
         for n, i in enumerate(ids):
             p, last = phases[i], n == len(ids) - 1
-            conn, more = ("`-- ", "    ") if last else ("|-- ", "|   ")
+            conn, more = LINKS[last]
             head = " ".join(x for x in (BOX.get(p.get("status"), "[ ]"), p["label"], p.get("title") or "") if x)
             out.append(prefix + conn + "  ".join(x for x in (head, p.get("branch") or "", pr_tag(p.get("pr"))) if x))
             order.append(p["label"])
@@ -392,9 +395,8 @@ def map_lines(s, target="", brief=False):
     target means the current phase, else `plan`. A plan with no phases gives []."""
     state = s.get("state") or {}
     spec = (state.get("plan") or {}).get("spec") or ""
-    if spec and not Path(spec).expanduser().is_absolute():
-        spec = str(Path(s["top"]) / spec)
-    phases = phases_of(state, plan_sections(str(Path(spec).expanduser())) if spec else [])
+    spec = Path(s["top"]) / Path(spec).expanduser() if spec else ""  # joining keeps an absolute spec as is
+    phases = phases_of(state, plan_sections(spec) if spec else [])
     if not phases:
         return []
     heads = {p.get("headRefName"): p.get("number") for p in s.get("prs") or [] if isinstance(p, dict)}
