@@ -1065,6 +1065,92 @@ class WhereTests(Base):
         self.assertEqual(Path(self.py("where.py", "--path", "api")[0].strip()).resolve(), a)
 
 
+PLAN_MAP = """# Plan: map
+
+## Decisions
+- ```### P9 Not a phase``` is prose.
+
+## Phases
+
+### P1 Renderer
+branch `yah/map` | base `main`
+After it merges: `/yah:tree` shows the map.
+Files:
++ `scripts/phasemap.py` — the renderer
+~ scripts/where.py -- calls it
+- old/gone.py - removed
+> docs/a.md -> docs/b.md — renamed
+- **Tests** in tests/test_yah.py, reusing the helpers.
+
+```
+### P8 Inside a fence
+```
+
+### P2 Surfaces
+branch yah/map-surfaces · base yah/map
+- **`scripts/where.py`**: calls `plan_sections(path)` with (`base`) and `/yah:tree`.
+- **Docs** (README.md, skills/wrap/SKILL.md, `skills/resume/SKILL.md`, section 3)
+  - nested (`scripts/run.py:40-60`)
+
+## Risks
+- **`not/a/phase.py`**
+"""
+
+
+def load_phasemap():
+    spec = importlib.util.spec_from_file_location("yah_phasemap", SCRIPTS / "phasemap.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class PhaseMapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="yah-map-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.m = load_phasemap()
+
+    def sections(self, text):
+        plan = self.tmp / "plan.md"
+        plan.write_text(text, "utf-8")
+        return self.m.plan_sections(str(plan))
+
+    def test_files_block(self):
+        p1, p2 = self.sections(PLAN_MAP)
+        self.assertEqual((p1["label"], p1["title"], p1["branch"], p1["base"]), ("P1", "Renderer", "yah/map", "main"))
+        self.assertEqual(p1["after"], "`/yah:tree` shows the map.")
+        self.assertTrue(p1["planned"])
+        self.assertEqual([(e["mark"], e["old"], e["path"], e["note"]) for e in p1["files"]],
+                         [("+", "", "scripts/phasemap.py", "the renderer"), ("~", "", "scripts/where.py", "calls it"),
+                          ("-", "", "old/gone.py", "removed"), (">", "docs/a.md", "docs/b.md", "renamed")])
+        self.assertEqual((p2["label"], p2["branch"], p2["base"], p2["after"]),
+                         ("P2", "yah/map-surfaces", "yah/map", ""))
+
+    def test_bullet_fallback(self):
+        p2 = self.sections(PLAN_MAP)[1]
+        self.assertFalse(p2["planned"])
+        self.assertEqual([e["path"] for e in p2["files"]],  # no calls, slash commands or line numbers; a bare
+                         ["scripts/where.py", "skills/wrap/SKILL.md", "skills/resume/SKILL.md",  # name needs a /
+                          "scripts/run.py"])
+        self.assertEqual({e["mark"] for e in p2["files"]}, {""})
+
+    def test_files_block_in_a_fence(self):
+        text = "### P1 A\nFiles:\n\n```\n+ a/new.py — new\n\n~ b.py\n```\nAfter it merges: done\n"
+        (p1,) = self.sections(text)
+        self.assertEqual([(e["mark"], e["path"], e["note"]) for e in p1["files"]],
+                         [("+", "a/new.py", "new"), ("~", "b.py", "")])
+        self.assertEqual((p1["branch"], p1["after"]), ("", "done"))
+
+    def test_missing_or_odd_plan_is_empty(self):
+        self.assertEqual(self.m.plan_sections(str(self.tmp / "nope.md")), [])
+        self.assertEqual(self.m.plan_sections(""), [])
+        self.assertEqual(self.m.plan_sections(None), [])
+        self.assertEqual(self.m.plan_sections(str(self.tmp)), [])  # a directory
+        self.assertEqual(self.sections("# No phases\n\n- **`a/b.py`**\n"), [])
+        (p1,) = self.sections("### P1\n")
+        self.assertEqual((p1["title"], p1["files"], p1["planned"]), ("", [], False))
+
+
 class PrLinesTests(unittest.TestCase):
     def test_stacking_respects_trunks(self):
         w = load_where()
