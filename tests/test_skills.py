@@ -180,6 +180,11 @@ class StampTests(unittest.TestCase):
         finish = text.split("## 7. Finish with exactly this", 1)[1]
         self.assertIn("The run has <phase label>; this session can close.", finish)
 
+    def test_resume_never_starts_or_stops_a_run(self):
+        step = body("resume").split("## 4. Test, then wrap", 1)[1].split("## 5.", 1)[0]
+        self.assertIn("Never start or stop a run (`run.py`), and skip wrap's step 6.5", step)
+        self.assertNotIn("run.py", parse(ROOT / "skills/resume/SKILL.md")[0].get("allowed-tools", ""))
+
     def test_wrap_allowed_tools_only_start_a_detached_plan_run(self):
         tools = parse(ROOT / "skills/wrap/SKILL.md")[0]["allowed-tools"]
         for py in ("python3", "python", "py -3"):  # the skill quotes the path: `PY ".../run.py" --plan --detach`

@@ -69,6 +69,7 @@ Run the tests that cover what you changed, with the project's usual command (REA
 Then follow /yah:wrap. It rewrites NEXT, writes at most one brain note, and commits WIP on the branch; when the phase is complete it pushes and opens or updates the PR into `base`. In fix-checks, address-review and fix-findings, the PR exists: after the commit, `git push -u origin <branch>` so it updates.
 - Never force-push, never merge a PR, never push a forbidden branch, never delete a branch.
 - Never stage `.env*`, credentials or secrets.
+- Never start or stop a run (`run.py`), and skip wrap's step 6.5: yah run already drives this session.
 
 ## 5. Result
 
