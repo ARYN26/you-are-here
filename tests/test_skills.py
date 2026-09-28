@@ -48,7 +48,7 @@ def body(name):
 class DescriptionTests(unittest.TestCase):
     def test_files_found(self):
         self.assertEqual({p.parent.name for p in SKILLS},
-                         {"auto", "deep", "phases", "resume", "setup", "start", "where", "wrap"})
+                         {"auto", "deep", "phases", "resume", "setup", "start", "tree", "where", "wrap"})
         self.assertEqual({p.stem for p in AGENTS}, {"deep", "scout"})
 
     def test_each_description_short(self):
@@ -60,7 +60,7 @@ class DescriptionTests(unittest.TestCase):
 
     def test_model_visible_total(self):
         visible = [f for f in SKILLS + AGENTS if model_visible(f)]
-        self.assertEqual(len(visible), 7)  # 5 skills + 2 agents; auto, resume and setup are user-only
+        self.assertEqual(len(visible), 7)  # 5 skills + 2 agents; auto, resume, setup and tree are user-only
         total = sum(len(parse(f)[0]["description"]) for f in visible)
         self.assertLessEqual(total, MAX_VISIBLE)
 
@@ -261,6 +261,20 @@ class UserCommandTests(unittest.TestCase):
         self.assertIn("Merge   <the merge command>", finish)
         self.assertIn("`gh pr edit <N> --base <that PR's base>` once that PR merges", finish)
         self.assertIn("Leave the Merge line out when no PR is open", finish)
+
+
+class TreeTests(unittest.TestCase):
+    """/yah:tree runs phasemap.py and shows its output untouched."""
+
+    def test_tree_runs_the_phase_map_as_is(self):
+        meta, text = parse(ROOT / "skills/tree/SKILL.md")
+        self.assertEqual(meta.get("disable-model-invocation"), "true")  # the listing budget has no room for it
+        self.assertEqual(meta.get("argument-hint"), "[P<n>|plan]")
+        for py in ("python3", "python", "py -3"):
+            self.assertIn(f"Bash({py} *scripts/phasemap.py*)", meta["allowed-tools"])
+        self.assertIn('PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" $ARGUMENTS', text)
+        self.assertIn("Show the output as is, in a code block", text)
+        self.assertTrue((ROOT / "scripts/phasemap.py").is_file())
 
 
 class AutoTests(unittest.TestCase):
