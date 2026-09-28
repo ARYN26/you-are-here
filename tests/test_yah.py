@@ -1151,6 +1151,48 @@ class PhaseMapTests(unittest.TestCase):
         self.assertEqual((p1["title"], p1["files"], p1["planned"]), ("", [], False))
 
 
+class PhaseChangesTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.m = load_phasemap()
+        self.r = self.repo({"a.py": "a\n", "b.py": "b\n", "docs/a.md": "a long enough doc\nto rename\n"})
+
+    def commit(self, msg):
+        self.git(self.r, "add", "-A")
+        self.git(self.r, "commit", "-q", "-m", msg)
+
+    def changes(self, base, branch):
+        return [(e["mark"], e["old"], e["path"], e["note"]) for e in self.m.actual_changes(base, branch, str(self.r))]
+
+    def test_stacked_diff_shows_only_its_own_phase(self):
+        self.git(self.r, "switch", "-q", "-c", "p1")
+        (self.r / "new.py").write_text("new\n", "utf-8")
+        (self.r / "notes").mkdir()
+        (self.r / "notes" / "café menu.md").write_text("x\n", "utf-8")  # -z: no quoting of odd names
+        (self.r / "a.py").write_text("a changed\n", "utf-8")
+        (self.r / "b.py").unlink()
+        (self.r / "docs" / "a.md").rename(self.r / "docs" / "b.md")
+        self.commit("p1")
+        self.git(self.r, "switch", "-q", "-c", "p2")
+        (self.r / "p2.py").write_text("p2\n", "utf-8")
+        (self.r / "new.py").write_text("new, grown\n", "utf-8")
+        self.commit("p2")
+        self.git(self.r, "switch", "-q", "main")
+        (self.r / "main_only.py").write_text("m\n", "utf-8")
+        self.commit("main moved on")
+        self.assertEqual(sorted(self.changes("main", "p1")),
+                         [("+", "", "new.py", ""), ("+", "", "notes/café menu.md", ""),
+                          ("-", "", "b.py", ""), (">", "docs/a.md", "docs/b.md", ""), ("~", "", "a.py", "")])
+        self.assertEqual(sorted(self.changes("p1", "p2")), [("+", "", "p2.py", ""), ("~", "", "new.py", "")])
+
+    def test_no_commits_or_missing_branch_is_empty(self):
+        self.git(self.r, "branch", "p1")
+        self.assertEqual(self.changes("main", "p1"), [])
+        self.assertEqual(self.changes("main", "nope"), [])
+        self.assertEqual(self.changes("", "p1"), [])
+        self.assertEqual(self.m.actual_changes("main", "p1", str(self.tmp)), [])  # not a repo
+
+
 class PrLinesTests(unittest.TestCase):
     def test_stacking_respects_trunks(self):
         w = load_where()

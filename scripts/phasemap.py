@@ -1,6 +1,7 @@
 """phasemap.py: the phase map, what a phase or plan does to the repo.
 
-    plan_sections(path)   the plan file's `### P<n>` sections: title, branch, base, after line, files
+    plan_sections(path)            the plan file's `### P<n>` sections: title, branch, base, after line, files
+    actual_changes(base, branch)   what the branch changed since it left its base, as the same file entries
 
 A plan section may carry an `After it merges: <plain words>` line and a `Files:` block, one line per path:
 `+ path — note` (new), `~ path — note` (changed), `- path — note` (removed), `> old -> new — note` (renamed).
@@ -8,7 +9,11 @@ Both are optional; without a `Files:` block the paths come from bolded bullets (
 Nothing here raises on a bad plan: a headless step must not die on it. Stdlib only.
 """
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from yahlib import run  # noqa: E402
 
 HEAD = re.compile(r"#{1,3} ")
 PHASE = re.compile(r"### +(P\d+)\b[ \t:.-]*(.*?)\s*$")
@@ -19,6 +24,7 @@ FILES = re.compile(r"\s*(?:\*\*)?Files:(?:\*\*)?\s*$")
 ENTRY = re.compile(r"\s*([+~>-])\s+(\S.*?)\s*$")
 NOTE = re.compile(r"\s+(?:—|--|-)\s+|\s*—\s*")  # the em dash, or `--`/` - ` in a plan typed in ASCII
 BULLET = re.compile(r"\s*[-*]\s+(.*)$")
+STATUS = {"A": "+", "C": "+", "M": "~", "T": "~", "D": "-", "R": ">"}  # git's --name-status letters as marks
 BOLD = re.compile(r"\*\*`([^`]+)`\*\*")
 PAREN = re.compile(r"\(([^()]*)\)")
 WORD = re.compile(r"`([^`]+)`|([^\s,;`]+)")  # a quoted token, or a bare one
@@ -128,3 +134,22 @@ def plan_sections(path):
     except Exception:  # noqa: BLE001 - a bad plan gives what parsed so far, never a traceback
         pass
     return out
+
+
+def actual_changes(base, branch, cwd=None):
+    """What `branch` changed since it left `base`, from `git diff -M --name-status base...branch`, as
+    {mark, path, old, note} entries with an empty note. Always diff a phase against its own base, so a stacked
+    phase shows only its own files. No commits, a missing branch or no git gives []."""
+    if not base or not branch:
+        return []
+    out = run(["git", "diff", "-M", "--name-status", "-z", "--no-color", f"{base}...{branch}", "--"], cwd, timeout=15)
+    fields, entries = iter((out or "").split("\0")), []  # -z: status, path (R/C: status, old, new), NUL-separated
+    for status in fields:
+        mark = STATUS.get(status[:1])
+        if not mark:
+            continue
+        old = next(fields, "") if status[:1] in "RC" else ""
+        path = next(fields, "")
+        if path:
+            entries.append({"mark": mark, "path": path, "old": old if mark == ">" else "", "note": ""})
+    return entries
