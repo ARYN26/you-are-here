@@ -8,7 +8,7 @@
 - At /yah:wrap, write at most one brain note, with a source. A fact without evidence goes to _pending.md.
 
 ## Sessions
-- One task per session. When the statusline says wrap, run /yah:wrap, then /clear.
+- One task per session. When the statusline says wrap, run /yah:wrap, then /clear, or close the session when wrap started the run.
 - Prefer /clear to /compact. /compact is itself a large request.
 - End each task with 2-3 plain lines: what changed, what's next, what needs you.
 - Give each step the user must take as the exact command to paste in a terminal, e.g. `gh pr merge 13 --merge`.

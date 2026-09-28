@@ -167,6 +167,41 @@ class StampTests(unittest.TestCase):
         # every line of a fenced block is literal: no nested backticks around a whole finish line
         self.assertNotIn("`Safe to /clear", finish)
 
+    def test_wrap_starts_the_run_only_when_it_is_safe(self):
+        text = body("wrap")
+        step = text.split("## 6.5 Hand the open phase to a run", 1)[1].split("## 7.", 1)[0]
+        self.assertIn("Skip this step under `/yah:resume`", step)  # a run's session never starts a run
+        self.assertIn("does not end with `(you)`", step)
+        self.assertIn("NEXT does not start with `NEEDS-HUMAN:`", step)
+        self.assertIn("`run.alive` is not true", step)
+        self.assertIn("`git.dirty` is 0", step)
+        self.assertIn("not counting a STATE.md the repo does not track", step)  # wrap never stages an untracked one
+        self.assertIn("never restart a run unasked", step)  # a run the user ended stays ended
+        self.assertIn('run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach` in a Bash call of its own', step)
+        self.assertIn("Any other exit: show its output", step)
+        finish = text.split("## 7. Finish with exactly this", 1)[1]
+        self.assertIn("The run has <phase label>; this session can close.", finish)
+
+    def test_resume_never_starts_or_stops_a_run(self):
+        step = body("resume").split("## 4. Test, then wrap", 1)[1].split("## 5.", 1)[0]
+        self.assertIn("Never start or stop a run (`run.py`), and skip wrap's step 6.5", step)
+        self.assertNotIn("run.py", parse(ROOT / "skills/resume/SKILL.md")[0].get("allowed-tools", ""))
+
+    def test_wrap_allowed_tools_only_start_a_detached_plan_run(self):
+        tools = parse(ROOT / "skills/wrap/SKILL.md")[0]["allowed-tools"]
+        for py in ("python3", "python", "py -3"):  # the skill quotes the path: `PY ".../run.py" --plan --detach`
+            self.assertIn(f"Bash({py} *scripts/run.py* --plan --detach)", tools)
+        self.assertNotIn("scripts/run.py*)", tools)  # never a bare run.py: a foreground run holds the session
+        self.assertNotIn("--stop", tools)
+
+    def test_wrap_returns_to_the_plan_and_claims_a_parked_phase(self):
+        text = body("wrap")
+        self.assertIn("After a tiny task done while a plan phase is open, NEXT goes back to that phase's step", text)
+        self.assertIn("`  - Parked: NEXT was <NEXT>`", text)
+        self.assertIn("take NEXT from its Parked line", text)
+        self.assertIn("delete the Parked line", text)
+        self.assertIn("The merge of this PR becomes a `(you)` follow-up", text)
+
     def test_phases_stamps_next(self):
         text = body("phases")
         self.assertIn('"next_sha":"<HEAD>"', text)
@@ -289,6 +324,7 @@ class AutoTests(unittest.TestCase):
         self.assertIn("`yah:wrap` with the answer", row)
         self.assertIn("without `NEEDS-HUMAN:`", row)  # else the run's first session stops needs-human again
         self.assertIn("**start the run**", row)
+        self.assertIn("unless wrap's finish line says it already did", row)  # wrap's 6.5 may have started it
 
     def test_an_open_phase_starts_the_detached_plan_run(self):
         rows = self.rows()
@@ -317,6 +353,36 @@ class AutoTests(unittest.TestCase):
         # never the old hands-on ending: an approved plan goes to the run, not a foreground first phase
         self.assertNotIn("start its first phase", self.body)
         self.assertNotIn("`yah:start`", plan)
+
+    def test_only_a_tiny_task_stays_in_session_everything_else_is_planned(self):
+        rows = self.rows()
+        for start in ("A task was given", "A NEXT with no plan"):
+            row = rows[self.row(start)]
+            self.assertIn("Tiny", row)
+            self.assertIn("`yah:start`", row)
+            self.assertIn("**plan it** (section 3)", row)  # a one-PR task is planned too, then run
+            self.assertLess(row.index("Tiny"), row.index("**plan it**"))
+        self.assertIn("one PR or several", rows[self.row("A task was given")])
+        self.assertNotIn("If it needs several PRs", self.body)  # the old split sent one-PR tasks to the session
+        self.assertNotIn("this one stays hands-on", self.body)
+
+    def test_a_merged_next_with_no_step_after_it_asks_what_to_build(self):
+        rows, waits, empty = self.rows(), self.row("NEXT waits on the user"), self.row("No plan and no NEXT")
+        self.assertIn('Merged, and NEXT names nothing after it: use the "No plan and no NEXT" row', rows[waits])
+        self.assertIn("a merge that already happened", rows[empty])
+        self.assertIn("ask: wait, or stack", rows[waits])
+        self.assertIn("the waiting PR's branch as its base", rows[waits])
+        self.assertIn("Tiny: cut a new branch from that base", rows[waits])  # never commit onto the waiting PR
+        self.assertIn("**plan it** (section 3)", rows[waits])
+
+    def test_an_open_plan_is_parked_before_a_new_one_is_tracked(self):
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        park = plan.index("park it first")
+        self.assertLess(park, plan.index("`yah:phases`"))  # parked first, so the new plan is the one with `[~]`
+        self.assertIn("no run is live", plan)  # a live run's plan is never parked under it
+        self.assertIn("`  - Parked: NEXT was <NEXT>`", plan)  # wrap's step 6 item 6 claims this exact line
+        self.assertIn("goes back to `[ ]`", plan)
+        self.assertIn("with no `[~]`, its first `[ ]` phase stays `[ ]`", plan)  # a not-yet-started phase parks too
 
     def test_deep_on_every_tier_and_merges_stay_the_users(self):
         self.assertIn("every plan tier", self.body)

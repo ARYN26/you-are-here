@@ -41,7 +41,7 @@ matches sets the exit code:
     2  needs you: error, denial, needs-human, blocked, or a session that ended without a YAH-RESULT line
     3  stalled: HEAD and NEXT unchanged twice in a row
     4  iteration or wall-clock cap
-    5  refused to start
+    5  refused to start (also a start or --stop inside a run's own session, where YAH_PROTECTED is set)
     6  PR merged or closed (--plan goes on past a merged PR of a closed phase)
     7  weekly usage at run_week_stop_pct or over pace + pace_slack
     8  PR merged by yah (auto_merge on; --plan goes on to the next phase instead)
@@ -1070,6 +1070,8 @@ def main():
     ap.add_argument("--stop", action="store_true", help="end the run going in this checkout, and every process "
                     "under it")
     a = ap.parse_args()
+    if os.environ.get("YAH_PROTECTED") and not a.dry_run:  # set only in a run's own claude sessions
+        return refuse("inside a yah run session. A run starts or stops from your own terminal or session.")
     if a.stop and (a.target or a.plan or a.detach or a.dry_run or a.iterations is not None or a.budget is not None
                    or a.model or a.plugin_dir):
         return refuse("--stop takes only --cwd or --project.")
