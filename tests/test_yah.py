@@ -1274,6 +1274,57 @@ class PhaseChangesTests(Base):
         self.assertEqual(self.m.actual_changes("main", "p1", str(self.tmp)), [])  # not a repo
 
 
+class PhaseMapCliTests(Base):
+    STATE = ("# shop state\n\n## Plan: map (plan.md)\n- [~] P1 Renderer | branch yah/map | base main\n"
+             "- [ ] P2 Surfaces | branch yah/map-surfaces | base yah/map\n")
+
+    def setUp(self):
+        super().setUp()
+        self.r = self.repo({"STATE.md": self.STATE, "plan.md": PLAN_MAP, "scripts/where.py": "w\n",
+                            "old/gone.py": "g\n", "docs/a.md": "a long enough doc\nto rename\n", "README.md": "r\n"})
+
+    def map(self, *args):
+        out, err, rc = self.py("phasemap.py", "--no-gh", *args, cwd=self.r)
+        self.assertEqual((rc, err), (0, ""))
+        return out.splitlines()
+
+    def test_stack_and_tree_from_the_branch_with_plan_notes_and_gaps(self):
+        self.git(self.r, "switch", "-q", "-c", "yah/map")
+        (self.r / "scripts" / "phasemap.py").write_text("m\n", "utf-8")
+        (self.r / "scripts" / "where.py").write_text("w changed\n", "utf-8")
+        (self.r / "extra.py").write_text("x\n", "utf-8")
+        self.git(self.r, "add", "-A")
+        self.git(self.r, "commit", "-q", "-m", "p1")
+        out = self.map()  # no target: the current phase, P1
+        self.assertEqual(out[:4], ["main", "`-- [~] P1 Renderer  yah/map", "    |   after: `/yah:tree` shows the map.",
+                                   "    `-- [ ] P2 Surfaces  yah/map-surfaces"])
+        self.assertIn("            done when: `/yah:where` shows the stack.", out)
+        self.assertIn("P1 files", out)
+        self.assertIn("|   |-- + phasemap.py -- the renderer", out)
+        self.assertIn("|   `-- ~ where.py -- calls it", out)
+        self.assertIn("|-- + extra.py", out)
+        self.assertIn("|-- old/ (1 file, untouched)", out)
+        self.assertEqual(out[-2:], ["planned, not touched yet: old/gone.py, docs/b.md",
+                                    "touched, not in the plan: extra.py"])
+        self.assertEqual(self.map("plan"), out[:out.index("") if "" in out else len(out)])
+
+    def test_plan_brief_pr_and_a_phase_without_commits(self):
+        out = self.map("plan", "--brief", "--pr")
+        self.assertEqual(out, ["<!-- yah:map -->", "```text", "main", "`-- [~] P1 Renderer  yah/map",
+                               "    `-- [ ] P2 Surfaces  yah/map-surfaces",
+                               "merge order: P1 -> P2 into main; retarget a stacked PR onto main once the one below it "
+                               "merges", "```", "<!-- /yah:map -->"])
+        out = self.map("p2")  # no branch yet: the plan's paths, marked as named in the plan
+        self.assertIn("|   `-- * where.py", out)
+        self.assertEqual(out[-1], "marks: * named in the plan")
+        self.assertEqual(self.map("P9")[-1], "no phase P9 in this plan")
+
+    def test_no_plan_or_no_repo_prints_nothing(self):
+        (self.r / "STATE.md").unlink()
+        self.assertEqual(self.map(), [])
+        self.assertEqual(self.map("P1", "--cwd", str(self.home)), [])
+
+
 class PrLinesTests(unittest.TestCase):
     def test_stacking_respects_trunks(self):
         w = load_where()

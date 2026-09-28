@@ -324,3 +324,113 @@ def render_stack(phases, trunk="", brief=False):
     if any(u is not None for u in up):
         line += f"; retarget a stacked PR onto {into or 'its base'} once the one below it merges"
     return out + [line]
+
+
+# ---------------------------------------------------------------- CLI
+
+MARKER = "<!-- yah:map -->"
+
+
+def phases_of(state, plan):
+    """where.py's phases with the plan's after line, done-when and files merged in by label; a phase only the plan
+    names comes after them, as not started. Branch and base come from the state first, then the plan."""
+    by = {p["label"]: p for p in plan}
+    out = []
+    for p in (state or {}).get("phases") or []:
+        sec = by.pop(p.get("label"), {})
+        out.append(dict(sec, **{k: v for k, v in p.items() if v or k not in sec}))
+    return out + [dict(p, status="open") for p in plan if p["label"] in by]
+
+
+def first_ref(top, *names):
+    """The first of `names` that git knows as a commit, else ""."""
+    for name in names:
+        if name and run(["git", "rev-parse", "-q", "--verify", f"{name}^{{commit}}"], top):
+            return name
+    return ""
+
+
+def covers(planned, path):
+    """True when a planned path names `path` itself, or a directory it sits in."""
+    return any(p == path or (p.endswith("/") and path.startswith(p)) for p in planned)
+
+
+def phase_entries(ph, top):
+    """(entries, gaps) for a phase's tree. Before it has commits: the plan's files. After: what the branch changed
+    since its base, with the plan's notes kept, and gap lines naming planned paths not touched yet and touched
+    paths the plan's `Files:` block does not name."""
+    plan = ph.get("files") or []
+    base = first_ref(top, ph.get("base"), f"origin/{ph.get('base')}" if ph.get("base") else "")
+    branch = first_ref(top, ph.get("branch"), f"origin/{ph.get('branch')}" if ph.get("branch") else "")
+    got = actual_changes(base, branch, top) if base and branch else []
+    if not got:
+        return plan, []
+    notes = {}
+    for e in plan:
+        for p in (e["path"], e.get("old")):
+            if p and e.get("note"):
+                notes.setdefault(clean(p), e["note"])
+    got = [dict(e, note=notes.get(clean(e["path"]), notes.get(clean(e["old"]), ""))) for e in got]
+    if not ph.get("planned"):
+        return got, []
+    planned = {clean(e["path"]) for e in plan} | {clean(e.get("old")) for e in plan if e.get("old")}
+    done = {clean(e["path"]) for e in got} | {clean(e["old"]) for e in got if e["old"]}
+    gaps = []
+    todo = [clean(e["path"]) for e in plan if not any(covers([clean(e["path"])], d) for d in done)]
+    extra = [clean(e["path"]) for e in got if not covers(planned, clean(e["path"]))
+             and not (e["old"] and covers(planned, clean(e["old"])))]
+    for words, paths in (("planned, not touched yet", todo), ("touched, not in the plan", extra)):
+        if paths:
+            gaps.append(f"{words}: " + ", ".join(paths[:6]) + (f", +{len(paths) - 6} more" if len(paths) > 6 else ""))
+    return got, gaps
+
+
+def map_lines(s, target="", brief=False):
+    """The map for where.py's collected state `s`: the stack, then for a `P<n>` target that phase's tree. No
+    target means the current phase, else `plan`. A plan with no phases gives []."""
+    state = s.get("state") or {}
+    spec = (state.get("plan") or {}).get("spec") or ""
+    if spec and not Path(spec).expanduser().is_absolute():
+        spec = str(Path(s["top"]) / spec)
+    phases = phases_of(state, plan_sections(str(Path(spec).expanduser())) if spec else [])
+    if not phases:
+        return []
+    target = (target or (state.get("phase") or {}).get("label") or "plan").strip()
+    lines = render_stack(phases, brief=brief)
+    if target.lower() == "plan":
+        return lines
+    ph = next((p for p in phases if p["label"].lower() == target.lower()), None)
+    if not ph:
+        return lines + ["", f"no phase {target} in this plan"]
+    entries, gaps = phase_entries(ph, s["top"])
+    ls = (run(["git", "ls-files", "-z"], s["top"], timeout=15) or "").split("\0")
+    tree = render_tree(entries, ls)
+    head = f"{ph['label']} files" + ("" if tree else ": none named in the plan yet")
+    return lines + ["", head] + tree + gaps
+
+
+def main(argv=None):
+    import argparse
+    from yahlib import utf8_stdout
+    from where import collect
+    utf8_stdout()
+    ap = argparse.ArgumentParser(description="The phase map: the plan's stack, and a phase's file tree.")
+    ap.add_argument("target", nargs="?", default="", help="P<n> for that phase's tree, or plan (default: the phase)")
+    ap.add_argument("--brief", action="store_true", help="one line per phase, no after lines")
+    ap.add_argument("--pr", action="store_true", help="markdown for a PR description, between yah:map markers")
+    ap.add_argument("--no-gh", action="store_true", help="skip gh pr list")
+    ap.add_argument("--cwd", help="run as if started in this directory")
+    a = ap.parse_args(argv)
+    s = collect(a.cwd or ".", use_gh=not a.no_gh)
+    lines = map_lines(s, a.target, a.brief) if s else []
+    if lines and a.pr:
+        lines = [MARKER, "```text", *lines, "```", MARKER.replace("yah:", "/yah:")]
+    if lines:
+        print("\n".join(lines))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:  # noqa: BLE001 - a headless step must not die on the map
+        print(f"[yah] phasemap.py failed: {e}")
