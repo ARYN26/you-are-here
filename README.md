@@ -245,6 +245,8 @@ It reads the PR again once its checks pass and judges only that read, since the 
 
 Then, in this order: `gh pr merge <N> --merge --match-head-commit <sha>` (a merge commit, never a squash, and only if the head has not moved); each open PR based on the merged branch is retargeted to the merged PR's base; the merged branch is deleted on GitHub, never a protected one. Retargeting comes first because GitHub closes a PR whose base branch is deleted, which is also why it never passes `--delete-branch`. The run stops with exit 8, "merged by yah"; with `--plan` it goes on, and the next phase builds on the merged PR's base. A rule not met leaves the PR to you (exit 0 says which), and a failed merge step stops the run with exit 2.
 
+**Turned on after a stacked plan finished.** A plan run with auto-merge off leaves a stack of green PRs, each on the phase below it. `yah run --plan` then finds no open phase, says "plan done" and merges nothing. Merge the stack bottom-up, one plain run per phase: `yah run P1` finds P1 closed and its PR green, so it starts no session (with the quality profile on, the judge runs first), merges it with exit 8 and retargets P2's PR to P1's base. Then `yah run P2`, and so on up the stack. Out of order, `yah run P2` stops with exit 0 and says its PR targets another phase's branch.
+
 #### Critic and judge: quality profile
 
 With the [quality profile](#quality-profile) on (`ultracode: true` in config.json), a run adds two read-only sessions to each phase, on `roles.critic` (Fable at high effort by default):
