@@ -95,18 +95,20 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
    yah shop
    ```
    It cds into the repo and starts `claude` with `/yah:auto` as the first prompt, so there is nothing to type: it starts or reports the detached `yah run` for an open phase (`yah shop here` works hands-on instead), asks a `NEEDS-HUMAN` question, checks a PR that waits on you, or, with no plan, asks what to build. `yah shop add Apple Pay to the payment form` hands it that task instead. Flags go straight to `claude` with no prompt, e.g. `yah shop --resume <id>`. Run `yah` alone to list projects. If two repos share a folder name, `yah NAME` lists both and refuses; give one a key under `projects` in config.json. Starting from the home folder means project memory does not load. The SessionStart hook tells the model where you are.
-2. **The step runs through the yah skills.** `/yah:auto` calls `/yah:start` for a task, `/yah:phases` when a new plan is approved, `/yah:deep` for a hard question and `/yah:wrap` at the end. You can call any of them yourself:
+2. **The step runs through the yah skills.** A tiny task (a few lines in one or two files, no design choice) runs in the session: `/yah:auto` says so in one line and calls `/yah:start`. Any other task, even one PR, goes to plan mode (see [Autopilot](#autopilot)). `/yah:auto` also calls `/yah:phases` when a new plan is approved, `/yah:deep` for a hard question and `/yah:wrap` at the end. You can call any of them yourself:
    ```
    /yah:start "add Apple Pay to the payment form"
    ```
    It restates the task, phase and first step before any tool call, recalls the brain notes that apply, does at most one targeted search, then edits. Typing the task plainly works too: the first prompt gets brain recall either way.
 3. **Work one task.**
-4. **Wrap when the statusline says wrap, then clear:**
+4. **Wrap when the statusline says wrap:**
    ```
    /yah:wrap
-   /clear
    ```
-5. **Resume.** The fresh session gets PLAN, PHASE and NEXT injected, so it starts on the next step without reading docs. After `/clear`, type `/yah:auto`; from a terminal, `yah shop` sends it for you. If the statusline says "cache cold", `/clear` beats resuming the old session.
+   When a plan phase is still open, wrap starts the detached `yah run --plan` itself and says the session can close. It does not when NEXT waits on you (`NEEDS-HUMAN:` or a `(you)` phase), a run is already live or the tree is dirty; then `/clear`. After a tiny task, wrap sets NEXT back to the open phase's step, so the plan picks up again.
+5. **Resume.** A started run needs nothing from you: close the session. Otherwise the fresh session after `/clear` gets PLAN, PHASE and NEXT injected, so it starts on the next step without reading docs. Type `/yah:auto`; from a terminal, `yah shop` sends it for you. If the statusline says "cache cold", `/clear` beats resuming the old session.
+
+A new task while another plan has an open phase and no run is live? The new task goes first. The open plan is parked: its phase goes back to `[ ]` with a `Parked: NEXT was ...` line under it. When the new plan's last phase closes, wrap claims the parked phase again, and the new PR's merge becomes a `(you)` follow-up.
 
 A new multi-phase plan was just approved? Run `/yah:phases` before its first phase. Want steps 2 to 5 repeated without you? See [Autopilot](#autopilot).
 
@@ -114,13 +116,13 @@ A new multi-phase plan was just approved? Run `/yah:phases` before its first pha
 
 You decide at the start; the rest runs without you.
 
-1. **Give it the task.** `yah shop add Apple Pay and refunds`, or `yah shop` and answer what to build. A task that needs several PRs goes to plan mode. Claude explores, then drafts stacked phases, each with a done-when, a branch and a base. It sends the draft to `/yah:deep`, which lists the decisions and risks the plan leaves open.
+1. **Give it the task.** `yah shop add Apple Pay and refunds`, or `yah shop` and answer what to build. Every task that is not tiny goes to plan mode, one PR or several. Claude explores, then drafts one phase or stacked phases, each with a done-when, a branch and a base. It sends the draft to `/yah:deep`, which lists the decisions and risks the plan leaves open.
 2. **Answer everything once.** Before it shows the plan, Claude asks you every one of those decisions, a few questions at a time, and writes the answers under `## Decisions` in the plan file. A headless session can still stop with a `NEEDS-HUMAN` question, but only for what nobody could foresee.
 3. **Approve the plan.** `/yah:phases` writes it to STATE.md and `/yah:auto` starts `yah run --plan --detach`. The session can close; the run goes on in fresh headless sessions, one phase after another (see [`yah run`](#hands-free-runs-yah-run)).
 4. **PRs.** With auto-merge off (the default), each green PR waits for you and the next phase stacks on its branch. With [auto-merge](#auto-merge-opt-in) on, the run merges each green PR it opened and builds the next phase on where it merged.
 5. **Check in.** `yah shop` or `/yah:where` shows the RUN line. While the run lives, `/yah:auto` only reports it and offers to end it. When it stops you get a desktop notification, and `/yah:auto` asks its `NEEDS-HUMAN` question and starts it again, or for a run that stopped offers a rerun, `/yah:deep` on why, or hands-on work.
 
-`yah shop here` opts out: an open phase runs in the session through `/yah:start`, as in the daily loop.
+`yah shop here` opts out at the start: an open phase runs in the session through `/yah:start`, as in the daily loop. Its `/yah:wrap` still hands the rest of the plan to a run.
 
 ## The brain
 
