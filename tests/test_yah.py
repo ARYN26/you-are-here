@@ -908,6 +908,25 @@ class WhereTests(Base):
         s = json.loads(self.where(self.repo({"STATE.md": done}, name="all-done"), "--json"))
         self.assertEqual((s["state"]["plan"]["title"], s["state"]["phase"], s["state"]["next_phase"]), ("Old", None, None))
 
+    def test_state_md_parked_plan_below_a_new_one(self):
+        # A new task parks the open plan: its phase goes back to [ ] with a Parked: line, under the new plan's
+        # one [~] phase. Where shows the new plan; once its phase is [x], the parked phase is next, log and all.
+        parked = ("## Plan: Admin (plans/admin.md)\n- [x] P1 Roles | branch admin/roles\n"
+                  "- [ ] P2 Audit | branch admin/audit | base main\n  - Done: audit table\n"
+                  "  - Parked: NEXT was Wire the audit log into the roles page\n")
+        new = "## Plan: Hotfix (plans/hotfix.md)\n- [~] P1 Patch login | branch fix/login | base main\n\n"
+        s = json.loads(self.where(self.repo({"STATE.md": new + parked}, name="top"), "--json"))["state"]
+        self.assertEqual((s["plan"]["title"], s["phase"]["label"], s["phase"]["branch"]), ("Hotfix", "P1", "fix/login"))
+        self.assertEqual(s["phase"]["log"], [])
+        self.assertEqual([p["label"] for p in s["phases"]], ["P1"])  # the parked plan's phases stay out of view
+        closed = new.replace("[~] P1", "[x] P1")
+        s = json.loads(self.where(self.repo({"STATE.md": closed + parked}, name="closed"), "--json"))["state"]
+        self.assertEqual(s["plan"]["title"], "Admin")
+        self.assertIsNone(s["phase"])
+        p = s["next_phase"]
+        self.assertEqual((p["label"], p["status"], p["branch"]), ("P2", "open", "admin/audit"))
+        self.assertEqual(p["log"], ["Done: audit table", "Parked: NEXT was Wire the audit log into the roles page"])
+
     def test_path(self):
         repo = self.state_repo()
         self.where(repo)
