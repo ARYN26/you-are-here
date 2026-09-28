@@ -175,6 +175,8 @@ class StampTests(unittest.TestCase):
         self.assertIn("NEXT does not start with `NEEDS-HUMAN:`", step)
         self.assertIn("`run.alive` is not true", step)
         self.assertIn("`git.dirty` is 0", step)
+        self.assertIn("not counting a STATE.md the repo does not track", step)  # wrap never stages an untracked one
+        self.assertIn("never restart a run unasked", step)  # a run the user ended stays ended
         self.assertIn('run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach` in a Bash call of its own', step)
         self.assertIn("Any other exit: show its output", step)
         finish = text.split("## 7. Finish with exactly this", 1)[1]
@@ -322,6 +324,7 @@ class AutoTests(unittest.TestCase):
         self.assertIn("`yah:wrap` with the answer", row)
         self.assertIn("without `NEEDS-HUMAN:`", row)  # else the run's first session stops needs-human again
         self.assertIn("**start the run**", row)
+        self.assertIn("unless wrap's finish line says it already did", row)  # wrap's 6.5 may have started it
 
     def test_an_open_phase_starts_the_detached_plan_run(self):
         rows = self.rows()
@@ -369,6 +372,7 @@ class AutoTests(unittest.TestCase):
         self.assertIn("a merge that already happened", rows[empty])
         self.assertIn("ask: wait, or stack", rows[waits])
         self.assertIn("the waiting PR's branch as its base", rows[waits])
+        self.assertIn("Tiny: cut a new branch from that base", rows[waits])  # never commit onto the waiting PR
         self.assertIn("**plan it** (section 3)", rows[waits])
 
     def test_an_open_plan_is_parked_before_a_new_one_is_tracked(self):
@@ -378,6 +382,7 @@ class AutoTests(unittest.TestCase):
         self.assertIn("no run is live", plan)  # a live run's plan is never parked under it
         self.assertIn("`  - Parked: NEXT was <NEXT>`", plan)  # wrap's step 6 item 6 claims this exact line
         self.assertIn("goes back to `[ ]`", plan)
+        self.assertIn("with no `[~]`, its first `[ ]` phase stays `[ ]`", plan)  # a not-yet-started phase parks too
 
     def test_deep_on_every_tier_and_merges_stay_the_users(self):
         self.assertIn("every plan tier", self.body)

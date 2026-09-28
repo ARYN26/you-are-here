@@ -96,11 +96,11 @@ Merging is always the user's.
 
 ## 6.5 Hand the open phase to a run
 
-Skip this step under `/yah:resume`: a run's own session never starts or stops a run. Otherwise run step 1's command again and go on only when all of these hold:
+Skip this step under `/yah:resume`: a run's own session never starts or stops a run. Skip it too when the user ended a run in this session, or chose to go on by hand after one ended: never restart a run unasked. Otherwise run step 1's command again and go on only when all of these hold:
 - A plan phase is open (the one wrapped, or the one step 6 claimed), and its line does not end with `(you)`.
 - NEXT does not start with `NEEDS-HUMAN:`.
 - No run is live: `run` is null or `run.alive` is not true.
-- The tree is clean: `git.dirty` is 0.
+- The tree is clean: `git.dirty` is 0, not counting a STATE.md the repo does not track.
 
 Then run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach` in a Bash call of its own, `--detach` last. Exit 0: use the finish line for a started run. Any other exit: show its output and use the finish line for an open phase.
 

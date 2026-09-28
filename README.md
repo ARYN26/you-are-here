@@ -108,7 +108,7 @@ Running a fork of yah, or another plugin with the same hooks? Disable it while y
    When a plan phase is still open, wrap starts the detached `yah run --plan` itself and says the session can close. It does not when NEXT waits on you (`NEEDS-HUMAN:` or a `(you)` phase), a run is already live or the tree is dirty; then `/clear`. After a tiny task, wrap sets NEXT back to the open phase's step, so the plan picks up again.
 5. **Resume.** A started run needs nothing from you: close the session. Otherwise the fresh session after `/clear` gets PLAN, PHASE and NEXT injected, so it starts on the next step without reading docs. Type `/yah:auto`; from a terminal, `yah shop` sends it for you. If the statusline says "cache cold", `/clear` beats resuming the old session.
 
-A new task while another plan has an open phase and no run is live? The new task goes first. The open plan is parked: its phase goes back to `[ ]` with a `Parked: NEXT was ...` line under it. When the new plan's last phase closes, wrap claims the parked phase again, and the new PR's merge becomes a `(you)` follow-up.
+A new task while another plan has an open phase and no run is live? The new task goes first. The open plan is parked: its phase goes back to `[ ]` with a `Parked: NEXT was ...` line under it. When the new plan's last phase closes, wrap claims the parked phase again, and the new PR's merge becomes a `(you)` follow-up. The next `yah <project>` hands the parked phase to a run.
 
 A new multi-phase plan was just approved? Run `/yah:phases` before its first phase. Want steps 2 to 5 repeated without you? See [Autopilot](#autopilot).
 
