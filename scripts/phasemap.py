@@ -2,6 +2,7 @@
 
     plan_sections(path)            the plan file's `### P<n>` sections: title, branch, base, after line, files
     actual_changes(base, branch)   what the branch changed since it left its base, as the same file entries
+    render_tree(entries, files)    the file tree those entries make of the repo, folded to fit about 60 lines
 
 A plan section may carry an `After it merges: <plain words>` line and a `Files:` block, one line per path:
 `+ path — note` (new), `~ path — note` (changed), `- path — note` (removed), `> old -> new — note` (renamed).
@@ -153,3 +154,110 @@ def actual_changes(base, branch, cwd=None):
         if path:
             entries.append({"mark": mark, "path": path, "old": old if mark == ">" else "", "note": ""})
     return entries
+
+
+LEGEND = (("+", "new"), ("~", "changed"), ("-", "removed"), (">", "renamed"), ("*", "named in the plan"))
+
+
+def clean(path):
+    """A repo path with forward slashes and no leading `./` (a leading dot, as in `.github/`, stays)."""
+    path = (path or "").strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return "" if path in (".", "/") else path.lstrip("/")
+
+
+def tree_of(entries, ls_files):
+    """A nested {dirs, files, entry} tree of every path, each touched file or directory holding its entry."""
+    root = {"dirs": {}, "files": {}, "entry": None}
+
+    def node(parts):
+        cur = root
+        for part in parts:
+            cur = cur["dirs"].setdefault(part, {"dirs": {}, "files": {}, "entry": None})
+        return cur
+
+    moved = {clean(e.get("old")) for e in entries if e.get("mark") == ">"}
+    for p in ls_files:
+        p = clean(p)
+        if p and p not in moved:
+            *dirs, name = p.split("/")
+            node(dirs)["files"].setdefault(name, None)
+    for e in entries:
+        p = clean(e.get("path"))
+        if not p:
+            continue
+        e = dict(e, mark=e.get("mark") or "*")
+        if p.endswith("/"):
+            node(p.rstrip("/").split("/"))["entry"] = e
+        else:
+            *dirs, name = p.split("/")
+            node(dirs)["files"][name] = e
+    return root
+
+
+def count(n):
+    return len(n["files"]) + sum(count(d) for d in n["dirs"].values())
+
+
+def touched(n):
+    return any(n["files"].values()) or any(d["entry"] or touched(d) for d in n["dirs"].values())
+
+
+def tail(e, path):
+    """What follows a name: the rename's old path, the note, and the path it tags for the cut line."""
+    old = f" (from {e['old']})" if e.get("old") else ""
+    return old + (f" -- {e['note']}" if e.get("note") else ""), path
+
+
+def tree_lines(n, prefix, at):
+    """(line, touched path or "") pairs for the children of `n`, which sits at path `at`."""
+    kids = [("d", k, n["dirs"][k]) for k in sorted(n["dirs"], key=str.lower)]
+    kids += [("f", k, e) for k, e in sorted(n["files"].items(), key=lambda kv: kv[0].lower()) if e]
+    rest = sum(1 for e in n["files"].values() if not e)
+    if rest:
+        kids.append(("r", "", rest))
+    out = []
+    for i, (kind, name, val) in enumerate(kids):
+        last = i == len(kids) - 1
+        conn, more = ("`-- ", "    ") if last else ("|-- ", "|   ")
+        path = f"{at}{name}"
+        if kind == "r":
+            out.append((f"{prefix}{conn}({val} other file{'s' * (val != 1)}, untouched)", ""))
+        elif kind == "f":
+            text, tag = tail(val, path)
+            out.append((f"{prefix}{conn}{val['mark']} {name}{text}", tag))
+        else:
+            e, size = val["entry"], count(val)
+            mark = f"{e['mark']} " if e else ""
+            text, tag = tail(e, path + "/") if e else ("", "")
+            if touched(val):
+                out.append((f"{prefix}{conn}{mark}{name}/{text}", tag))
+                out += tree_lines(val, prefix + more, path + "/")
+            else:
+                files = f"{size} file{'s' * (size != 1)}"
+                fold = f" ({files})" if e and size else ("" if e else f" ({files}, untouched)")
+                out.append((f"{prefix}{conn}{mark}{name}/{fold}{text}", tag))
+    return out
+
+
+def render_tree(entries, ls_files, cap=60):
+    """The phase's file tree as lines: every path from `git ls-files` plus the entries' new ones. A directory on
+    a touched path expands; any other folds to `dir/ (N files, untouched)`, and a directory's untouched files
+    fold to one line. Touched files carry their mark and note. A legend line ends it, and past `cap` lines it
+    stops and names the touched paths it cut. No entries gives []."""
+    entries = [e for e in entries or [] if clean(e.get("path"))]
+    if not entries:
+        return []
+    rows = [(".", "")] + tree_lines(tree_of(entries, ls_files or []), "", "")
+    marks = {e.get("mark") or "*" for e in entries}
+    legend = "marks: " + "  ".join(f"{m} {word}" for m, word in LEGEND if m in marks)
+    cap = max(cap, 3)
+    if len(rows) + 1 > cap:
+        keep = cap - 2
+        cut = [tag for _, tag in rows[keep:] if tag]
+        line = f"... {len(rows) - keep} more lines cut"
+        if cut:
+            line += f", {len(cut)} touched: " + ", ".join(cut[:3]) + (f", +{len(cut) - 3} more" if len(cut) > 3 else "")
+        rows = rows[:keep] + [(line, "")]
+    return [r for r, _ in rows] + [legend]

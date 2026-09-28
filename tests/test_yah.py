@@ -1150,6 +1150,48 @@ class PhaseMapTests(unittest.TestCase):
         (p1,) = self.sections("### P1\n")
         self.assertEqual((p1["title"], p1["files"], p1["planned"]), ("", [], False))
 
+    def test_tree_folds_untouched_directories(self):
+        ls = ["README.md", "LICENSE", ".github/workflows/test.yml", "docs/a.md", "docs/c.md", "old/gone.py",
+              "scripts/where.py", "scripts/run.py", "scripts/yahlib.py", "skills/wrap/SKILL.md", "tests/test_yah.py"]
+        entries = [e for e in self.sections(PLAN_MAP)[0]["files"]]
+        entries += [{"mark": "", "path": ".\\skills\\tree\\SKILL.md", "old": "", "note": ""},  # fallback, Windows
+                    {"mark": "+", "path": "hooks/", "old": "", "note": "a new directory"}]
+        self.assertEqual(self.m.render_tree(entries, ls), [
+            ".",
+            "|-- .github/ (1 file, untouched)",  # a leading dot is not a `./` prefix
+            "|-- docs/",
+            "|   |-- > b.md (from docs/a.md) -- renamed",  # the old path is not listed again
+            "|   `-- (1 other file, untouched)",
+            "|-- + hooks/ -- a new directory",
+            "|-- old/",
+            "|   `-- - gone.py -- removed",
+            "|-- scripts/",
+            "|   |-- + phasemap.py -- the renderer",
+            "|   |-- ~ where.py -- calls it",
+            "|   `-- (2 other files, untouched)",
+            "|-- skills/",
+            "|   |-- tree/",
+            "|   |   `-- * SKILL.md",
+            "|   `-- wrap/ (1 file, untouched)",
+            "|-- tests/ (1 file, untouched)",
+            "`-- (2 other files, untouched)",
+            "marks: + new  ~ changed  - removed  > renamed  * named in the plan",
+        ])
+        self.assertEqual(self.m.render_tree([], ls), [])
+        self.assertEqual(self.m.render_tree([{"mark": "~", "path": ""}], ls), [])
+
+    def test_tree_stops_at_the_cap_and_names_what_it_cut(self):
+        ls = [f"d{i:02}/f.py" for i in range(40)]
+        entries = [{"mark": "~", "path": p, "old": "", "note": ""} for p in ls]
+        out = self.m.render_tree(entries, ls)
+        self.assertEqual(len(out), 60)
+        self.assertEqual(out[-2], "... 23 more lines cut, 12 touched: d28/f.py, d29/f.py, d30/f.py, +9 more")
+        self.assertEqual(out[-1], "marks: ~ changed")
+        self.assertEqual(out[-3], "|-- d28/")  # the directory made it, its file did not
+        self.assertEqual(len(self.m.render_tree(entries, ls, cap=10)), 10)
+        fits = self.m.render_tree(entries[:29], ls[:29])  # ".", 58 lines and the legend: nothing cut
+        self.assertEqual((len(fits), fits[-2]), (60, "    `-- ~ f.py"))
+
 
 class PhaseChangesTests(Base):
     def setUp(self):
