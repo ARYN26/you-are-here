@@ -167,6 +167,34 @@ class StampTests(unittest.TestCase):
         # every line of a fenced block is literal: no nested backticks around a whole finish line
         self.assertNotIn("`Safe to /clear", finish)
 
+    def test_wrap_starts_the_run_only_when_it_is_safe(self):
+        text = body("wrap")
+        step = text.split("## 6.5 Hand the open phase to a run", 1)[1].split("## 7.", 1)[0]
+        self.assertIn("Skip this step under `/yah:resume`", step)  # a run's session never starts a run
+        self.assertIn("does not end with `(you)`", step)
+        self.assertIn("NEXT does not start with `NEEDS-HUMAN:`", step)
+        self.assertIn("`run.alive` is not true", step)
+        self.assertIn("`git.dirty` is 0", step)
+        self.assertIn('run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach` in a Bash call of its own', step)
+        self.assertIn("Any other exit: show its output", step)
+        finish = text.split("## 7. Finish with exactly this", 1)[1]
+        self.assertIn("The run has <phase label>; this session can close.", finish)
+
+    def test_wrap_allowed_tools_only_start_a_detached_plan_run(self):
+        tools = parse(ROOT / "skills/wrap/SKILL.md")[0]["allowed-tools"]
+        for py in ("python3", "python", "py -3"):  # the skill quotes the path: `PY ".../run.py" --plan --detach`
+            self.assertIn(f"Bash({py} *scripts/run.py* --plan --detach)", tools)
+        self.assertNotIn("scripts/run.py*)", tools)  # never a bare run.py: a foreground run holds the session
+        self.assertNotIn("--stop", tools)
+
+    def test_wrap_returns_to_the_plan_and_claims_a_parked_phase(self):
+        text = body("wrap")
+        self.assertIn("After a tiny task done while a plan phase is open, NEXT goes back to that phase's step", text)
+        self.assertIn("`  - Parked: NEXT was <NEXT>`", text)
+        self.assertIn("take NEXT from its Parked line", text)
+        self.assertIn("delete the Parked line", text)
+        self.assertIn("The merge of this PR becomes a `(you)` follow-up", text)
+
     def test_phases_stamps_next(self):
         text = body("phases")
         self.assertIn('"next_sha":"<HEAD>"', text)

@@ -2,6 +2,7 @@
 name: wrap
 description: Save NEXT, commit WIP, open the PR when a phase is done. Use when a task ends or on "wrap".
 argument-hint: "[what got done]"
+allowed-tools: Bash(python3 *scripts/run.py* --plan --detach), Bash(python *scripts/run.py* --plan --detach), Bash(py -3 *scripts/run.py* --plan --detach)
 ---
 
 # Wrap
@@ -31,6 +32,7 @@ Run every bd command in this skill as `store.bd`, quoted. Never set, export or f
 Edit the file at `store.path`, or create it if it does not exist. In a linked worktree that is the main checkout's, which outlives the worktree.
 - Add a `## YYYY-MM-DD` entry for today (or rewrite today's), with `- Next: <NEXT line>` first and at most 3 short lines after it: what is done, what is half-done and where, any trap.
 - The NEXT line is what `/yah:where` prints as NEXT: one concrete action someone could start cold, at most 140 characters. Example: "Run make eval, then paste the table into PR #9".
+- After a tiny task done while a plan phase is open, NEXT goes back to that phase's step, so the plan picks up again.
 - In the `## Plan:` section, keep the phase lines (the outermost checkboxes) true: `[x]` done, exactly one `[~]` current, `[ ]` open, with `| branch X | base Y | PR #N` fields. Indented checkbox lines under a phase are its sub-tasks.
 - While a phase is open, add 1 to 3 handoff lines indented under its phase line, plain, not checkboxes: `  - Done: <what>`, `  - Tried: <what> failed because <why>`, `  - Decided: <what> because <why>`. They are the phase's `log`, which the next session reads before it starts. New lines go below the older ones. Keep only the newest 6; delete older ones.
 - A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Mark one being worked on `[~]`. Delete finished ones; the commit or PR is their record.
@@ -88,8 +90,19 @@ The phase's done-when in the plan file (`state.plan.spec`: the path in `## Plan:
 3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body. Move the phase's log lines into the body.
 4. Record it. STATE.md: mark the phase `[x]`, add `| PR #<N>` and delete its log lines. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open"`.
 5. Claim the next phase and give it a NEXT line, stamped as in step 4. STATE.md: mark it `[~]`. Beads: `bd update <next-id> --claim`.
+6. No phase left in this plan, and another `## Plan:` section has a phase with a `  - Parked: NEXT was <NEXT>` line under it (STATE.md only): claim that phase. Mark it `[~]`, take NEXT from its Parked line, stamped as in step 4, and delete the Parked line. The merge of this PR becomes a `(you)` follow-up with its command.
 
 Merging is always the user's.
+
+## 6.5 Hand the open phase to a run
+
+Skip this step under `/yah:resume`: a run's own session never starts or stops a run. Otherwise run step 1's command again and go on only when all of these hold:
+- A plan phase is open (the one wrapped, or the one step 6 claimed), and its line does not end with `(you)`.
+- NEXT does not start with `NEEDS-HUMAN:`.
+- No run is live: `run` is null or `run.alive` is not true.
+- The tree is clean: `git.dirty` is 0.
+
+Then run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach` in a Bash call of its own, `--detach` last. Exit 0: use the finish line for a started run. Any other exit: show its output and use the finish line for an open phase.
 
 ## 7. Finish with exactly this
 
@@ -102,7 +115,13 @@ Merge   <the merge command>
 
 The merge command is the one the user pastes in a terminal: `gh pr merge <N> --merge`. For a PR stacked on another PR, it is `gh pr edit <N> --base <that PR's base>` once that PR merges, then `gh pr merge <N> --merge`. Leave the Merge line out when no PR is open, or when `/yah:where` shows `auto-merge: on` for it.
 
-The finish line, when a plan phase is still open (the one wrapped, or the one step 6 claimed):
+The finish line, when step 6.5 started the run:
+
+```
+The run has <phase label>; this session can close. `/yah:where` or `yah <project>` shows its RUN line.
+```
+
+Otherwise, when a plan phase is still open (the one wrapped, or the one step 6 claimed):
 
 ```
 Safe to /clear. Then /yah:auto, or `yah <project>` from a terminal, hands <phase label> to autopilot (a detached `yah run --plan`); `/yah:auto here` works it by hand.
