@@ -3,7 +3,7 @@ name: auto
 description: Run the yah step the state calls for. The yah launcher sends it as the first prompt.
 argument-hint: "[task | here]"
 disable-model-invocation: true
-allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*), Bash(py -3 *scripts/where.py*), Bash(gh pr view *), Bash(gh pr checks *), Bash(gh run view *), Bash(python3 *scripts/run.py* --stop), Bash(python *scripts/run.py* --stop), Bash(py -3 *scripts/run.py* --stop), Bash(python3 *scripts/run.py* --detach), Bash(python *scripts/run.py* --detach), Bash(py -3 *scripts/run.py* --detach)
+allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*), Bash(py -3 *scripts/where.py*), Bash(python3 *scripts/phasemap.py* all --no-gh --spec *), Bash(python *scripts/phasemap.py* all --no-gh --spec *), Bash(py -3 *scripts/phasemap.py* all --no-gh --spec *), Bash(gh pr view *), Bash(gh pr checks *), Bash(gh run view *), Bash(python3 *scripts/run.py* --stop), Bash(python *scripts/run.py* --stop), Bash(py -3 *scripts/run.py* --stop), Bash(python3 *scripts/run.py* --detach), Bash(python *scripts/run.py* --detach), Bash(py -3 *scripts/run.py* --detach)
 ---
 
 # Auto
@@ -54,8 +54,8 @@ A task that is not tiny, one PR or several, gets every decision asked now, while
    ```
 3. Run `yah:deep` with a brief that stands alone: the goal, the draft phases in full, the key files and the constraints you know. Ask it which decisions the plan leaves open (scope, behavior, names, trade-offs, anything outward-facing such as a new repo or a publish) and which risks could stop a phase with nobody there.
 4. Ask every open decision before ExitPlanMode, in AskUserQuestion rounds of at most 4 questions, recommended option first. Keep asking until none is left, including questions an answer opens. Leave no decision to a headless session: `NEEDS-HUMAN:` is only for what nobody could foresee.
-5. Write the answers under `## Decisions` in the plan file, one line each, and change the phases they touch. Then ExitPlanMode.
-6. Approved: if another plan has an open phase and no run is live, park it first (STATE.md only): its `[~]` phase goes back to `[ ]` (with no `[~]`, its first `[ ]` phase stays `[ ]`), with `  - Parked: NEXT was <NEXT>` as a log line under it. Wrap claims it back when the new plan's last phase closes. Then run `yah:phases` with the plan file, then **start the run**. Not approved: change the plan as asked, run `yah:deep` again only if the phases changed, ask what that opened, and exit plan mode again.
+5. Write the answers under `## Decisions` in the plan file, one line each, and change the phases they touch. Then draw the map: run `PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" all --no-gh --spec "<plan file>"` and put its output as is at the end of the plan file under `## Map`, in a `text` code block, replacing any `## Map` already there, so the approval view shows each phase's stack line, after line and file tree. Then ExitPlanMode.
+6. Approved: if another plan has an open phase and no run is live, park it first (STATE.md only): its `[~]` phase goes back to `[ ]` (with no `[~]`, its first `[ ]` phase stays `[ ]`), with `  - Parked: NEXT was <NEXT>` as a log line under it. Wrap claims it back when the new plan's last phase closes. Then run `yah:phases` with the plan file, then **start the run**. Not approved: change the plan as asked, run `yah:deep` again only if the phases changed, ask what that opened, draw the map again, and exit plan mode again.
 
 ## 4. Start the run
 

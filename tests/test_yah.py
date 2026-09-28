@@ -1377,6 +1377,30 @@ class PhaseMapCliTests(Base):
         self.assertEqual(self.where(scripts=scripts)[-2:], ["MAP     (/yah:tree P<n> for another phase)",
                                                            "MAP failed: boom"])
 
+    def test_spec_maps_an_untracked_plan_and_its_map_section_parses_away(self):
+        (self.r / "STATE.md").unlink()  # plan mode: nothing tracked yet
+        plan = self.tmp / "plans" / "draft.md"
+        plan.parent.mkdir()
+        plan.write_text(PLAN_MAP, "utf-8")
+        out = self.map("all", "--spec", str(plan))
+        self.assertEqual(out[:2], ["main", "`-- [ ] P1 Renderer  yah/map"])
+        self.assertIn("    `-- [ ] P2 Surfaces  yah/map-surfaces", out)
+        self.assertEqual(out.count(""), 2)
+        self.assertIn("P1 files", out)
+        self.assertIn("|   |-- + phasemap.py -- the renderer", out)
+        self.assertEqual(out[out.index("P2 files"):][-1], "marks: * named in the plan")
+        before = load_phasemap().plan_sections(str(plan))
+        with plan.open("a", encoding="utf-8") as f:  # plan mode puts the map at the end of the plan file
+            f.write("\n## Map\n\n```text\n" + "\n".join(out) + "\n```\n")
+        self.assertEqual(load_phasemap().plan_sections(str(plan)), before)
+        self.assertEqual(self.map("all", "--spec", str(plan)), out)  # so writing it again gives the same map
+        self.assertEqual(self.map("plan", "--spec", str(plan), "--cwd", str(self.home)), out[:out.index("")])
+
+    def test_spec_of_the_tracked_plan_keeps_its_state(self):
+        self.assertEqual(self.map("plan", "--spec", "plan.md"), self.map("plan"))
+        (self.r / "draft.md").write_text(PLAN_MAP, "utf-8")  # another plan file: its phases are not started
+        self.assertEqual(self.map("--spec", "draft.md")[1], "`-- [ ] P1 Renderer  yah/map")
+
     def test_no_plan_or_no_repo_prints_nothing(self):
         (self.r / "STATE.md").unlink()
         self.assertEqual(self.map(), [])

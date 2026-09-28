@@ -389,6 +389,17 @@ class AutoTests(unittest.TestCase):
         self.assertIn("`After it merges:`", body("phases"))
         self.assertIn("`Files:`", body("phases"))
 
+    def test_plan_mode_draws_the_map_into_the_plan_before_approval(self):
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        cmd = 'PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" all --no-gh --spec "<plan file>"'
+        self.assertIn(cmd, plan)
+        self.assertLess(plan.index(cmd), plan.index("Then ExitPlanMode"))
+        self.assertIn("under `## Map`", plan)
+        self.assertIn("replacing any `## Map` already there", plan)
+        self.assertIn("draw the map again, and exit plan mode again", plan)
+        for py in ("python3", "python", "py -3"):
+            self.assertIn(f"Bash({py} *scripts/phasemap.py* all --no-gh --spec *)", self.meta["allowed-tools"])
+
     def test_only_a_tiny_task_stays_in_session_everything_else_is_planned(self):
         rows = self.rows()
         for start in ("A task was given", "A NEXT with no plan"):

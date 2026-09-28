@@ -394,12 +394,36 @@ def phase_entries(ph, top):
     return got, gaps, ref
 
 
-def map_lines(s, target="", brief=False):
-    """The map for where.py's collected state `s`: the stack, then for a `P<n>` target that phase's tree. No
-    target means the current phase, else `plan`. A plan with no phases gives []."""
+def phase_tree(ph, top):
+    """A phase's tree block: its heading, the tree of the phase branch's files (not the checkout's), then gaps."""
+    entries, gaps, ref = phase_entries(ph, top)
+    ls_cmd = ["git", "ls-tree", "-r", "--name-only", "-z", ref] if ref else ["git", "ls-files", "-z"]
+    ls = (run(ls_cmd, top, timeout=15) or "").split("\0")
+    tree = render_tree(entries, ls)
+    return [f"{ph['label']} files" + ("" if tree else ": none named in the plan yet")] + tree + gaps
+
+
+def same_file(a, b):
+    try:
+        return bool(a and b) and Path(a).resolve() == Path(b).resolve()
+    except (OSError, ValueError):
+        return False
+
+
+def map_lines(s, target="", brief=False, spec=""):
+    """The map for where.py's collected state `s`: the stack, then for a `P<n>` target that phase's tree, and for
+    `all` every phase's tree. No target means the current phase, else `plan`. `spec` reads that plan file instead
+    of the state's, as in plan mode before the plan is tracked: its phases start as not started, unless it is the
+    state's own plan. A plan with no phases gives []."""
     state = s.get("state") or {}
-    spec = (state.get("plan") or {}).get("spec") or ""
-    spec = Path(s["top"]) / Path(spec).expanduser() if spec else ""  # joining keeps an absolute spec as is
+    own = (state.get("plan") or {}).get("spec") or ""
+    own = Path(s["top"]) / Path(own).expanduser() if own else ""  # joining keeps an absolute spec as is
+    if spec:
+        spec = Path(s["top"]) / Path(spec).expanduser()
+        if not same_file(spec, own):
+            state = {}
+    else:
+        spec = own
     phases = phases_of(state, plan_sections(spec) if spec else [])
     if not phases:
         return []
@@ -411,15 +435,14 @@ def map_lines(s, target="", brief=False):
     lines = render_stack(phases, brief=brief)
     if target.lower() == "plan":
         return lines
+    if target.lower() == "all":
+        for ph in phases:
+            lines += [""] + phase_tree(ph, s["top"])
+        return lines
     ph = next((p for p in phases if p["label"].lower() == target.lower()), None)
     if not ph:
         return lines + ["", f"no phase {target} in this plan"]
-    entries, gaps, ref = phase_entries(ph, s["top"])  # the tree lists the phase branch's files, not the checkout's
-    ls_cmd = ["git", "ls-tree", "-r", "--name-only", "-z", ref] if ref else ["git", "ls-files", "-z"]
-    ls = (run(ls_cmd, s["top"], timeout=15) or "").split("\0")
-    tree = render_tree(entries, ls)
-    head = f"{ph['label']} files" + ("" if tree else ": none named in the plan yet")
-    return lines + ["", head] + tree + gaps
+    return lines + [""] + phase_tree(ph, s["top"])
 
 
 def main(argv=None):
@@ -428,14 +451,17 @@ def main(argv=None):
     from where import collect
     utf8_stdout()
     ap = argparse.ArgumentParser(description="The phase map: the plan's stack, and a phase's file tree.")
-    ap.add_argument("target", nargs="?", default="", help="P<n> for that phase's tree, or plan (default: the phase)")
+    ap.add_argument("target", nargs="?", default="", help="P<n> for that phase's tree, plan for the stack only, all for every tree (default: the phase)")
     ap.add_argument("--brief", action="store_true", help="one line per phase, no after lines")
     ap.add_argument("--pr", action="store_true", help="markdown for a PR description, between yah:map markers")
     ap.add_argument("--no-gh", action="store_true", help="skip gh pr list")
+    ap.add_argument("--spec", help="map this plan file, as in plan mode before it is tracked")
     ap.add_argument("--cwd", help="run as if started in this directory")
     a = ap.parse_args(argv)
     s = collect(a.cwd or ".", use_gh=not a.no_gh, infer=False)  # the map needs no branch-ancestry walk
-    lines = map_lines(s, a.target, a.brief) if s else []
+    if not s and a.spec:  # outside a repo a plan still maps, from its Files: blocks alone
+        s = {"top": str(Path(a.cwd or ".").resolve())}
+    lines = map_lines(s, a.target, a.brief, a.spec or "") if s else []
     if lines and a.pr:
         lines = [MARKER, "```text", *lines, "```", MARKER.replace("yah:", "/yah:")]
     if lines:
