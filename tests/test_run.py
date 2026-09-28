@@ -157,7 +157,8 @@ class RunTests(unittest.TestCase):
         self.data = self.cfg / "you-are-here"
         (self.tmp / "fake.py").write_text(FAKE, encoding="utf-8")
         self.bin = self.make_bin("bin", ("claude", "gh", NOTIFIER))
-        self.env = dict(os.environ, CLAUDE_CONFIG_DIR=str(self.cfg), HOME=str(self.home), USERPROFILE=str(self.home),
+        inherited = {k: v for k, v in os.environ.items() if not k.upper().startswith("YAH_")}  # e.g. yah run's
+        self.env = dict(inherited, CLAUDE_CONFIG_DIR=str(self.cfg), HOME=str(self.home), USERPROFILE=str(self.home),
                         YAH_FAKE_DIR=str(self.fake), YAH_RUN_POLL_S="0.05", GIT_CONFIG_NOSYSTEM="1",
                         GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.com",
                         GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.com",
@@ -283,6 +284,20 @@ class RunTests(unittest.TestCase):
                 env = dict(self.env, PATH=str(path)) if path else None
                 self.assertIn(text, self.run_yah(cwd, *args, env=env, code=5))
         self.assertEqual(self.calls("claude"), [])
+        self.assertFalse((self.data / "runs").exists())
+
+    def test_a_run_session_cannot_start_or_stop_a_run(self):
+        self.script(list=[], view=[view()], required=[{"rc": 0}])
+        repo = self.repo()
+        inside = dict(self.env, YAH_PROTECTED="main,master")
+        for args in ([], ["--plan"], ["--detach"], ["--plan", "--detach"], ["P2"], ["--stop"]):
+            with self.subTest(args=args):
+                out = self.run_yah(repo, *args, env=inside, code=5)
+                self.assertIn("[yah] run refused: inside a yah run session", out)
+        self.assertEqual(self.calls("claude"), [])
+        self.assertFalse((self.data / "runs").exists())  # no pid file, no log
+        self.assertIn("dry run", self.run_yah(repo, "--dry-run", env=inside, code=0))
+        self.assertIn("dry run", self.run_yah(repo, "--plan", "--dry-run", env=inside, code=0))
         self.assertFalse((self.data / "runs").exists())
 
     # ------------------------------------------------------------ --detach and the pid file
