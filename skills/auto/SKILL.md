@@ -44,6 +44,14 @@ A task that is not tiny, one PR or several, gets every decision asked now, while
 
 1. Enter plan mode. Explore only what the task touches; send wide searches to an Explore agent.
 2. Draft the phases in the plan file plan mode names, one or several. Each phase gets its own `### P<n> <title>` section (a session reads only its own) with what it changes, a done-when, a `branch` and a `base`: the first phase's base is the trunk, or the branch the work builds on, and each later phase's base is the branch before it, so the phases stack. `yah run --plan` stops at a phase with no branch.
+   Under the branch line, add an `After it merges:` line saying in plain words what changes for the user, and a `Files:` block that `/yah:tree` draws. Each entry starts with its mark, not a `- ` bullet: `+` new, `~` changed, `-` removed, `>` renamed. End the block with a blank line, or the next bullet is read as a removal:
+   ```
+   After it merges: checkout takes Apple Pay.
+   Files:
+   + src/pay/applepay.ts — the Apple Pay button
+   ~ src/pay/PaymentForm.tsx — mounts it
+   > src/pay/old.ts -> src/pay/card.ts — renamed
+   ```
 3. Run `yah:deep` with a brief that stands alone: the goal, the draft phases in full, the key files and the constraints you know. Ask it which decisions the plan leaves open (scope, behavior, names, trade-offs, anything outward-facing such as a new repo or a publish) and which risks could stop a phase with nobody there.
 4. Ask every open decision before ExitPlanMode, in AskUserQuestion rounds of at most 4 questions, recommended option first. Keep asking until none is left, including questions an answer opens. Leave no decision to a headless session: `NEEDS-HUMAN:` is only for what nobody could foresee.
 5. Write the answers under `## Decisions` in the plan file, one line each, and change the phases they touch. Then ExitPlanMode.

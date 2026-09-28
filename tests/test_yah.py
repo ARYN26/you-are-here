@@ -1065,6 +1065,287 @@ class WhereTests(Base):
         self.assertEqual(Path(self.py("where.py", "--path", "api")[0].strip()).resolve(), a)
 
 
+PLAN_MAP = """# Plan: map
+
+## Decisions
+- ```### P9 Not a phase``` is prose.
+
+## Phases
+
+### P1 Renderer
+branch `yah/map` | base `main`
+After it merges: `/yah:tree` shows the map.
+Files:
++ `scripts/phasemap.py` — the renderer
+~ scripts/where.py -- calls it
+- old/gone.py - removed
+> docs/a.md -> docs/b.md — renamed
+- **Tests** in tests/test_yah.py, reusing the helpers.
+
+```
+### P8 Inside a fence
+```
+
+### P2 Surfaces
+branch yah/map-surfaces · base yah/map
+- **`scripts/where.py`**: calls `plan_sections(path)` with (`base`) and `/yah:tree`.
+- **Docs** (README.md, skills/wrap/SKILL.md, `skills/resume/SKILL.md`, section 3)
+  - nested (`scripts/run.py:40-60`)
+- Done when `/yah:where` shows the stack.
+
+## Risks
+- **`not/a/phase.py`**
+"""
+
+
+def load_phasemap():
+    spec = importlib.util.spec_from_file_location("yah_phasemap", SCRIPTS / "phasemap.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class PhaseMapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="yah-map-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.m = load_phasemap()
+
+    def sections(self, text):
+        plan = self.tmp / "plan.md"
+        plan.write_text(text, "utf-8")
+        return self.m.plan_sections(str(plan))
+
+    def test_files_block(self):
+        p1, p2 = self.sections(PLAN_MAP)
+        self.assertEqual((p1["label"], p1["title"], p1["branch"], p1["base"]), ("P1", "Renderer", "yah/map", "main"))
+        self.assertEqual(p1["after"], "`/yah:tree` shows the map.")
+        self.assertTrue(p1["planned"])
+        self.assertEqual([(e["mark"], e["old"], e["path"], e["note"]) for e in p1["files"]],
+                         [("+", "", "scripts/phasemap.py", "the renderer"), ("~", "", "scripts/where.py", "calls it"),
+                          ("-", "", "old/gone.py", "removed"), (">", "docs/a.md", "docs/b.md", "renamed")])
+        self.assertEqual((p2["label"], p2["branch"], p2["base"], p2["after"], p2["done"]),
+                         ("P2", "yah/map-surfaces", "yah/map", "", "`/yah:where` shows the stack."))
+        self.assertEqual(p1["done"], "")
+
+    def test_bullet_fallback(self):
+        p2 = self.sections(PLAN_MAP)[1]
+        self.assertFalse(p2["planned"])
+        self.assertEqual([e["path"] for e in p2["files"]],  # no calls, slash commands or line numbers; a bare
+                         ["scripts/where.py", "skills/wrap/SKILL.md", "skills/resume/SKILL.md",  # name needs a /
+                          "scripts/run.py"])
+        self.assertEqual({e["mark"] for e in p2["files"]}, {""})
+
+    def test_files_block_in_a_fence(self):
+        text = "### P1 A\nFiles:\n\n```\n+ a/new.py — new\n\n~ b.py\n```\nAfter it merges: done\n"
+        (p1,) = self.sections(text)
+        self.assertEqual([(e["mark"], e["path"], e["note"]) for e in p1["files"]],
+                         [("+", "a/new.py", "new"), ("~", "b.py", "")])
+        self.assertEqual((p1["branch"], p1["after"]), ("", "done"))
+
+    def test_missing_or_odd_plan_is_empty(self):
+        self.assertEqual(self.m.plan_sections(str(self.tmp / "nope.md")), [])
+        self.assertEqual(self.m.plan_sections(""), [])
+        self.assertEqual(self.m.plan_sections(None), [])
+        self.assertEqual(self.m.plan_sections(str(self.tmp)), [])  # a directory
+        self.assertEqual(self.sections("# No phases\n\n- **`a/b.py`**\n"), [])
+        (p1,) = self.sections("### P1\n")
+        self.assertEqual((p1["title"], p1["files"], p1["planned"]), ("", [], False))
+
+    def test_tree_folds_untouched_directories(self):
+        ls = ["README.md", "LICENSE", ".github/workflows/test.yml", "docs/a.md", "docs/c.md", "old/gone.py",
+              "scripts/where.py", "scripts/run.py", "scripts/yahlib.py", "skills/wrap/SKILL.md", "tests/test_yah.py"]
+        entries = [e for e in self.sections(PLAN_MAP)[0]["files"]]
+        entries += [{"mark": "", "path": ".\\skills\\tree\\SKILL.md", "old": "", "note": ""},  # fallback, Windows
+                    {"mark": "+", "path": "hooks/", "old": "", "note": "a new directory"}]
+        self.assertEqual(self.m.render_tree(entries, ls), [
+            ".",
+            "|-- .github/ (1 file, untouched)",  # a leading dot is not a `./` prefix
+            "|-- docs/",
+            "|   |-- > b.md (from docs/a.md) -- renamed",  # the old path is not listed again
+            "|   `-- (1 other file, untouched)",
+            "|-- + hooks/ -- a new directory",
+            "|-- old/",
+            "|   `-- - gone.py -- removed",
+            "|-- scripts/",
+            "|   |-- + phasemap.py -- the renderer",
+            "|   |-- ~ where.py -- calls it",
+            "|   `-- (2 other files, untouched)",
+            "|-- skills/",
+            "|   |-- tree/",
+            "|   |   `-- * SKILL.md",
+            "|   `-- wrap/ (1 file, untouched)",
+            "|-- tests/ (1 file, untouched)",
+            "`-- (2 other files, untouched)",
+            "marks: + new  ~ changed  - removed  > renamed  * named in the plan",
+        ])
+        self.assertEqual(self.m.render_tree([], ls), [])
+        self.assertEqual(self.m.render_tree([{"mark": "~", "path": ""}], ls), [])
+
+    def test_tree_stops_at_the_cap_and_names_what_it_cut(self):
+        ls = [f"d{i:02}/f.py" for i in range(40)]
+        entries = [{"mark": "~", "path": p, "old": "", "note": ""} for p in ls]
+        out = self.m.render_tree(entries, ls)
+        self.assertEqual(len(out), 60)
+        self.assertEqual(out[-2], "... 23 more lines cut, 12 touched: d28/f.py, d29/f.py, d30/f.py, +9 more")
+        self.assertEqual(out[-1], "marks: ~ changed")
+        self.assertEqual(out[-3], "|-- d28/")  # the directory made it, its file did not
+        self.assertEqual(len(self.m.render_tree(entries, ls, cap=10)), 10)
+        fits = self.m.render_tree(entries[:29], ls[:29])  # ".", 58 lines and the legend: nothing cut
+        self.assertEqual((len(fits), fits[-2]), (60, "    `-- ~ f.py"))
+
+    def test_stack_from_the_plan_and_state(self):
+        p1, p2 = self.sections(PLAN_MAP)
+        p1.update(status="closed", pr="gh-24")
+        p2.update(status="in_progress", pr="")
+        p3 = {"label": "P3", "title": "Side", "status": "open", "branch": "yah/side", "base": "", "pr": "#30"}
+        self.assertEqual(self.m.render_stack([p1, p2, p3]), [
+            "main",
+            "|-- [x] P1 Renderer  yah/map  #24",
+            "|   |   after: `/yah:tree` shows the map.",
+            "|   `-- [~] P2 Surfaces  yah/map-surfaces",
+            "|           done when: `/yah:where` shows the stack.",  # no after line: the done-when stands in
+            "`-- [ ] P3 Side  yah/side  #30",  # no base: it starts from the first base given
+            "merge order: P1 -> P2 -> P3 into main; retarget a stacked PR onto main once the one below it merges",
+        ])
+        self.assertEqual(self.m.render_stack([p1, p2, p3], brief=True), [
+            "main", "|-- [x] P1 Renderer  yah/map  #24", "|   `-- [~] P2 Surfaces  yah/map-surfaces",
+            "`-- [ ] P3 Side  yah/side  #30",
+            "merge order: P1 -> P2 -> P3 into main; retarget a stacked PR onto main once the one below it merges",
+        ])
+
+    def test_stack_bases_loops_and_empty(self):
+        a = {"label": "P1", "title": "", "branch": "a", "base": "b"}  # a loop of bases: the first phase in it
+        b = {"label": "P2", "title": "B", "branch": "b", "base": "a", "status": "weird"}  # starts from its base
+        c = {"label": "P3", "branch": "c", "base": "dev"}
+        self.assertEqual(self.m.render_stack([a, b, c]), [
+            "b", "`-- [ ] P1  a", "    `-- [ ] P2 B  b", "dev", "`-- [ ] P3  c",
+            "merge order: P1 -> P2 -> P3, each into its base; retarget a stacked PR onto its base once the one"
+            " below it merges",
+        ])
+        self.assertEqual(self.m.render_stack([{"label": "P1", "branch": "a", "base": "a"}])[:2], ["a", "`-- [ ] P1  a"])
+        self.assertEqual(self.m.render_stack([{"label": "P1", "base": ""}]),
+                         ["main", "`-- [ ] P1", "merge order: P1 into main"])
+        self.assertEqual(self.m.render_stack([{"label": "P1"}], trunk="dev")[0], "dev")
+        c = {"label": "P0", "branch": "c", "base": "a"}  # stacks on a loop, is not in it: stays under P1
+        self.assertEqual(self.m.render_stack([c, a, b])[:4],
+                         ["b", "`-- [ ] P1  a", "    |-- [ ] P0  c", "    `-- [ ] P2 B  b"])
+        (p1,) = self.sections("### P1 A\n**Branch:** `x/a` · Base: main\n")
+        self.assertEqual((p1["branch"], p1["base"]), ("x/a", "main"))
+        s = {"top": str(self.tmp), "prs": [{"headRefName": "yah/map-surfaces", "number": 31}],
+             "state": {"phases": [{"label": "P2", "branch": "yah/map-surfaces", "base": "yah/map", "pr": ""}]}}
+        self.assertEqual(self.m.map_lines(s, "plan")[1], "`-- [ ] P2  yah/map-surfaces  #31")  # PR from gh
+        self.assertEqual(self.m.render_stack([]), [])
+        self.assertEqual(self.m.render_stack(None), [])
+        self.assertEqual([self.m.pr_tag(x) for x in ("#7", "gh-7", "7", "", None, "x7")], ["#7", "#7", "#7", "", "", ""])
+
+
+class PhaseChangesTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.m = load_phasemap()
+        self.r = self.repo({"a.py": "a\n", "b.py": "b\n", "docs/a.md": "a long enough doc\nto rename\n"})
+
+    def commit(self, msg):
+        self.git(self.r, "add", "-A")
+        self.git(self.r, "commit", "-q", "-m", msg)
+
+    def changes(self, base, branch):
+        return [(e["mark"], e["old"], e["path"], e["note"]) for e in self.m.actual_changes(base, branch, str(self.r))]
+
+    def test_stacked_diff_shows_only_its_own_phase(self):
+        self.git(self.r, "switch", "-q", "-c", "p1")
+        (self.r / "new.py").write_text("new\n", "utf-8")
+        (self.r / "notes").mkdir()
+        (self.r / "notes" / "café menu.md").write_text("x\n", "utf-8")  # -z: no quoting of odd names
+        (self.r / "a.py").write_text("a changed\n", "utf-8")
+        (self.r / "b.py").unlink()
+        (self.r / "docs" / "a.md").rename(self.r / "docs" / "b.md")
+        self.commit("p1")
+        self.git(self.r, "switch", "-q", "-c", "p2")
+        (self.r / "p2.py").write_text("p2\n", "utf-8")
+        (self.r / "new.py").write_text("new, grown\n", "utf-8")
+        self.commit("p2")
+        self.git(self.r, "switch", "-q", "main")
+        (self.r / "main_only.py").write_text("m\n", "utf-8")
+        self.commit("main moved on")
+        self.assertEqual(sorted(self.changes("main", "p1")),
+                         [("+", "", "new.py", ""), ("+", "", "notes/café menu.md", ""),
+                          ("-", "", "b.py", ""), (">", "docs/a.md", "docs/b.md", ""), ("~", "", "a.py", "")])
+        self.assertEqual(sorted(self.changes("p1", "p2")), [("+", "", "p2.py", ""), ("~", "", "new.py", "")])
+
+    def test_no_commits_or_missing_branch_is_empty(self):
+        self.git(self.r, "branch", "p1")
+        self.assertEqual(self.changes("main", "p1"), [])
+        self.assertEqual(self.changes("main", "nope"), [])
+        self.assertEqual(self.changes("", "p1"), [])
+        self.assertEqual(self.m.actual_changes("main", "p1", str(self.tmp)), [])  # not a repo
+
+    def test_a_stale_local_base_does_not_pull_in_origins_commits(self):
+        self.git(self.r, "switch", "-q", "-c", "upstream")
+        (self.r / "theirs.py").write_text("t\n", "utf-8")
+        self.commit("merged on origin, not pulled")
+        self.git(self.r, "update-ref", "refs/remotes/origin/main", "upstream")
+        self.git(self.r, "switch", "-q", "-c", "p1")
+        (self.r / "mine.py").write_text("m\n", "utf-8")
+        self.commit("p1")
+        self.git(self.r, "branch", "-q", "-D", "upstream")
+        ph = {"base": "main", "branch": "p1", "files": [], "planned": False}
+        entries, gaps, ref = self.m.phase_entries(ph, str(self.r))
+        self.assertEqual(([e["path"] for e in entries], gaps, ref), (["mine.py"], [], "refs/heads/p1"))
+
+
+class PhaseMapCliTests(Base):
+    STATE = ("# shop state\n\n## Plan: map (plan.md)\n- [~] P1 Renderer | branch yah/map | base main\n"
+             "- [ ] P2 Surfaces | branch yah/map-surfaces | base yah/map\n")
+
+    def setUp(self):
+        super().setUp()
+        self.r = self.repo({"STATE.md": self.STATE, "plan.md": PLAN_MAP, "scripts/where.py": "w\n",
+                            "old/gone.py": "g\n", "docs/a.md": "a long enough doc\nto rename\n", "README.md": "r\n"})
+
+    def map(self, *args):
+        out, err, rc = self.py("phasemap.py", "--no-gh", *args, cwd=self.r)
+        self.assertEqual((rc, err), (0, ""))
+        return out.splitlines()
+
+    def test_stack_and_tree_from_the_branch_with_plan_notes_and_gaps(self):
+        self.git(self.r, "switch", "-q", "-c", "yah/map")
+        (self.r / "scripts" / "phasemap.py").write_text("m\n", "utf-8")
+        (self.r / "scripts" / "where.py").write_text("w changed\n", "utf-8")
+        (self.r / "extra.py").write_text("x\n", "utf-8")
+        self.git(self.r, "add", "-A")
+        self.git(self.r, "commit", "-q", "-m", "p1")
+        out = self.map()  # no target: the current phase, P1
+        self.assertEqual(out[:4], ["main", "`-- [~] P1 Renderer  yah/map", "    |   after: `/yah:tree` shows the map.",
+                                   "    `-- [ ] P2 Surfaces  yah/map-surfaces"])
+        self.assertIn("            done when: `/yah:where` shows the stack.", out)
+        self.assertIn("P1 files", out)
+        self.assertIn("|   |-- + phasemap.py -- the renderer", out)
+        self.assertIn("|   `-- ~ where.py -- calls it", out)
+        self.assertIn("|-- + extra.py", out)
+        self.assertIn("|-- old/ (1 file, untouched)", out)
+        self.assertEqual(out[-2:], ["planned, not touched yet: old/gone.py, docs/b.md",
+                                    "touched, not in the plan: extra.py"])
+        self.assertEqual(self.map("plan"), out[:out.index("") if "" in out else len(out)])
+
+    def test_plan_brief_pr_and_a_phase_without_commits(self):
+        out = self.map("plan", "--brief", "--pr")
+        self.assertEqual(out, ["<!-- yah:map -->", "```text", "main", "`-- [~] P1 Renderer  yah/map",
+                               "    `-- [ ] P2 Surfaces  yah/map-surfaces",
+                               "merge order: P1 -> P2 into main; retarget a stacked PR onto main once the one below it "
+                               "merges", "```", "<!-- /yah:map -->"])
+        out = self.map("p2")  # no branch yet: the plan's paths, marked as named in the plan
+        self.assertIn("|   `-- * where.py", out)
+        self.assertEqual(out[-1], "marks: * named in the plan")
+        self.assertEqual(self.map("P9")[-1], "no phase P9 in this plan")
+
+    def test_no_plan_or_no_repo_prints_nothing(self):
+        (self.r / "STATE.md").unlink()
+        self.assertEqual(self.map(), [])
+        self.assertEqual(self.map("P1", "--cwd", str(self.home)), [])
+
+
 class PrLinesTests(unittest.TestCase):
     def test_stacking_respects_trunks(self):
         w = load_where()
