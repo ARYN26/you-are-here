@@ -631,6 +631,25 @@ class WhereTests(Base):
         self.config(projects={"shop": {"prod": "Deploys `live`, which does not exist yet; release mirrors it."}})
         self.assertEqual(json.loads(self.where(repo, "--json"))["prod_branches"], ["live", "release"])
 
+    def test_prod_prose_skips_phase_branches(self):
+        # A prose PROD word that is a phase branch, of the shown plan or another STATE.md plan a run may follow,
+        # protected it, so yah run refused its own phase branch. A backticked one is still PROD.
+        text = ("## Plan: Launch\n- [x] P1 Build | branch launch/build\n- [~] P2 Patch | branch hotfix\n\n"
+                "## Plan: Later\n- [ ] P1 Guide | branch docs\n\n## 2026-09-23\n- Next: Patch it.\n")
+        repo = self.state_repo(text, branch="main")
+        for b in ("hotfix", "docs", "release"):
+            self.git(repo, "branch", b)
+        self.config(projects={"shop": {"prod": "main is live; release mirrors it. Never hotfix main or edit docs by hand."}})
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["prod_branches"], ["main", "release"])
+        for b in ("hotfix", "docs"):
+            self.assertNotIn(b, s["prod_branches"])
+            self.assertNotIn(b, s["protected"])
+        self.config(projects={"shop": {"prod": "Deploys `hotfix`; docs is prose."}})
+        s = json.loads(self.where(repo, "--json"))
+        self.assertEqual(s["prod_branches"], ["hotfix"])
+        self.assertIn("hotfix", s["protected"])
+
     def test_state_md_plan(self):
         repo = self.state_repo()
         brief = self.where(repo, "--brief")
