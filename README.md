@@ -49,7 +49,7 @@ A statusline, three hooks, ten skills, three agents and an optional run driver w
 | `/yah:phases` | Turns an approved plan into phases in STATE.md. | One turn. Writes in your repo. |
 | `/yah:tree` | The phase map: `/yah:tree plan` stacks the phases on their bases with status, PR and what each changes once merged; `/yah:tree P<n>` adds that phase's file tree, from its branch diff once it has commits, else from the plan's `Files:` block. The same map shows in plan mode before you approve, in each phase PR's description and in `/yah:where`. | Runs git, plus `gh` unless `--no-gh`. Hidden from the model, so no listing cost. |
 | `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). Works on every tier: when the account cannot use Fable, Claude Code runs the agent on the session's model. | Fable usage. See the plan table. |
-| `/yah:gpt` | Opt-in (`setup.py --codex`). Sends multi-source web research, or a read-only review of the repo, to GPT through OpenAI's codex CLI in a forked agent, and returns a short answer plus the path of the full report. See [Claude + GPT](#claude--gpt). | Your ChatGPT plan's Codex allowance, not Claude usage, beyond the forked agent's few turns. Off by default. |
+| `/yah:gpt` | Opt-in (`setup.py --codex`). Sends multi-source web research, a read-only review of the repo, a UI mockup brief or a UI screenshot critique to GPT through OpenAI's codex CLI in a forked agent, and returns a short answer plus the path of the full report (and of each mockup PNG). See [Claude + GPT](#claude--gpt). | Your ChatGPT plan's Codex allowance, not Claude usage, beyond the forked agent's few turns. Off by default. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
 | `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops; with `--plan`, through every open phase. The merge is yours unless you turn on [auto-merge](#auto-merge-opt-in). See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
 | PostToolUse guard | The context guard again after each tool call, so wrap nudges reach a headless session, which has only one prompt. | Only inside `yah run` iterations: one local Python run per tool call. Interactive sessions never run it. |
@@ -366,7 +366,7 @@ The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own cont
 
 ## Claude + GPT
 
-yah can split the work across two subscriptions: a Claude plan (the author uses Max 5x) and a ChatGPT plan with Codex (the author uses Pro $100). Claude plans and builds. GPT critiques and judges `yah run`'s phases, does multi-source web research, and (in a later release) draws UI mockups. A second model family also catches what a same-family reviewer misses.
+yah can split the work across two subscriptions: a Claude plan (the author uses Max 5x) and a ChatGPT plan with Codex (the author uses Pro $100). Claude plans and builds. GPT critiques and judges `yah run`'s phases, does multi-source web research, draws UI mockups and critiques UI screenshots. A second model family also catches what a same-family reviewer misses.
 
 | Job | Who | How |
 |---|---|---|
@@ -374,12 +374,14 @@ yah can split the work across two subscriptions: a Claude plan (the author uses 
 | Single lookups | Claude | The main thread or the `scout` agent |
 | Multi-source web research | GPT | `/yah:gpt research <question>`, which Claude reaches for on its own once codex is on |
 | Read-only review on request | GPT | `/yah:gpt review <brief>`, or the Codex plugin's `/codex:review` |
+| UI mockups | GPT | `/yah:gpt mockup <brief>`: GPT's image tool draws them, and codex.py copies each PNG next to the report as `<stamp>-mockup-<n>.png` |
+| UI screenshot critique | GPT | `/yah:gpt critique <brief> --url <page>` shoots the page at 375x812 and 1440x900 in headless Edge or Chrome (`$YAH_BROWSER` to pick one); or pass PNG paths instead of `--url`. Ranked issues back |
 | `yah run` critique and judge | GPT | With the [quality profile](#quality-profile) on, `roles.critic` defaults to `codex high`; see [GPT critic](#critic-and-judge-quality-profile) |
 | One hard question | Fable | `/yah:deep` only |
 
 **The month budget.** Claude's weekly pool is the scarce one, so it goes to building; the statusline's `wk` bar and pace show where it stands. GPT's weekly Codex allowance pays for reviews, research and images. OpenAI does not publish the numbers; run `/status` in codex to see yours. Image turns burn several times what text turns do.
 
-**Rules Claude follows with codex on.** Once per session, with or without ultracode, the context guard tells Claude: send multi-source web research to `/yah:gpt research` as a self-contained question, and keep a single lookup in Claude; with the quality profile on, `yah run`'s critiques and judges are GPT's; use Fable only through `/yah:deep`; and a GPT finding is a claim to prove in the code or with a test before fixing it. With your own Claude model in `roles.critic`, it leaves out the line about run reviews. `RULES.md`, if you append it through setup, holds the same rules plus one more: never enable the Codex plugin's review gate.
+**Rules Claude follows with codex on.** Once per session, with or without ultracode, the context guard tells Claude: send multi-source web research to `/yah:gpt research` as a self-contained question, and keep a single lookup in Claude; on UI work, run `/yah:gpt mockup`, build, then `/yah:gpt critique --url`; with the quality profile on, `yah run`'s critiques and judges are GPT's; use Fable only through `/yah:deep`; and a GPT finding is a claim to prove in the code or with a test before fixing it. With your own Claude model in `roles.critic`, it leaves out the line about run reviews. `RULES.md`, if you append it through setup, holds the same rules plus one more: never enable the Codex plugin's review gate.
 
 **Setup.**
 

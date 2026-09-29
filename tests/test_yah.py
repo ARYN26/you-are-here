@@ -341,7 +341,7 @@ class GuardTests(Base):
         ctx = r["hookSpecificOutput"]["additionalContext"]
         self.assertTrue(ctx.startswith("[yah] Codex is on."))
         for want in ("/yah:gpt research", "single lookup stays in Claude", "Fable only through /yah:deep",
-                     "A GPT finding is a claim"):
+                     "A GPT finding is a claim", "/yah:gpt mockup, build, then /yah:gpt critique --url"):
             self.assertIn(want, ctx)
         self.assertNotIn("GPT's", ctx)  # without the quality profile, yah run has no critic or judge
         self.assertLessEqual(len(ctx.split()), 60)

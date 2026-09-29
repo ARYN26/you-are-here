@@ -582,7 +582,7 @@ class GptTests(unittest.TestCase):
     def test_allowed_tools_match_the_quoted_script_path(self):
         tools = self.meta["allowed-tools"]
         for py in ("python3", "python", "py -3"):  # the skill quotes the path: `PY ".../codex.py" research`
-            for mode in ("research", "review"):
+            for mode in ("research", "review", "mockup", "critique"):
                 self.assertIn(f"Bash({py} *scripts/codex.py* {mode} *)", tools)
         self.assertNotIn("codex.py research", tools)
         self.assertIn('`PY "${CLAUDE_SKILL_DIR}/../../scripts/codex.py"`', self.body)
@@ -594,7 +594,7 @@ class GptTests(unittest.TestCase):
 
     def test_the_call_ends_before_the_bash_tool_cap(self):
         # Bash tops out at 600000 ms, and codex_timeout_minutes defaults to 15
-        self.assertEqual(self.body.count("--timeout 570"), 2)
+        self.assertEqual(self.body.count("--timeout 570"), 5)  # research, review, mockup, critique by URL or PNGs
         self.assertIn("600000 ms timeout", self.agent)
         self.assertIn("--timeout 570", self.agent)
 
@@ -603,7 +603,7 @@ class GptTests(unittest.TestCase):
         self.assertIn("never retry", self.agent)
         self.assertIn("Exit 3 means GPT hit its usage limit", self.agent)
         self.assertIn("at most 1,500 characters", self.agent)
-        for field in ("ANSWER:", "SOURCES:", "REPORT:", "UNSURE:"):
+        for field in ("ANSWER:", "SOURCES:", "PNGS:", "REPORT:", "UNSURE:"):
             self.assertIn(field, self.agent)
 
     def test_setup_offers_codex_only_when_installed(self):
