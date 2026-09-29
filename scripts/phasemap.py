@@ -18,9 +18,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from yahlib import norm, run  # noqa: E402
 
 HEAD = re.compile(r"#{1,3} ")
-PHASE = re.compile(r"### +(P\d+)\b[ \t:.-]*(.*?)\s*$")
+PHASE = re.compile(r"### +(P\d+)\b\s*(?:[:.]|[—–-](?=\s))?\s*(.*?)\s*$")  # `P1: T`, `P1 - T`; `P1 --x` keeps --x
 BRANCH = re.compile(r"(?i)\bbranch[:*]*\s+`?([^`|·\s]+)`?")  # `branch x`, `Branch: x`, `**Branch:** x`
 BASE = re.compile(r"(?i)\bbase[:*]*\s+`?([^`|·\s]+)`?")
+KEYLINE = re.compile(r"(?i)\s*(?:[-*]\s+)?(?:\*\*)?(?:branch|base)\b[:*]*\s")  # `- branch: x`, `- **Base:** y`
 DONE = re.compile(r"\s*(?:[-*]\s+)?(?:\*\*)?Done when(?:\*\*)?[:\s]\s*(.*?)\s*$")
 AFTER = re.compile(r"\s*(?:\*\*)?After it merges:(?:\*\*)?\s*(.*?)\s*$")
 FILES = re.compile(r"\s*(?:\*\*)?Files:(?:\*\*)?\s*$")
@@ -80,10 +81,14 @@ def section(label, title, body):
     """One phase from its heading and the lines under it."""
     ph = {"label": label, "title": title, "branch": "", "base": "", "after": "", "done": "", "files": [],
           "planned": False}
-    first = next((ln for ln in body if ln.strip()), "")
-    if not BULLET.match(first) and not FILES.match(first):
-        bm, sm = BRANCH.search(first), BASE.search(first)
-        ph["branch"], ph["base"] = (bm.group(1) if bm else ""), (sm.group(1) if sm else "")
+    lines = [ln for ln in body if ln.strip()]
+    head = lines[:1] if lines and not BULLET.match(lines[0]) and not FILES.match(lines[0]) else []
+    for ln in lines[len(head):]:  # then any `- branch: x` / `- base: y` bullets that lead the section
+        if not KEYLINE.match(ln):
+            break
+        head.append(ln)
+    bm, sm = BRANCH.search(" | ".join(head)), BASE.search(" | ".join(head))
+    ph["branch"], ph["base"] = (bm.group(1) if bm else ""), (sm.group(1) if sm else "")
     prose, fence, block = [], False, False  # block: True while the `Files:` lines run
     for ln in body:
         if is_fence(ln):
