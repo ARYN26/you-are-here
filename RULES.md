@@ -23,7 +23,7 @@
 
 ## GPT (codex on, setup.py --codex)
 - Send multi-source web research to /yah:gpt research, as a self-contained question. A single lookup stays in Claude.
-- GPT critiques and judges yah run's phases, unless config roles.critic names a Claude model. If codex fails, that review reruns on roles.review_fallback.
+- With the quality profile on, GPT critiques and judges yah run's phases, unless config roles.critic names a Claude model. If codex fails, that review reruns on roles.review_fallback.
 - A GPT finding is a claim: prove it by reading the code or running a test before fixing it.
 - Never enable the Codex plugin's review gate (`--enable-review-gate`): it loops and burns both plans.
 

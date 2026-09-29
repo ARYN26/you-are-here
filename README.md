@@ -34,13 +34,13 @@ This is one person's week, not a benchmark. yah makes the habits that avoid it v
 
 ## What you get
 
-A statusline, three hooks, eight skills, two agents and an optional run driver with two hooks of its own. Stdlib Python, MIT licensed.
+A statusline, three hooks, ten skills, three agents and an optional run driver with two hooks of its own. Stdlib Python, MIT licensed.
 
 | Piece | What it does | What it costs you |
 |---|---|---|
 | Statusline | One line: model and effort, context (green, amber, then red with "wrap"), 5-hour and weekly use with pace, branch, PR, plan phase, items waiting on you, and "cache cold" after an hour idle. | About 35–70 ms per refresh on Windows, depending on the machine, and 55 ms in WSL (median of 25 runs), run locally. It never runs git, gh or bd. The model does not see it. |
 | SessionStart hook | Injects up to 6 lines of state (branch, plan, phase, NEXT, top PR, PROD), plus one stack line per plan phase (status, branch, PR and what it changes once merged), at startup, `/clear`, compact and resume, and asks the model to restate phase, NEXT and what waits on you in one line before its first tool call. A NEXT older than later commits on the phase branch is flagged `/yah:wrap first`. If the plan or a CLAUDE.md names another plugin's `/x:wrap`, `/x:where` and so on, the block maps them to yah's. | About 125 tokens (495 characters in the S7 test run), plus at most 120 characters per plan phase, plus about 40 when it maps another plugin's names, on every turn: it stays in the prompt, so it is part of the per-turn total in the listing row below. It also runs `git`, plus `gh pr list` (over the network), and `bd list` only in a repo with `.beads/`, before the session starts; a slow `gh` or `bd` can add up to about 8–10 s. |
-| Context guard | A UserPromptSubmit hook. It nudges once at the wrap mark, once at wrap now, once per session on a premium model, once a day when weekly use runs ahead of pace, and once per session when the session runs an older yah than the one installed. It never blocks. | One local Python run per prompt. A short message only when a nudge fires. |
+| Context guard | A UserPromptSubmit hook. It nudges once at the wrap mark, once at wrap now, once per session on a premium model, once a day when weekly use runs ahead of pace, and once per session when the session runs an older yah than the one installed, and once per session with [codex](#claude--gpt) on, saying what goes to GPT. It never blocks. | One local Python run per prompt. A short message only when a nudge fires. |
 | Brain recall | A UserPromptSubmit hook. On a session's first prompt it injects the [brain](#the-brain) notes that match the prompt, the phase and your changed files. | 0 when the repo has no brain folder. Otherwise once per session, capped at about 2.5k tokens, usually a few hundred. Recall over 100 notes took about 80–130 ms. |
 | `/yah:where` | The full view in up to 15 lines: branch (with no upstream, how far ahead of its base), plan, phase, NEXT and whether commits have made it stale, what waits on you, the PR stack and the PROD warning. With a plan it then adds the phase map: the stack with each phase's after line, and the current phase's file tree. | Runs git, plus `gh` if installed, and `bd` only in a repo with `.beads/`. The output enters your context. |
 | `/yah:auto` | The launcher's first prompt, so a session starts without you typing. It reads the injected state and runs the step it calls for. An open plan phase starts `yah run --plan --detach` (autopilot, which goes on after the session closes); `/yah:auto here` does the step hands-on through `/yah:start` instead. It reports a live run, and for one that ended offers a rerun, `/yah:deep` or hands-on work. It asks a `NEEDS-HUMAN` question, writes the answer into NEXT and starts the run again, checks a PR that waits on you, fixes failing checks or review comments, tracks a newly approved plan with `/yah:phases`, sends a hard question to `/yah:deep` on any tier, and ends with `/yah:wrap`. With no plan it asks what to build; it never invents a task. | One turn to pick the step, then that step's own cost. Hidden from the model, so no listing cost. |
@@ -49,6 +49,7 @@ A statusline, three hooks, eight skills, two agents and an optional run driver w
 | `/yah:phases` | Turns an approved plan into phases in STATE.md. | One turn. Writes in your repo. |
 | `/yah:tree` | The phase map: `/yah:tree plan` stacks the phases on their bases with status, PR and what each changes once merged; `/yah:tree P<n>` adds that phase's file tree, from its branch diff once it has commits, else from the plan's `Files:` block. The same map shows in plan mode before you approve, in each phase PR's description and in `/yah:where`. | Runs git, plus `gh` unless `--no-gh`. Hidden from the model, so no listing cost. |
 | `/yah:deep` | Sends one self-contained hard question to Fable in a forked agent (high effort, read-only, 300 words or fewer). Works on every tier: when the account cannot use Fable, Claude Code runs the agent on the session's model. | Fable usage. See the plan table. |
+| `/yah:gpt` | Opt-in (`setup.py --codex`). Sends multi-source web research, or a read-only review of the repo, to GPT through OpenAI's codex CLI in a forked agent, and returns a short answer plus the path of the full report. See [Claude + GPT](#claude--gpt). | Your ChatGPT plan's Codex allowance, not Claude usage, beyond the forked agent's few turns. Off by default. |
 | `scout` agent | Read-only lookups on Sonnet at low effort. Answers in 150 words or fewer. | Sonnet tokens instead of main-thread tokens. |
 | `yah run` and `/yah:resume` | Chains fresh headless sessions, one bounded slice each, until the phase's PR is open and green, then stops; with `--plan`, through every open phase. The merge is yours unless you turn on [auto-merge](#auto-merge-opt-in). See [Hands-free runs](#hands-free-runs-yah-run). | Your normal plan usage: one full session per iteration, each capped by `--max-budget-usd`. |
 | PostToolUse guard | The context guard again after each tool call, so wrap nudges reach a headless session, which has only one prompt. | Only inside `yah run` iterations: one local Python run per tool call. Interactive sessions never run it. |
@@ -252,7 +253,7 @@ Then, in this order: `gh pr merge <N> --merge --match-head-commit <sha>` (a merg
 
 #### Critic and judge: quality profile
 
-With the [quality profile](#quality-profile) on (`ultracode: true` in config.json), a run adds two read-only sessions to each phase, on `roles.critic` (Fable at high effort by default):
+With the [quality profile](#quality-profile) on (`ultracode: true` in config.json), a run adds two read-only reviews to each phase, on `roles.critic`: Fable at high effort by default, or GPT when [codex](#claude--gpt) is on:
 
 - **Critique**, before the phase's first build, when the phase has no PR and its branch is not on origin. `/yah:resume P2 critique` reads the code the phase will touch and writes at most 300 words: what will break, what is missing, and the order to build in. The answer is saved as `runs/<run>-P2-critique.md`, and the next build prompt ends with `critique=<path>`. That build folds it in and logs each change it makes to the plan as a `Decided:` line. A phase that already has a PR or a pushed branch gets no critique, so a restarted run does not pay for a second one; nor does a phase whose NEXT is `NEEDS-HUMAN:`, since its build stops there.
 - **Judge**, once the PR is open and green and the phase is closed: where the run would stop with exit 0 or auto-merge. `/yah:resume P2 judge` reads `gh pr diff` and reports only the defects it can prove and that should block the merge: wrong behavior, data loss, a security hole, or a broken or weakened test. `judge pass` lets the run stop or merge as usual. `judge block <n>` saves the findings as `runs/<run>-P2-judge.md` and runs one `fix-findings` slice on them, even at the iteration cap. Then the loop goes on as usual (checks, reviews, stop rules), with no second judge, so a judge can hold a merge back by one slice, never for good.
@@ -260,6 +261,8 @@ With the [quality profile](#quality-profile) on (`ultracode: true` in config.jso
 Each runs once per phase per run, with Edit, Write, NotebookEdit, `git commit` and `git push` denied on top of the DENY list, and under the same push guard, `--max-budget-usd` and `run_iteration_minutes` as a build. No judge runs after a session that stopped for you, since the run stops there anyway, nor once `run_total_hours` has passed. A judge that blocks after a build that ended in an error or without a `YAH-RESULT:` line still gets its fix slice: the PR was green, so that ending stopped nothing. A critique or judge that fails (an error, a timeout, or not the `YAH-RESULT:` line it should end with) is logged as skipped, and the run goes on without it.
 
 **Fable fallback.** Before each one, the run reads the critic model's own weekly bar: the fullest rate-limit pool whose key contains the model name, such as `seven_day_fable`, from the last session's stream, else from `limits.json` if it is under 6 h old. At `critic_week_skip_pct` (50%) or more, the session runs on `roles.judge` (Opus at high effort) instead. A bar it cannot read counts as under, so the critic stays on Fable. To move both off Fable for good, set `roles.critic`.
+
+**GPT critic.** With `codex` on, `roles.critic` defaults to `codex high`, unless you set it yourself. The critique and judge then run as `codex.py review` in a read-only sandbox, not as `/yah:resume` sessions. GPT gets no plan tools, `gh` or network there, so run.py writes its brief to `runs/<run>-P2-critique-brief.md` or `-P2-judge-brief.md`: the phase's plan section and the plan's Decisions, or the PR's diff. They run at `codex_effort` on `codex_model`, have no Claude bar, and log $0, since they spend your ChatGPT plan's weekly allowance instead. A codex call that fails or hits its limit reruns that review on `roles.review_fallback` (Opus at high effort) and turns codex off for the rest of the run. A brief that cannot be built (no plan section, no diff) sends only that one review to `roles.review_fallback`.
 
 **Log lines.** The console shows each one as it starts. The console and the `.log` show how it ended: model and effort, why that model, cost, then its result and file, or why it was skipped:
 
@@ -269,6 +272,8 @@ Each runs once per phase per run, with Edit, Write, NotebookEdit, `git commit` a
 [yah] judge P2: /yah:resume P2 judge on opus high (fable bar 55%, at or over 50%: roles.judge)
 [yah] judge P2: opus high (fable bar 55%, at or over 50%: roles.judge), $1.10, judge block 2, youarehere-20260926-113655-P2-judge.md
 [yah] judge P3: fable high (fable bar 12%), $0.40, skipped: it ended with YAH-RESULT: blocked dirty tree
+[yah] critique P4: codex.py review on codex high (GPT, no Claude bar)
+[yah] critique P4: codex high (GPT, no Claude bar), $0.00, critique-done, youarehere-20260926-113655-P4-critique.md
 ```
 
 Each one's raw stream goes to `runs/<run>-P2-critique.jsonl` or `-P2-judge.jsonl`, and `--dry-run` prints a `critic` line: what it would critique or judge now, and on which model.
@@ -350,13 +355,39 @@ The quality profile has Opus do the work at high effort with ultracode on, and g
 | `scout` | `sonnet low` | lookups in workflows |
 | `mechanical` | `opus medium` | mechanical workflow stages |
 | `judge` | `opus high` | research and judges in workflows; the critic and judge when the critic's bar is high |
-| `critic` | `fable high` | `yah run`'s per-phase critique and judge |
+| `critic` | `fable high`, or `codex high` with codex on | `yah run`'s per-phase critique and judge |
+| `review_fallback` | `opus high` | a GPT critique or judge whose codex call failed |
 
 Set only the role you want to change: `{"roles": {"critic": "opus high"}}` moves the critic and judge off Fable. Effort must be low, medium, high or xhigh; `max`, junk or a missing value falls back to that role's default. `/yah:deep` stays on Fable either way, because its agent file pins the model.
 
 **The critic's bar.** The statusline saves every extra `rate_limits` pool, such as a per-model weekly bar, into `limits.json` under `pools`. yah looks for a pool whose key contains the critic's model name, such as `seven_day_fable`. That key name is a guess until Claude Code is seen sending one. When no pool matches, the bar counts as unknown, which is treated as under 50%.
 
 The wrap marks stay at 150k / 200k / 260k. Workflow agents run in their own contexts, so the main thread stays short. `yah run` sessions inherit ultracode too, and each one is still capped by `--max-budget-usd`. `--uninstall` puts the previous values back, in `config.json` too.
+
+## Claude + GPT
+
+yah can split the work across two subscriptions: a Claude plan (the author uses Max 5x) and a ChatGPT plan with Codex (the author uses Pro $100). Claude plans and builds. GPT critiques and judges `yah run`'s phases, does multi-source web research, and (in a later release) draws UI mockups. A second model family also catches what a same-family reviewer misses.
+
+| Job | Who | How |
+|---|---|---|
+| Planning, building, fixing | Claude (`roles.main`) | Your sessions and `yah run` build slices |
+| Single lookups | Claude | The main thread or the `scout` agent |
+| Multi-source web research | GPT | `/yah:gpt research <question>`, which Claude reaches for on its own once codex is on |
+| Read-only review on request | GPT | `/yah:gpt review <brief>`, or the Codex plugin's `/codex:review` |
+| `yah run` critique and judge | GPT | With the [quality profile](#quality-profile) on, `roles.critic` defaults to `codex high`; see [GPT critic](#critic-and-judge-quality-profile) |
+| One hard question | Fable | `/yah:deep` only |
+
+**The month budget.** Claude's weekly pool is the scarce one, so it goes to building; the statusline's `wk` bar and pace show where it stands. GPT's weekly Codex allowance pays for reviews, research and images. OpenAI does not publish the numbers; run `/status` in codex to see yours. Image turns burn several times what text turns do.
+
+**Rules Claude follows with codex on.** Once per session, with or without ultracode, the context guard tells Claude: send multi-source web research to `/yah:gpt research` as a self-contained question, and keep a single lookup in Claude; with the quality profile on, `yah run`'s critiques and judges are GPT's; use Fable only through `/yah:deep`; and a GPT finding is a claim to prove in the code or with a test before fixing it. With your own Claude model in `roles.critic`, it leaves out the line about run reviews. `RULES.md`, if you append it through setup, holds the same rules plus one more: never enable the Codex plugin's review gate.
+
+**Setup.**
+
+1. Install and sign in to the codex CLI: `npm install -g @openai/codex`, then `codex login`.
+2. Run `/yah:setup` and say yes to GPT, or run `setup.py --codex`. It checks the login, makes one small live call, then sets `codex: true` in `config.json`. `--uninstall` puts the old value back.
+3. Optional, for interactive reviews: OpenAI's Codex plugin, `/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`. Never run `/codex:setup --enable-review-gate`: that gate is a Stop hook that can loop Claude and Codex and drain both plans.
+
+The keys are `codex`, `codex_model`, `codex_effort`, `codex_timeout_minutes` and `roles.review_fallback`; see [Config](#config). Every codex call runs in a read-only sandbox, and yah never gives GPT your `gh` or network in a run review.
 
 ## What it reads, writes and never does
 
@@ -502,8 +533,12 @@ yah never needs beads, and beads shows nothing STATE.md does not. A repo that al
 | `premium_models` | Model ids or names that get a red tag in the statusline and a once-per-session nudge. |
 | `auto_merge` | Default `false`. Set by `setup.py --auto-merge`. Only a JSON `true` turns it on; then `yah run` merges a green phase PR it opened. See [auto-merge](#auto-merge-opt-in). |
 | `ultracode` | Default `false`. Set by `setup.py --ultracode`; only a JSON `true` turns it on. Turns on the [quality profile](#quality-profile): the once-per-session workflow sizing rule, the pace nudge toward smaller workflows, and in `yah run` the `--effort`, critic and judge. |
-| `roles` | `"model effort"` per job: `main`, `scout`, `mechanical`, `judge` and `critic`. Set only the roles you change; the rest keep their defaults (see the [roles table](#quality-profile)). Effort is low, medium, high or xhigh; `max` or junk falls back to the role's default. |
-| `critic_week_skip_pct` | Default 50. With the profile on, when the critic model's own weekly bar is at this % or more, `yah run`'s critic and judge run on `roles.judge` instead. |
+| `roles` | `"model effort"` per job: `main`, `scout`, `mechanical`, `judge`, `critic` and `review_fallback`. Set only the roles you change; the rest keep their defaults (see the [roles table](#quality-profile)). Effort is low, medium, high or xhigh; `max` or junk falls back to the role's default. |
+| `critic_week_skip_pct` | Default 50. With the profile on, when the critic model's own weekly bar is at this % or more, `yah run`'s critic and judge run on `roles.judge` instead. A `codex` critic has no Claude bar and ignores it. |
+| `codex` | Default `false`. Set by `setup.py --codex` once a signed-in codex CLI answers a smoke call; only a JSON `true` turns it on. Turns on `/yah:gpt` and makes GPT the default `roles.critic`. See [Claude + GPT](#claude--gpt). |
+| `codex_model` | Default `gpt-6.1-sol`. The model every codex call passes with `-m`. |
+| `codex_effort` | Default `high`. Passed as `-c model_reasoning_effort` on every codex call, since Codex's own default for Sol is low. |
+| `codex_timeout_minutes` | Default 15. Wall clock per codex call; `/yah:gpt` passes 570 s, under the Bash tool's 10-minute cap. |
 | `recent_days` | How far back the home view looks for repos yah has seen. |
 | `brain_dir` | The brain folder, relative to the repo root. Default `docs/brain`. |
 | `recall_max_chars` | Cap on the recall block. Default 10,000 characters, about 2.5k tokens. |

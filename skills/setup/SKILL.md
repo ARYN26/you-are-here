@@ -42,6 +42,8 @@ Offer: "Let `yah run` merge its own PRs? It is off by default, and you merge eve
 
 Only when `codex` is on PATH (`command -v codex`; on Windows `where codex`), offer: "Send multi-source web research and read-only reviews to GPT? `/yah:gpt research <question>` hands a self-contained brief to OpenAI's codex CLI on your ChatGPT plan, in a read-only sandbox, and returns a short answer with cited URLs and the path of the full report. It is off by default. Turning it on checks that codex is signed in and makes one small live call." On yes, run `setup.py --codex` and show the output; if it says codex is not signed in, tell the user to run `codex login` and offer again. It sets only `codex` in config.json. `--uninstall` restores the previous value.
 
+Once codex is on, tell the user that OpenAI's Codex plugin gives interactive reviews (`/codex:review`, `/codex:adversarial-review`) and that they install it themselves with `/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`. Warn them never to run `/codex:setup --enable-review-gate`: that gate is a Stop hook that can loop Claude and Codex and drain both plans' limits.
+
 ## 4. Launcher (optional)
 
 Explain: `yah <project>` opens Claude Code in that project from any folder, so project hooks and memory load; `yah` alone lists projects. On yes, find the shell's rc file (`~/.zshrc`, `~/.bashrc`, `~/.config/fish/config.fish`, or on Windows the path printed by `powershell -NoProfile -Command '$PROFILE'`) and run `setup.py --install-launcher <rcfile>`. On Windows also run it with the `yah.cmd` path that setup printed, so `yah` works in cmd.exe too. Tell the user to open a new terminal.
