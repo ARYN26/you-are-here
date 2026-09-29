@@ -1,8 +1,9 @@
-"""codex.py: hand web research or a read-only code review to GPT through OpenAI's codex CLI.
+"""codex.py: hand web research, a read-only code review or UI mockups to GPT through OpenAI's codex CLI.
 
     codex.py research BRIEF              multi-source web research with cited URLs
     codex.py review REPO BRIEF_FILE      read-only review of REPO; BRIEF_FILE says what to look for
-    Both take --timeout SECONDS (default: config codex_timeout_minutes, 15). A BRIEF or BRIEF_FILE of -
+    codex.py mockup BRIEF                UI mockups from GPT's image tool, as PNG paths
+    All take --timeout SECONDS (default: config codex_timeout_minutes, 15). A BRIEF or BRIEF_FILE of -
     reads the brief from stdin, so a skill can pass it through a quoted heredoc.
 
 Refuses unless config.json has "codex": true (setup.py --codex). codex is $YAH_CODEX, else codex on PATH;
@@ -10,7 +11,10 @@ a YAH_CODEX that ends in .py runs with this Python (the tests' fake). Every call
 read-only sandbox, ephemeral, with the prompt on stdin (a long brief would pass Windows' command-line cap)
 and the answer read from the -o file. Research runs in the report folder, never in a repo, with live web
 search. The full report goes to <data dir>/codex/<stamp>-<mode>.md (the newest 20 are kept); stdout is
-its path, then the answer: the first 1,500 characters for research, all of it for review. A usage limit
+its path, then the answer: the first 1,500 characters for research and mockup, all of it for review.
+Mockup also runs in the report folder: codex's image tool saves under $CODEX_HOME/generated_images whatever
+the sandbox, so the PNGs new there after the call are copied next to the report as <stamp>-mockup-<n>.png,
+one `PNG <path>` line each; no new PNG is an error. A usage limit
 is one line on stderr and exit 3; any other failure is one line and exit 1. Stdlib only.
 """
 import argparse
@@ -48,6 +52,14 @@ ANSWER: at most 10 lines; tie each claim to a source number like [2].
 SOURCES: numbered, one URL per line, with a few words on what it says.
 UNSURE: what the sources disagree on or leave open, or "none".
 Do not run commands that change anything and do not edit files."""
+MOCKUP = """Draw UI mockups for this brief with your image generation tool.
+
+BRIEF:
+{brief}
+
+Make one image per screen or variant the brief asks for, or one if it names none. Do not write files or run
+commands: the images are collected from your image tool's own folder. Reply with one line per image: its
+file name, then a few words on what it shows."""
 REVIEW = """{brief}
 
 You are in the repository under review, in a read-only sandbox. Read any file you need; do not edit files
@@ -136,8 +148,8 @@ def limit_line(text):
     return next((ln for ln in text.splitlines() if LIMIT.search(ln)), "")
 
 
-def ask(prompt, cwd, timeout, web=False, repo=None):
-    """codex's final answer text; with no repo it runs outside git (research, setup's smoke call).
+def ask(prompt, cwd, timeout, web=False, repo=None, extra=()):
+    """codex's final answer text; with no repo it runs outside git (research, mockup, setup's smoke call).
     Raises Limit on a usage limit, Fail on a timeout, an error or no answer."""
     cfg = config()
     cmd = command(find_codex()) + ["exec", "--ephemeral", "-s", "read-only", "-m", cfg["codex_model"],
@@ -145,6 +157,7 @@ def ask(prompt, cwd, timeout, web=False, repo=None):
     cmd += ["--skip-git-repo-check"] if repo is None else ["-C", str(repo)]
     if web:
         cmd += ["-c", "web_search=live"]
+    cmd += list(extra)
     scratch = Path(tempfile.mkdtemp(prefix="yah-codex-"))
     answer = scratch / "answer.md"
     try:
@@ -173,9 +186,38 @@ def ask(prompt, cwd, timeout, web=False, repo=None):
     return text
 
 
+def image_folder():
+    """Where codex's image tool saves every PNG, whatever the sandbox."""
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "generated_images"
+
+
+def pngs(folder):
+    return set(folder.rglob("*.png")) if folder.is_dir() else set()
+
+
+def mockup(brief, folder, timeout, stamp):
+    """(answer, PNG copies): the PNGs the image tool saved during the call, the ones the answer names when it
+    names any (another codex session may be drawing too), copied into the report folder."""
+    images = image_folder()
+    before = pngs(images)
+    text = ask(MOCKUP.format(brief=brief), folder, timeout, extra=["--enable", "image_generation"])
+    new = sorted(pngs(images) - before, key=lambda p: (p.stat().st_mtime, p.name))
+    new = [p for p in new if p.name in text] or new
+    if not new:
+        raise Fail(f"codex made no image: {first_line(text)}")
+    copies = []
+    for i, png in enumerate(new, 1):
+        copies.append(folder / f"{stamp}-mockup-{i}.png")
+        shutil.copyfile(png, copies[-1])
+    return text, copies
+
+
 def prune(folder):
-    """Keep the newest KEEP reports. Names sort by time; a file another run already removed is fine."""
-    for old in sorted(folder.glob("*.md"))[:-KEEP]:
+    """Keep the newest KEEP reports and their mockup PNGs. Names sort by time; a file another run already
+    removed is fine."""
+    reports = sorted(folder.glob("*.md"))
+    kept = {p.name.rsplit("-", 1)[0] for p in reports[-KEEP:]}
+    for old in reports[:-KEEP] + [p for p in folder.glob("*.png") if p.name.split("-mockup-")[0] not in kept]:
         try:
             old.unlink()
         except OSError:
@@ -184,7 +226,7 @@ def prune(folder):
 
 def main():
     utf8_stdout()
-    ap = argparse.ArgumentParser(prog="codex.py", description="Web research or a read-only review through GPT.")
+    ap = argparse.ArgumentParser(prog="codex.py", description="Web research, a read-only review or UI mockups through GPT.")
     sub = ap.add_subparsers(dest="mode", required=True)
     p = sub.add_parser("research", help="multi-source web research, cited URLs back")
     p.add_argument("brief", help="the question, or - to read it from stdin")
@@ -192,6 +234,9 @@ def main():
     p = sub.add_parser("review", help="read-only review of a repo, led by a brief file")
     p.add_argument("repo")
     p.add_argument("brief_file", help="the brief's file, or - to read it from stdin")
+    p.add_argument("--timeout", type=int)
+    p = sub.add_parser("mockup", help="UI mockups from GPT's image tool, PNG paths back")
+    p.add_argument("brief", help="what to draw, or - to read it from stdin")
     p.add_argument("--timeout", type=int)
     a = ap.parse_args()
     try:
@@ -232,7 +277,11 @@ def run(a):
     folder.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     started = time.time()
-    if a.mode == "research":
+    copies = []
+    if a.mode == "mockup":
+        text, copies = mockup(brief, folder, timeout, stamp)
+        head = ["Brief: " + brief, ""] + [f"PNG {png}" for png in copies]
+    elif a.mode == "research":
         text = ask(RESEARCH.format(brief=brief), folder, timeout, web=True)
         head = ["Brief: " + brief]
     else:
@@ -244,9 +293,9 @@ def run(a):
             f"Model {cfg['codex_model']} at {cfg['codex_effort']} effort, {round(time.time() - started)}s.", ""] + head
     report.write_text("\n".join(head) + "\n\n---\n\n" + text + "\n", encoding="utf-8")
     prune(folder)
-    if a.mode == "research" and len(text) > SUMMARY_CHARS:
+    if a.mode != "review" and len(text) > SUMMARY_CHARS:
         text = text[:SUMMARY_CHARS].rstrip() + " ... (the rest is in the report)"
-    print(f"REPORT {report}\n\n{text}")
+    print("\n".join([f"REPORT {report}"] + [f"PNG {png}" for png in copies] + ["", text]))
     return 0
 
 

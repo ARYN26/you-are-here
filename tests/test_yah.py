@@ -2054,6 +2054,10 @@ if argv[:2] == ["login", "status"]:
 time.sleep(plan.get("sleep", 0))
 if plan.get("answer") is not None and "-o" in argv:
     open(argv[argv.index("-o") + 1], "w", encoding="utf-8").write(plan["answer"])
+for name in plan.get("pngs", []):  # the image tool saves under CODEX_HOME whatever the sandbox
+    path = os.path.join(os.environ["CODEX_HOME"], "generated_images", "thread-1", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "wb").write(b"PNG " + name.encode())
 sys.stderr.write(plan.get("stderr", ""))
 sys.stdout.write(plan.get("stdout", "codex noise: tokens used 1234\n"))
 sys.exit(plan.get("rc", 0))
@@ -2076,7 +2080,9 @@ class CodexTests(Base):
         self.fake = self.tmp / "fake"
         self.fake.mkdir()
         (self.fake / "codex.py").write_text(FAKE_CODEX, encoding="utf-8")
-        self.env.update(YAH_CODEX=str(self.fake / "codex.py"), FAKE_CODEX_DIR=str(self.fake))
+        self.images = self.tmp / "codex-home" / "generated_images"
+        self.env.update(YAH_CODEX=str(self.fake / "codex.py"), FAKE_CODEX_DIR=str(self.fake),
+                        CODEX_HOME=str(self.images.parent))
         self.codex(CODEX_OK)
         self.config(codex=True)
         self.reports = self.data / "codex"
@@ -2174,6 +2180,56 @@ class CodexTests(Base):
         self.assertEqual(len(left), 20)
         self.assertEqual(left[0], "20200101-000006-1-research.md")
         self.assertIn(self.report(out).name, left)
+
+    def test_mockup_copies_the_new_pngs_next_to_the_report(self):
+        old = self.images / "thread-0" / "exec-old.png"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"PNG old")
+        self.codex("exec-a.png - the cart\nexec-b.png - checkout", pngs=["exec-a.png", "exec-b.png"])
+        out, err, rc = self.py("codex.py", "mockup", "A cart page and its checkout")
+        self.assertEqual(rc, 0, err)
+        report = self.report(out)
+        self.assertTrue(report.name.endswith("-mockup.md"))
+        lines = out.splitlines()
+        copies = [Path(ln[4:]) for ln in lines if ln.startswith("PNG ")]
+        self.assertEqual(lines[1:3], [f"PNG {c}" for c in copies])
+        self.assertEqual([c.read_bytes() for c in copies], [b"PNG exec-a.png", b"PNG exec-b.png"])
+        stamp = report.name[:-len("-mockup.md")]
+        self.assertEqual([c.name for c in copies], [f"{stamp}-mockup-1.png", f"{stamp}-mockup-2.png"])
+        self.assertEqual({c.parent for c in copies}, {self.reports})
+        self.assertIn("the cart", out)
+        self.assertIn(f"PNG {copies[1]}", report.read_text("utf-8"))
+        [call] = self.calls()
+        argv = call["argv"]
+        self.assertEqual(self.opt(argv, "-s"), "read-only")  # the image tool needs no write access
+        self.assertEqual(self.opt(argv, "--enable"), "image_generation")
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertNotIn("web_search=live", argv)
+        self.assertIn("A cart page and its checkout", call["stdin"])
+        self.assertEqual(Path(call["cwd"]).resolve(), self.reports.resolve())
+
+    def test_mockup_keeps_the_pngs_its_answer_names(self):
+        self.codex("exec-b.png - the only one", pngs=["exec-a.png", "exec-b.png"])  # another session drew a
+        out, err, rc = self.py("codex.py", "mockup", "one page")
+        self.assertEqual(rc, 0, err)
+        [png] = [ln[4:] for ln in out.splitlines() if ln.startswith("PNG ")]
+        self.assertEqual(Path(png).read_bytes(), b"PNG exec-b.png")
+
+    def test_mockup_with_no_new_png_fails(self):
+        self.codex("I cannot draw here.")
+        self.fails("mockup", "one page", says="codex made no image: I cannot draw here.")
+        self.assertEqual(list(self.reports.glob("*")), [])
+
+    def test_pruned_reports_take_their_mockup_pngs(self):
+        self.reports.mkdir(parents=True)
+        for i in range(25):
+            (self.reports / f"20200101-0000{i:02d}-1-mockup.md").write_text("old", encoding="utf-8")
+            (self.reports / f"20200101-0000{i:02d}-1-mockup-1.png").write_bytes(b"PNG")
+        out, err, rc = self.py("codex.py", "research", "q")
+        self.assertEqual(rc, 0, err)
+        left = sorted(p.name for p in self.reports.glob("*.png"))
+        self.assertEqual(len(left), 19)
+        self.assertEqual(left[0], "20200101-000006-1-mockup-1.png")
 
     def test_off_unless_config_says_json_true(self):
         for cfg in ({}, {"codex": "true"}, {"codex": False}):
