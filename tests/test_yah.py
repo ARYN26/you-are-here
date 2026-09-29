@@ -333,6 +333,32 @@ class GuardTests(Base):
         self.assertIn("under 5 agents", ctx)
         self.assertNotIn("high over xhigh", ctx)
 
+    def test_codex_rules_once_per_session(self):
+        self.config(codex="true")  # only a JSON true turns it on
+        self.assertIsNone(self.guard(sid="c0"))
+        self.config(codex=True)  # without ultracode
+        r = self.guard(sid="c1")
+        ctx = r["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("[yah] Codex is on."))
+        for want in ("/yah:gpt research", "single lookup stays in Claude", "critiques and judges are GPT's",
+                     "Fable only through /yah:deep", "A GPT finding is a claim"):
+            self.assertIn(want, ctx)
+        self.assertLessEqual(len(ctx.split()), 60)
+        self.assertNotIn("systemMessage", r)  # model-only
+        self.assertIsNone(self.guard(sid="c1"))
+        self.assertIsNone(self.guard(sid="c1", prompt="/clear"))
+        self.config(codex=True, roles={"critic": "opus xhigh"})  # the user's own critic: run reviews stay Claude's
+        ctx = self.guard(sid="c2")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("/yah:gpt research", ctx)
+        self.assertNotIn("GPT's", ctx)
+        self.config(ultracode=True, codex=True)  # both fire in one prompt
+        ctx = self.guard(sid="c3")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("[yah] Ultracode is on.", ctx)
+        self.assertIn("[yah] Codex is on.", ctx)
+        self.config(ultracode=True)
+        self.assertNotIn("odex", self.guard(sid="c4")["hookSpecificOutput"]["additionalContext"])
+        self.assertIsNone(self.guard(sid="c5", prompt="/yah:wrap"))
+
     def cached(self, name):
         """A copy of yah in the plugin cache, laid out as Claude Code installs it. Returns its scripts folder."""
         return self.plugin_copy(self.cfg / "plugins" / "cache" / "you-are-here" / "yah" / name)
