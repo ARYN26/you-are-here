@@ -5,6 +5,7 @@
   premium main model     once per session (config.json premium_models)
   weekly % more than pace_slack points ahead of the week's elapsed share: once a day
   ultracode on (config.json, set by setup.py --ultracode): workflow sizing rules from config roles, once per session
+  codex on (config.json, set by setup.py --codex): what goes to GPT, once per session
   a newer yah installed while this session runs the old copy: once per session, until reload
 
 Thresholds come from config.json and its tier preset. Context size comes from the
@@ -64,6 +65,15 @@ def ultracode_text():
             "PROD rules in their prompts. One verifier per finding; reports of 1,500 characters or fewer.")
 
 
+def codex_text(ultra):
+    """Who does what once GPT is on: research and, with the quality profile on and no Claude critic named,
+    yah run's reviews."""
+    run = "yah run's critiques and judges are GPT's. " if ultra and role("critic")[0] == "codex" else ""
+    return ("[yah] Codex is on. Send multi-source web research to /yah:gpt research with a self-contained question; "
+            f"a single lookup stays in Claude. {run}Use Fable only through /yah:deep. A GPT finding is a claim: "
+            "prove it in the code or with a test before fixing it.")
+
+
 def main():
     utf8_stdout()
     try:
@@ -116,6 +126,10 @@ def main():
     if ultra and not flags.get("ultra"):
         flags["ultra"] = True
         to_claude.append(ultracode_text())
+
+    if cfg["codex"] and not flags.get("codex"):
+        flags["codex"] = True
+        to_claude.append(codex_text(ultra))
 
     if event == "UserPromptSubmit" and not flags.get("outdated") and plugin_outdated():
         flags["outdated"] = True
