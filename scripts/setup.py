@@ -438,6 +438,9 @@ def codex_on(state, state_file, dry, say):
     import codex  # scripts/codex.py; only this opt-in needs it
     cp = data_dir() / "config.json"
     cfg = load_obj(cp)
+    if cfg.get("codex") is True:  # already on: no login check and no live call to spend GPT quota on
+        say("codex      unchanged (on)")
+        return 0
     if dry:
         say("codex      login and smoke checks skipped in a dry run")
     else:
@@ -453,9 +456,6 @@ def codex_on(state, state_file, dry, say):
                 print("[yah] then sign in with `codex login` and run setup.py --codex again.", file=sys.stderr)
             return 1
         say("codex      signed in; a smoke call answered")
-    if cfg.get("codex") is True:
-        say("codex      unchanged (on)")
-        return 0
     state["codex"] = {"added": "codex" not in cfg, "prev": cfg.get("codex")}
     cfg["codex"] = True
     save_json(cp, cfg, dry)

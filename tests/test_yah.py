@@ -2168,6 +2168,32 @@ class CodexTests(Base):
         out, err, rc = self.py("codex.py", "research", "q")
         self.assertEqual(rc, 0, err)
 
+    def test_only_the_last_lines_classify_a_failure(self):
+        # codex exec streams its banner (sandbox: read-only), the echoed prompt and the model's reads to stderr
+        noise = ("OpenAI Codex v0.50.0\n--------\nsandbox: read-only\n--------\nuser\n"
+                 "What is GitHub's rate limit for signed in users?\nexec rg quota\n401 in auth.py\n")
+        self.codex(None, stderr=noise + "ERROR: stream disconnected before completion\n", rc=1)
+        err = self.fails("research", "What is GitHub's rate limit for signed in users?",
+                         says="codex failed (exit 1): ERROR: stream disconnected")
+        self.assertNotIn("sandbox", err)
+
+    def test_a_brief_can_come_on_stdin(self):
+        repo = self.tmp / "shop"
+        repo.mkdir()
+        out, err, rc = self.py("codex.py", "research", "-", stdin="It's \"$HOME\" - which?\n")
+        self.assertEqual(rc, 0, err)
+        out, err, rc = self.py("codex.py", "review", str(repo), "-", stdin="Find merge blockers\n")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("Brief file", self.report(out).read_text("utf-8"))
+        research, review = self.calls()
+        self.assertIn("It's \"$HOME\" - which?", research["stdin"])
+        self.assertIn("Find merge blockers", review["stdin"])
+        self.fails("research", "-", says="the brief is empty")
+
+    def test_a_codex_that_cannot_start_is_one_line(self):
+        self.env.update(YAH_CODEX=str(self.tmp / "missing" / "codex"))
+        self.fails("research", "q", says="could not start codex")
+
     def test_not_signed_in_says_codex_login(self):
         self.codex(None, stderr="Error: Not logged in. Run codex login.\n", rc=1)
         self.fails("research", "q", says="run `codex login`")

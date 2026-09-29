@@ -15,9 +15,9 @@ The forked agent cannot see the conversation that sent this, so the request abov
 
 The first word is the mode: `review` reviews this repo, anything else is `research` (drop a leading `research`). The rest is the brief.
 
-Run codex.py with Bash as `PY "${CLAUDE_SKILL_DIR}/../../scripts/codex.py"`. `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail. Pass the brief through a quoted heredoc, so quotes and `$` in it stay as written:
+Run codex.py with Bash as `PY "${CLAUDE_SKILL_DIR}/../../scripts/codex.py"`. `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail. The brief goes on stdin (`-`) through a quoted heredoc, so quotes and `$` in it stay as written and no temp file is needed. After the command line comes the brief, then `YAH_BRIEF` on a line of its own:
 
-- research: `PY "<codex.py>" research --timeout 570 "$(cat <<'YAH_BRIEF'` then the brief, then `YAH_BRIEF` and `)"` on lines of their own.
-- review: write the brief to a temp file (`f=$(mktemp)`, then `cat > "$f" <<'YAH_BRIEF'` ... `YAH_BRIEF`), then `PY "<codex.py>" review --timeout 570 "$(git rev-parse --show-toplevel)" "$f"`.
+- research: `PY "<codex.py>" research --timeout 570 - <<'YAH_BRIEF'`
+- review: `PY "<codex.py>" review --timeout 570 "$(git rev-parse --show-toplevel)" - <<'YAH_BRIEF'`
 
 If codex.py says yah:gpt is off, reply that `/yah:setup` (or `setup.py --codex`) turns it on, and stop.
