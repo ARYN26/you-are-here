@@ -1134,6 +1134,18 @@ class PhaseMapTests(unittest.TestCase):
                          ("P2", "yah/map-surfaces", "yah/map", "", "`/yah:where` shows the stack."))
         self.assertEqual(p1["done"], "")
 
+    def test_branch_and_base_as_leading_bullets(self):
+        # the shape a plan-mode session wrote live (2026-09-29): one bullet each, and a title that starts with --
+        text = ("### P1 --lines flag\n- branch: feat/lines\n- base: main\n\nAfter it merges: counts lines.\n"
+                "### P2 - JSON\n- **Branch:** `feat/json`\n- **Base:** `feat/lines`\n- **`tally.py`** gains --json\n"
+                "### P3: Docs\n- Update README.md, based on main\n- branch: not/this\n")
+        p1, p2, p3 = self.sections(text)
+        self.assertEqual((p1["title"], p1["branch"], p1["base"], p1["after"]),
+                         ("--lines flag", "feat/lines", "main", "counts lines."))
+        self.assertEqual((p2["title"], p2["branch"], p2["base"]), ("JSON", "feat/json", "feat/lines"))
+        self.assertEqual([e["path"] for e in p2["files"]], ["tally.py"])  # branch names are not planned files
+        self.assertEqual((p3["title"], p3["branch"], p3["base"]), ("Docs", "", ""))  # only leading bullets count
+
     def test_bullet_fallback(self):
         p2 = self.sections(PLAN_MAP)[1]
         self.assertFalse(p2["planned"])
