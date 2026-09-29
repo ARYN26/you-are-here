@@ -29,6 +29,7 @@ KEEP = 20
 SUMMARY_CHARS = 1500
 # Only read on a failed exec, and only as whole words, so "generate" or "accurate" is not a rate.
 LIMIT = re.compile(r"\b(?:usage limit|rate[ _-]?limit(?:ed)?|quota|429|too many requests)\b", re.I)
+SANDBOX = re.compile(r"\bsandbox", re.I)
 SIGNED_OUT = re.compile(r"\b(?:not logged in|codex login|log ?in again|sign(?:ed)? in|401|unauthori[sz]ed)\b", re.I)
 RESEARCH = """Research this question on the web. Use several independent sources and read the pages you cite.
 
@@ -110,14 +111,14 @@ def limit_line(text):
 
 
 def ask(mode, prompt, cwd, timeout, repo=None):
-    """codex's final answer text. Raises Limit on a usage limit, Fail on a timeout, an error or no answer."""
+    """codex's final answer text; with no repo it runs outside git (research, setup's smoke call).
+    Raises Limit on a usage limit, Fail on a timeout, an error or no answer."""
     cfg = config()
     cmd = command(find_codex()) + ["exec", "--ephemeral", "-s", "read-only", "-m", cfg["codex_model"],
                                    "-c", f"model_reasoning_effort={cfg['codex_effort']}"]
+    cmd += ["--skip-git-repo-check"] if repo is None else ["-C", str(repo)]
     if mode == "research":
-        cmd += ["--skip-git-repo-check", "-c", "web_search=live"]
-    else:
-        cmd += ["-C", str(repo)]
+        cmd += ["-c", "web_search=live"]
     scratch = Path(tempfile.mkdtemp(prefix="yah-codex-"))
     answer = scratch / "answer.md"
     try:
@@ -135,6 +136,9 @@ def ask(mode, prompt, cwd, timeout, repo=None):
             raise Limit(f"codex hit its usage limit (exit {rc}): {first_line(limit_line(both)) or said}")
         if SIGNED_OUT.search(both):
             raise Fail(f"codex is not signed in (exit {rc}): run `codex login`, then try again.")
+        if SANDBOX.search(both) and os.name == "nt":
+            raise Fail(f"codex's sandbox failed (exit {rc}): put `[windows]` and `sandbox = \"unelevated\"` "
+                       "in ~/.codex/config.toml, then try again.")
         raise Fail(f"codex failed (exit {rc}): {said}")
     if not text:
         raise Fail(f"codex gave no answer (exit 0): {said}")

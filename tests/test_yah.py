@@ -1621,7 +1621,7 @@ class SetupTests(Base):
         (self.cfg / "plugins" / "known_marketplaces.json").write_text(
             json.dumps({"you-are-here": {"source": {"source": "github", "repo": "ARYN26/you-are-here"}}}), "utf-8")
         before = self.snapshot()
-        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--auto-merge"],
+        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--auto-merge"], ["--codex"],
                      ["--install-launcher", str(self.home / ".bashrc")],
                      ["--install-rules"], ["--uninstall"]):
             out, err, rc = self.setup_py("--dry-run", *args, scripts=scripts)
@@ -2010,6 +2010,8 @@ argv = sys.argv[1:]
 with open(os.path.join(d, "calls.jsonl"), "a", encoding="utf-8") as f:
     f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "stdin": sys.stdin.read()}) + "\n")
 plan = json.load(open(os.path.join(d, "plan.json"), encoding="utf-8"))
+if argv[:2] == ["login", "status"]:
+    sys.exit(plan.get("login_rc", 0))
 time.sleep(plan.get("sleep", 0))
 if plan.get("answer") is not None and "-o" in argv:
     open(argv[argv.index("-o") + 1], "w", encoding="utf-8").write(plan["answer"])
@@ -2173,13 +2175,74 @@ class CodexTests(Base):
         self.fails("research", "q", says="run `codex login`")
 
     def test_other_errors_and_an_empty_answer_are_one_line(self):
-        self.codex(None, stderr="boom: sandbox\nmore\n", rc=2)
-        self.fails("research", "q", says="codex failed (exit 2): boom: sandbox")
+        self.codex(None, stderr="boom: disk full\nmore\n", rc=2)
+        self.fails("research", "q", says="codex failed (exit 2): boom: disk full")
         self.codex(None)
         self.fails("research", "q", says="no answer")
         self.codex("  \n")
         self.fails("research", "q", says="no answer")
         self.fails("research", "  ", says="the brief is empty")
+
+    @unittest.skipUnless(os.name == "nt", "the unelevated sandbox fix is Windows-only")
+    def test_a_windows_sandbox_error_names_the_fix(self):
+        self.codex(None, stderr="error: windows sandbox: CreateRestrictedToken failed\n", rc=1)
+        self.fails("research", "q", says='sandbox = "unelevated"')
+
+    def setup_codex(self, *args):
+        return self.py("setup.py", "--codex", *args)
+
+    def read_config(self):
+        return json.loads((self.data / "config.json").read_text("utf-8"))
+
+    def test_setup_codex_checks_login_and_a_smoke_call_then_uninstall_restores(self):
+        for prior in (None, False):
+            with self.subTest(prior=prior):
+                cfg = {"tier": "max20", **({} if prior is None else {"codex": prior})}
+                self.config(**cfg)
+                (self.fake / "calls.jsonl").unlink(missing_ok=True)
+                out, err, rc = self.setup_codex("--yes")  # --yes must not reach the statusline
+                self.assertEqual(rc, 0, err)
+                self.assertIn("codex      on:", out)
+                self.assertNotIn("statusLine", out)
+                self.assertEqual(self.read_config(), {**cfg, "codex": True})
+                login, smoke = self.calls()
+                self.assertEqual(login["argv"], ["login", "status"])
+                argv = smoke["argv"]
+                self.assertEqual((argv[0], argv[-1]), ("exec", "-"))
+                for part in ("--skip-git-repo-check", "--ephemeral", "gpt-6.1-sol", "model_reasoning_effort=high"):
+                    self.assertIn(part, argv)
+                for part in ("web_search=live", "-C", "-a"):
+                    self.assertNotIn(part, argv)
+                self.assertEqual(self.opt(argv, "-s"), "read-only")
+                self.assertIn("ok", smoke["stdin"])
+                self.assertIn("codex      unchanged (on)", self.setup_codex()[0])
+                out, err, rc = self.py("setup.py", "--uninstall")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("codex      removed" if prior is None else "codex      restored: false", out)
+                self.assertEqual(self.read_config(), cfg)
+
+    def test_setup_codex_leaves_config_off_when_a_check_fails(self):
+        cases = [({"login_rc": 1}, "run `codex login`", 1),
+                 ({"answer": None, "stderr": "Rate limit reached\n", "rc": 1}, "usage limit", 2),
+                 ({"answer": None, "stderr": "model not found\n", "rc": 1}, "codex failed (exit 1)", 2)]
+        for plan, says, calls in cases:
+            with self.subTest(says=says):
+                self.config(codex=False)
+                (self.fake / "calls.jsonl").unlink(missing_ok=True)
+                self.codex(**{"answer": CODEX_OK, **plan})
+                out, err, rc = self.setup_codex()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(says, err)
+                self.assertEqual(len(self.calls()), calls)
+                self.assertEqual(self.read_config(), {"codex": False})
+                self.assertFalse((self.data / "setup-state.json").exists())
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        self.env.update(YAH_CODEX="", PATH=str(empty))
+        out, err, rc = self.setup_codex()
+        self.assertEqual(rc, 1, out)
+        for part in ("npm i -g @openai/codex", "codex login"):
+            self.assertIn(part, err)
 
 
 # ---------------------------------------------------------------- hooks.json
