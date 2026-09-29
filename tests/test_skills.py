@@ -278,6 +278,19 @@ class TreeTests(unittest.TestCase):
         self.assertIn("Show the output as is, in a code block", text)
         self.assertTrue((ROOT / "scripts/phasemap.py").is_file())
 
+    def test_phase_prs_carry_the_map_through_a_body_file(self):
+        step = body("wrap").split("## 6. Only if the phase is complete", 1)[1].split("## 6.5", 1)[0]
+        self.assertIn('PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" P<n> --into <file>', step)
+        self.assertIn("`--body-file <file>`, never `--body`", step)  # an inline body can trip the deny rules
+        self.assertIn("gh pr edit <N> --body-file <file>", step)
+        record = step.split("4. Record it.", 1)[1].split("\n5.", 1)[0]  # the map redrawn once the phase is [x]
+        self.assertIn("refresh the PR's map as in step 3", record)
+        wrap_step = body("resume").split("## 4. Test, then wrap", 1)[1].split("## 5.", 1)[0]
+        refresh = wrap_step.split("After a fix-findings push", 1)[1]
+        for want in ("gh pr view <n> --json body -q .body", "scripts/phasemap.py\" <label> --into <file>",
+                     "`<!-- yah:map -->` section", "gh pr edit <n> --body-file <file>"):
+            self.assertIn(want, refresh, want)
+
 
 class AutoTests(unittest.TestCase):
     """/yah:auto is the launcher's first prompt: it routes to the other skills and never makes up work."""
@@ -388,6 +401,17 @@ class AutoTests(unittest.TestCase):
                          [("+", "src/pay/applepay.ts"), ("~", "src/pay/PaymentForm.tsx"), (">", "src/pay/card.ts")])
         self.assertIn("`After it merges:`", body("phases"))
         self.assertIn("`Files:`", body("phases"))
+
+    def test_plan_mode_draws_the_map_into_the_plan_before_approval(self):
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        cmd = 'PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" all --no-gh --spec "<plan file>"'
+        self.assertIn(cmd, plan)
+        self.assertLess(plan.index(cmd), plan.index("Then ExitPlanMode"))
+        self.assertIn("under `## Map`", plan)
+        self.assertIn("replacing any `## Map` already there", plan)
+        self.assertIn("draw the map again, and exit plan mode again", plan)
+        for py in ("python3", "python", "py -3"):
+            self.assertIn(f"Bash({py} *scripts/phasemap.py* all --no-gh --spec *)", self.meta["allowed-tools"])
 
     def test_only_a_tiny_task_stays_in_session_everything_else_is_planned(self):
         rows = self.rows()

@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import run  # noqa: E402
+from yahlib import norm, run  # noqa: E402
 
 HEAD = re.compile(r"#{1,3} ")
 PHASE = re.compile(r"### +(P\d+)\b[ \t:.-]*(.*?)\s*$")
@@ -285,13 +285,15 @@ def pr_tag(pr):
 def render_stack(phases, trunk="", brief=False):
     """The phases as lines: each under the branch it starts from, as `[x]`/`[~]`/`[ ]`, label, title, branch and
     PR, with its after line (else `done when:`) below, then a merge-order line. A phase stacks on the phase whose
-    branch is its base; one with no base starts from `trunk` (default: the first base given, else `main`).
-    `brief` drops the after lines, so each phase is one line. No phases gives []."""
+    branch is its base; one with no base starts from `trunk` (default: the first base given that is no phase's
+    branch, else `main`).
+    `brief` gives only the phase lines, one per phase: no after lines, base lines or merge-order line. No phases
+    gives []."""
     phases = [p for p in phases or [] if p.get("label")]
     if not phases:
         return []
-    trunk = trunk or next((p["base"] for p in phases if p.get("base")), "") or "main"
     at = {p["branch"]: i for i, p in reversed(list(enumerate(phases))) if p.get("branch")}
+    trunk = trunk or next((p["base"] for p in phases if p.get("base") and p["base"] not in at), "") or "main"
     up = [at.get(p.get("base") or trunk) for p in phases]
     for i in range(len(phases)):  # a phase based on itself, or a loop of bases, starts from its base instead
         seen, j = {i}, up[i]
@@ -320,8 +322,11 @@ def render_stack(phases, trunk="", brief=False):
             walk(kids[i], prefix + more)
 
     for base, ids in roots.items():
-        out.append(base)
+        if not brief:
+            out.append(base)
         walk(ids, "")
+    if brief:
+        return out
     into = next(iter(roots)) if len(roots) == 1 else ""
     line = "merge order: " + " -> ".join(order) + (f" into {into}" if into else ", each into its base")
     if any(u is not None for u in up):
@@ -332,6 +337,19 @@ def render_stack(phases, trunk="", brief=False):
 # ---------------------------------------------------------------- CLI
 
 MARKER = "<!-- yah:map -->"
+END = "<!-- /yah:map -->"
+# The section: a MARKER line to the next END line with no MARKER line between, so a marker quoted mid-line in
+# prose, or an orphan MARKER line left above, is never part of it.
+SECTION = re.compile(rf"^{re.escape(MARKER)}[ \t\r]*\n(?:(?!^{re.escape(MARKER)}[ \t\r]*$).)*?^{re.escape(END)}[ \t\r]*$",
+                     re.M | re.S)
+
+
+def put_map(body, block):
+    """body with its yah:map section replaced by block, or block appended when it has none."""
+    m = SECTION.search(body)
+    if m:
+        return body[:m.start()] + block + body[m.end():]
+    return (body.rstrip("\n") + "\n\n" if body.strip() else "") + block + "\n"
 
 
 def phases_of(state, plan):
@@ -390,12 +408,32 @@ def phase_entries(ph, top):
     return got, gaps, ref
 
 
-def map_lines(s, target="", brief=False):
-    """The map for where.py's collected state `s`: the stack, then for a `P<n>` target that phase's tree. No
-    target means the current phase, else `plan`. A plan with no phases gives []."""
+def phase_tree(ph, top, listed=None):
+    """A phase's tree block: its heading, the tree of the phase branch's files (not the checkout's), then gaps.
+    `listed` caches each ref's file list across the phases of one map."""
+    entries, gaps, ref = phase_entries(ph, top)
+    listed = {} if listed is None else listed
+    if ref not in listed:
+        cmd = ["git", "ls-tree", "-r", "--name-only", "-z", ref] if ref else ["git", "ls-files", "-z"]
+        listed[ref] = (run(cmd, top, timeout=15) or "").split("\0")
+    tree = render_tree(entries, listed[ref])
+    return [f"{ph['label']} files" + ("" if tree else ": none named in the plan yet")] + tree + gaps
+
+
+def map_lines(s, target="", brief=False, spec=""):
+    """The map for where.py's collected state `s`: the stack, then for a `P<n>` target that phase's tree, and for
+    `all` every phase's tree. No target means the current phase, else `plan`. `spec` reads that plan file instead
+    of the state's, as in plan mode before the plan is tracked: its phases start as not started, unless it is the
+    state's own plan. A plan with no phases gives []."""
     state = s.get("state") or {}
-    spec = (state.get("plan") or {}).get("spec") or ""
-    spec = Path(s["top"]) / Path(spec).expanduser() if spec else ""  # joining keeps an absolute spec as is
+    own = (state.get("plan") or {}).get("spec") or ""
+    own = Path(s["top"]) / Path(own).expanduser() if own else ""  # joining keeps an absolute spec as is
+    if spec:
+        spec = Path(s["top"]) / Path(spec).expanduser()
+        if not own or norm(spec) != norm(own):
+            state = {}
+    else:
+        spec = own
     phases = phases_of(state, plan_sections(spec) if spec else [])
     if not phases:
         return []
@@ -404,18 +442,16 @@ def map_lines(s, target="", brief=False):
         if not p.get("pr") and heads.get(p.get("branch")):
             p["pr"] = f"#{heads[p['branch']]}"
     target = (target or (state.get("phase") or {}).get("label") or "plan").strip()
-    lines = render_stack(phases, brief=brief)
-    if target.lower() == "plan":
+    t, lines = target.lower(), render_stack(phases, brief=brief)
+    if t == "plan":
         return lines
-    ph = next((p for p in phases if p["label"].lower() == target.lower()), None)
-    if not ph:
+    picked = phases if t == "all" else [p for p in phases if p["label"].lower() == t]
+    if not picked:
         return lines + ["", f"no phase {target} in this plan"]
-    entries, gaps, ref = phase_entries(ph, s["top"])  # the tree lists the phase branch's files, not the checkout's
-    ls_cmd = ["git", "ls-tree", "-r", "--name-only", "-z", ref] if ref else ["git", "ls-files", "-z"]
-    ls = (run(ls_cmd, s["top"], timeout=15) or "").split("\0")
-    tree = render_tree(entries, ls)
-    head = f"{ph['label']} files" + ("" if tree else ": none named in the plan yet")
-    return lines + ["", head] + tree + gaps
+    listed = {}
+    for ph in picked:
+        lines += [""] + phase_tree(ph, s["top"], listed)
+    return lines
 
 
 def main(argv=None):
@@ -424,17 +460,28 @@ def main(argv=None):
     from where import collect
     utf8_stdout()
     ap = argparse.ArgumentParser(description="The phase map: the plan's stack, and a phase's file tree.")
-    ap.add_argument("target", nargs="?", default="", help="P<n> for that phase's tree, or plan (default: the phase)")
+    ap.add_argument("target", nargs="?", default="", help="P<n> for that phase's tree, plan for the stack only, all for every tree (default: the phase)")
     ap.add_argument("--brief", action="store_true", help="one line per phase, no after lines")
     ap.add_argument("--pr", action="store_true", help="markdown for a PR description, between yah:map markers")
+    ap.add_argument("--into", metavar="FILE", help="PR body file: replace its yah:map section, or append one (implies --pr)")
     ap.add_argument("--no-gh", action="store_true", help="skip gh pr list")
+    ap.add_argument("--spec", help="map this plan file, as in plan mode before it is tracked")
     ap.add_argument("--cwd", help="run as if started in this directory")
     a = ap.parse_args(argv)
     s = collect(a.cwd or ".", use_gh=not a.no_gh, infer=False)  # the map needs no branch-ancestry walk
-    lines = map_lines(s, a.target, a.brief) if s else []
-    if lines and a.pr:
-        lines = [MARKER, "```text", *lines, "```", MARKER.replace("yah:", "/yah:")]
-    if lines:
+    if not s and a.spec:  # outside a repo a plan still maps, from its Files: blocks alone
+        s = {"top": str(Path(a.cwd or ".").resolve())}
+    spec = str((Path(a.cwd or ".") / Path(a.spec).expanduser()).resolve()) if a.spec else ""  # relative to cwd
+    lines = map_lines(s, a.target, a.brief, spec) if s else []
+    if lines and (a.pr or a.into):
+        lines = [MARKER, "```text", *lines, "```", END]
+    if lines and a.into:
+        f = Path(a.into)
+        f.write_text(put_map(f.read_text("utf-8") if f.is_file() else "", "\n".join(lines)), "utf-8")
+        print(f"[yah] map written into {f}")
+    elif a.into:
+        print(f"[yah] no map to write into {a.into}: no plan with phases here", file=sys.stderr)
+    elif lines:
         print("\n".join(lines))
 
 

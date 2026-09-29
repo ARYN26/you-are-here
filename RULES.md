@@ -2,6 +2,7 @@
 
 ## Orient
 - Orient with /yah:where or the state injected at session start. Never read long docs just to find out where things stand.
+- For what a phase changes, read the phase map (/yah:where, /yah:tree P<n>), not its diff. In a plan, give each phase an `After it merges:` line and a `Files:` block.
 
 ## Brain
 - For project facts, use the recalled brain notes, brain.py recall or the brain's INDEX.md. Never read the whole brain folder.

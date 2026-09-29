@@ -58,6 +58,8 @@ STATE_PLAN = """# Shop
 STATE_YOU = STATE_PLAN.replace("- [ ] P3 Emails", "- [ ] P3 Emails\n\n## Follow-ups\n"  # the same plan as BEADS
                                "- [ ] Approve the payment copy (you)\n- [ ] Rotate the Stripe test keys (you)")
 STATE_DATED = "# Notes\n\n## 2026-09-20\n- Next: Old.\n\n## 2026-09-23\n- Next: Ship the login fix,\n  then tag v1.2.\n"
+BRIEF_CAP = 6 + 3  # the brief view's 6 lines, plus one per phase of the 3-phase test plan
+
 
 
 def jsonl(items):
@@ -399,15 +401,17 @@ class WhereTests(Base):
     def test_beads_brief_and_full(self):
         repo = self.beads_repo()
         brief = self.where(repo, "--brief").splitlines()
-        self.assertLessEqual(len(brief), 6)
+        self.assertLessEqual(len(brief), BRIEF_CAP)
         self.assertEqual(brief, [
             "[yah] shop  branch checkout/payment (clean, no upstream)",
             "PLAN CHECKOUT 1/3 done  PHASE P2 Payment form (yah-3)",
             "NEXT Wire the Stripe element into PaymentForm.tsx, then run the e2e test.",
+            "|-- [x] P1 Cart API  checkout/cart  #12", "|   `-- [~] P2 Payment form  checkout/payment",
+            "`-- [ ] P3 Emails",  # the stack, one line per phase
             "2 waiting on you",
             FOOTER])
         full = self.where(repo).splitlines()
-        self.assertLessEqual(len(full), 15)
+        self.assertLessEqual(full.index(""), 15)  # the map comes after the 15 lines
         for want in ("PLAN    Checkout rewrite  [1/3 done]  yah-1  checkout.md",
                      "PHASE   P2 Payment form  in_progress  yah-3  branch checkout/payment",
                      "NEXT    Wire the Stripe element", "YOU     yah-5  Approve the payment copy",
@@ -440,7 +444,7 @@ class WhereTests(Base):
             self.git(repo, "commit", "-q", "--allow-empty", "-m", f"work {i}")
         warn = "NEXT predates 2 commits on checkout/payment: /yah:wrap first"
         brief = self.where(repo, "--brief").splitlines()
-        self.assertLessEqual(len(brief), 6)
+        self.assertLessEqual(len(brief), BRIEF_CAP)
         self.assertEqual(brief[2], f"NEXT Wire the Stripe element into PaymentForm.tsx, then run the e2e test.  ! {warn}")
         self.assertIn("(clean, 2 ahead of checkout/cart, no upstream)", brief[0])
         full = self.where(repo).splitlines()
@@ -608,10 +612,12 @@ class WhereTests(Base):
         self.config(projects={"shop": prod})
         repo = self.state_repo(branch="main")  # the views are the same for beads: test_state_md_matches_beads
         brief = self.where(repo, "--brief").splitlines()
-        self.assertEqual(len(brief), 6)
+        self.assertEqual(len(brief), BRIEF_CAP)
         self.assertTrue(brief[0].endswith("! phase branch is checkout/payment"))
-        self.assertEqual(brief[3], "2 waiting on you")
-        self.assertEqual(brief[4], "PROD main deploys on push. PRs only.")
+        self.assertEqual(brief[3:6], ["|-- [x] P1 Cart API  checkout/cart  #12",
+                                      "|   `-- [~] P2 Payment form  checkout/payment", "`-- [ ] P3 Emails"])
+        self.assertEqual(brief[6], "2 waiting on you")
+        self.assertEqual(brief[7], "PROD main deploys on push. PRs only.")
         full = self.where(repo)
         self.assertIn("!       phase branch is checkout/payment, you are on main", full)
         self.assertIn("PROD    main deploys on push. PRs only.", full)
@@ -653,7 +659,7 @@ class WhereTests(Base):
     def test_state_md_plan(self):
         repo = self.state_repo()
         brief = self.where(repo, "--brief")
-        self.assertLessEqual(len(brief.splitlines()), 6)
+        self.assertLessEqual(len(brief.splitlines()), BRIEF_CAP)
         self.assertIn("PLAN CHECKOUT 1/3 done  PHASE P2 Payment form (STATE.md:5)", brief)
         self.assertIn("NEXT Wire the Stripe element into PaymentForm.tsx, then run the e2e test.", brief)
         self.assertNotIn("older", brief)
@@ -1208,11 +1214,12 @@ class PhaseMapTests(unittest.TestCase):
             "`-- [ ] P3 Side  yah/side  #30",  # no base: it starts from the first base given
             "merge order: P1 -> P2 -> P3 into main; retarget a stacked PR onto main once the one below it merges",
         ])
-        self.assertEqual(self.m.render_stack([p1, p2, p3], brief=True), [
-            "main", "|-- [x] P1 Renderer  yah/map  #24", "|   `-- [~] P2 Surfaces  yah/map-surfaces",
-            "`-- [ ] P3 Side  yah/side  #30",
-            "merge order: P1 -> P2 -> P3 into main; retarget a stacked PR onto main once the one below it merges",
-        ])
+        self.assertEqual(self.m.render_stack([p1, p2, p3], brief=True), [  # one line per phase, nothing else
+            "|-- [x] P1 Renderer  yah/map  #24", "|   `-- [~] P2 Surfaces  yah/map-surfaces",
+            "`-- [ ] P3 Side  yah/side  #30"])
+        p1["base"] = ""  # the first base is P1's branch: the trunk is still main, and P1 roots the stack
+        self.assertEqual(self.m.render_stack([p2, p1], brief=True),
+                         ["`-- [x] P1 Renderer  yah/map  #24", "    `-- [~] P2 Surfaces  yah/map-surfaces"])
 
     def test_stack_bases_loops_and_empty(self):
         a = {"label": "P1", "title": "", "branch": "a", "base": "b"}  # a loop of bases: the first phase in it
@@ -1331,14 +1338,94 @@ class PhaseMapCliTests(Base):
 
     def test_plan_brief_pr_and_a_phase_without_commits(self):
         out = self.map("plan", "--brief", "--pr")
-        self.assertEqual(out, ["<!-- yah:map -->", "```text", "main", "`-- [~] P1 Renderer  yah/map",
-                               "    `-- [ ] P2 Surfaces  yah/map-surfaces",
-                               "merge order: P1 -> P2 into main; retarget a stacked PR onto main once the one below it "
-                               "merges", "```", "<!-- /yah:map -->"])
+        self.assertEqual(out, ["<!-- yah:map -->", "```text", "`-- [~] P1 Renderer  yah/map",
+                               "    `-- [ ] P2 Surfaces  yah/map-surfaces", "```", "<!-- /yah:map -->"])
         out = self.map("p2")  # no branch yet: the plan's paths, marked as named in the plan
         self.assertIn("|   `-- * where.py", out)
         self.assertEqual(out[-1], "marks: * named in the plan")
         self.assertEqual(self.map("P9")[-1], "no phase P9 in this plan")
+
+    def test_into_replaces_the_map_section_of_a_pr_body_file(self):
+        block = "\n".join(self.map("plan", "--brief", "--pr"))
+        body = Path(self.tmp) / "body.md"  # outside the repo, as wrap and resume write it
+        body.write_text("Adds the renderer.\n\n- Done: tests\n", "utf-8")
+        self.assertEqual(self.map("plan", "--brief", "--into", str(body)), [f"[yah] map written into {body}"])
+        self.assertEqual(body.read_text("utf-8"), f"Adds the renderer.\n\n- Done: tests\n\n{block}\n")
+        body.write_text("Top\n\n<!-- yah:map -->\nstale\n<!-- /yah:map -->\n\nBottom\n", "utf-8")
+        self.map("plan", "--brief", "--into", str(body))  # fix-findings: only the section changes
+        self.assertEqual(body.read_text("utf-8"), f"Top\n\n{block}\n\nBottom\n")
+        fresh = Path(self.tmp) / "new.md"
+        self.map("plan", "--brief", "--into", str(fresh))
+        self.assertEqual(fresh.read_text("utf-8"), block + "\n")
+
+    def test_into_skips_a_quoted_or_orphan_marker(self):
+        phasemap = load_phasemap()
+        new = "<!-- yah:map -->\nnew\n<!-- /yah:map -->"
+        quoted = "It swaps only the `<!-- yah:map -->` section.\n\n<!-- yah:map -->\nold\n<!-- /yah:map -->\n"
+        self.assertEqual(phasemap.put_map(quoted, new), f"It swaps only the `<!-- yah:map -->` section.\n\n{new}\n")
+        orphan = "<!-- yah:map -->\nhand-edited\n\nKeep me\n\n<!-- yah:map -->\r\nold\r\n<!-- /yah:map -->\r\n"
+        self.assertEqual(phasemap.put_map(orphan, new),
+                         f"<!-- yah:map -->\nhand-edited\n\nKeep me\n\n{new}\n")  # the old END line's \r goes too
+        missing = Path(self.tmp) / "none.md"
+        out, err, rc = self.py("phasemap.py", "--no-gh", "P1", "--into", str(missing), cwd=self.tmp)
+        self.assertEqual((rc, out, missing.exists()), (0, "", False))
+        self.assertIn("no map to write into", err)
+
+    def where(self, *args, scripts=SCRIPTS):
+        out, err, rc = self.py("where.py", "--no-gh", "--no-bd", *args, cwd=self.r, scripts=scripts)
+        self.assertEqual((rc, err), (0, ""))
+        return out.splitlines()
+
+    def test_where_brief_shows_the_stack_and_full_adds_the_phase_tree(self):
+        brief = self.where("--brief")
+        stack = ["`-- [~] P1 Renderer  yah/map", "    `-- [ ] P2 Surfaces  yah/map-surfaces"]
+        at = brief.index(stack[0])
+        self.assertEqual(brief[at:at + 2], stack)
+        self.assertEqual(brief[at + 2:], [FOOTER])  # no base, after, merge-order or tree lines
+        self.assertEqual(at, 2)
+        full = self.where()
+        at = full.index("")
+        self.assertLessEqual(at, 15)
+        self.assertEqual(full[at:at + 5], ["", "MAP     (/yah:tree P<n> for another phase)", "main", stack[0],
+                                           "    |   after: `/yah:tree` shows the map."])
+        self.assertIn("P1 files", full)  # the current phase's tree, from the plan before it has commits
+        self.assertIn("|   |-- + phasemap.py -- the renderer", full)
+        self.assertEqual(full[-1], "marks: + new  ~ changed  - removed  > renamed")
+        (self.r / "STATE.md").write_text("## 2026-09-28\n- Next: Ship it.\n", encoding="utf-8")  # no plan, no map
+        self.assertNotIn("MAP     (/yah:tree P<n> for another phase)", self.where())
+
+    def test_where_survives_a_broken_map(self):
+        scripts = self.plugin_copy(self.tmp / "plugin")
+        (scripts / "phasemap.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+        brief = self.where("--brief", scripts=scripts)
+        self.assertIn("MAP failed: boom", brief)
+        self.assertEqual(brief[-1], FOOTER)
+        self.assertEqual(self.where(scripts=scripts)[-2:], ["MAP     (/yah:tree P<n> for another phase)",
+                                                           "MAP failed: boom"])
+
+    def test_spec_maps_an_untracked_plan_and_its_map_section_parses_away(self):
+        (self.r / "STATE.md").unlink()  # plan mode: nothing tracked yet
+        plan = self.tmp / "plans" / "draft.md"
+        plan.parent.mkdir()
+        plan.write_text(PLAN_MAP, "utf-8")
+        out = self.map("all", "--spec", str(plan))
+        self.assertEqual(out[:2], ["main", "`-- [ ] P1 Renderer  yah/map"])
+        self.assertIn("    `-- [ ] P2 Surfaces  yah/map-surfaces", out)
+        self.assertEqual(out.count(""), 2)
+        self.assertIn("P1 files", out)
+        self.assertIn("|   |-- + phasemap.py -- the renderer", out)
+        self.assertEqual(out[out.index("P2 files"):][-1], "marks: * named in the plan")
+        before = load_phasemap().plan_sections(str(plan))
+        with plan.open("a", encoding="utf-8") as f:  # plan mode puts the map at the end of the plan file
+            f.write("\n## Map\n\n```text\n" + "\n".join(out) + "\n```\n")
+        self.assertEqual(load_phasemap().plan_sections(str(plan)), before)
+        self.assertEqual(self.map("all", "--spec", str(plan)), out)  # so writing it again gives the same map
+        self.assertEqual(self.map("plan", "--spec", str(plan), "--cwd", str(self.home)), out[:out.index("")])
+
+    def test_spec_of_the_tracked_plan_keeps_its_state(self):
+        self.assertEqual(self.map("plan", "--spec", "plan.md"), self.map("plan"))
+        (self.r / "draft.md").write_text(PLAN_MAP, "utf-8")  # another plan file: its phases are not started
+        self.assertEqual(self.map("--spec", "draft.md")[1], "`-- [ ] P1 Renderer  yah/map")
 
     def test_no_plan_or_no_repo_prints_nothing(self):
         (self.r / "STATE.md").unlink()
@@ -1463,7 +1550,7 @@ class RunLineTests(Base):
             self.assertIn("RUN     P2 running for 2h, pid 4242, last: 14:35 iteration 2: $1.20, 30 turns, CONTINUE",
                           self.where(repo))
             brief = self.where(repo, "--brief")
-            self.assertLessEqual(len(brief.splitlines()), 6)
+            self.assertLessEqual(len(brief.splitlines()), BRIEF_CAP)
             self.assertIn("RUN P2 running for 2h, pid 4242", brief)
             self.assertIs(json.loads(self.where(repo, "--json"))["run"]["alive"], True)
             self.assertIn(f"{GREEN}run P2: iteration 2: $1.20, 30 turns, CONTINUE{RST}", self.line(cwd=repo))

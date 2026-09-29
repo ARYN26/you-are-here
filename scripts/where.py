@@ -1,7 +1,7 @@
 """where.py: the "you are here" view of a repo, or the project list in the home dir.
 
-    where.py              full view, at most 15 lines
-    where.py --brief      at most 6 lines, for the SessionStart hook
+    where.py              full view, at most 15 lines, then the phase map (stack and the phase's files)
+    where.py --brief      at most 6 lines plus one per plan phase, for the SessionStart hook
     where.py --json       the collected state, for /yah:wrap and /yah:phases
     where.py --cwd DIR    run as if started in DIR
     where.py --path NAME  print a project's path (for the `yah` launcher)
@@ -658,6 +658,18 @@ def hides(ignored, plan):
     return f"beads epic {ignored['id']} ignored: {plan['id']} has a plan"
 
 
+def map_view(s, brief=False):
+    """phasemap's lines for the plan: in brief one line per phase, else the stack with after lines and the current
+    phase's tree. A failure gives one line, never an exception."""
+    try:
+        sys.modules.setdefault("where", sys.modules[__name__])  # run as a script, phasemap's `import where` reuses it
+        from phasemap import map_lines  # lazy: phasemap imports this module
+        lines = map_lines(s, "plan" if brief else "", brief=brief)
+    except Exception as e:  # noqa: BLE001 - the view must not die on the map
+        return [f"MAP failed: {clip(str(e), 100)}"]
+    return [ln if len(ln) <= 120 else ln[:117].rstrip() + "..." for ln in lines] if brief else lines
+
+
 def render(s, brief=False):
     g, b = s["git"], s["state"] or {}
     plan, phase, nxt_phase = b.get("plan"), b.get("phase"), b.get("next_phase")
@@ -679,7 +691,7 @@ def render(s, brief=False):
             "/yah:wrap first" if st else ""
     lines = []
 
-    if brief:  # at most 6 lines
+    if brief:  # at most 6 lines, plus one per plan phase
         warn = f"  ! phase branch is {off_branch}" if off_branch else ""
         lines.append(f"[yah] {s['key']}  branch {branch} ({', '.join([tree] + sync)}){warn}")
         swarn = f"  ! {stale}" if stale else ""
@@ -693,6 +705,7 @@ def render(s, brief=False):
             lines.append(head)
             if p and p.get("next"):
                 lines.append(f"NEXT {p['next']}{swarn}")
+            lines += map_view(s, brief=True)
         elif s["state_md"]:
             sm = s["state_md"]
             lines.append(f"{sm['file']} {sm['head']}  NEXT {clip(sm['next'])}{swarn}")
@@ -757,7 +770,8 @@ def render(s, brief=False):
         lines.append("PRs     (gh unavailable or offline)")
     if prod_line(s):
         lines.append(f"PROD    {prod_line(s)}")
-    return lines[:15]
+    ml = map_view(s) if plan else []
+    return lines[:15] + (["", "MAP     (/yah:tree P<n> for another phase)"] + ml if ml else [])
 
 
 def write_cache(s):
@@ -849,7 +863,7 @@ def print_path(name):
 def main():
     utf8_stdout()
     ap = argparse.ArgumentParser(description="Where you are in this repo, or the project list in the home dir.")
-    ap.add_argument("--brief", action="store_true", help="at most 6 lines, for the SessionStart hook")
+    ap.add_argument("--brief", action="store_true", help="at most 6 lines plus one per phase, for the SessionStart hook")
     ap.add_argument("--json", action="store_true", help="the collected state as JSON")
     ap.add_argument("--cwd", help="run as if started in this directory")
     ap.add_argument("--no-gh", action="store_true", help="skip gh pr list")
