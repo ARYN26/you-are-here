@@ -1033,8 +1033,11 @@ class RunTests(unittest.TestCase):
                     judge=[{"tag": "judge pass"}])
         self.assertIn(GREEN, self.run_yah(repo, "P2", env=env, code=0))
         self.assertEqual((self.calls("codex"), self.prompts()), ([], ["/yah:resume P2 judge"]))
-        self.assertIn("judge P2: codex high failed, codex is off for the rest of this run: gh pr diff failed: HTTP 502",
-                      self.run_logs()[-1].read_text("utf-8"))
+        log = self.run_logs()[-1].read_text("utf-8")
+        self.assertIn("judge P2: no brief for codex, this review goes to roles.review_fallback: "
+                      "gh pr diff failed: HTTP 502", log)
+        self.assertIn("judge P2: opus high (no brief for codex: roles.review_fallback), $0.25, judge pass", log)
+        self.assertNotIn("codex is off", log)
 
     def test_no_config_still_protects_where_open_prs_land(self):
         repo = self.repo()

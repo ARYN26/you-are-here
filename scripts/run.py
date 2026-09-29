@@ -27,7 +27,8 @@ as usual, with no second judge. A critique or judge that fails is logged and ski
 With config codex on, roles.critic defaults to codex: GPT critiques and judges through `codex.py review`, with
 no Claude bar and $0 logged. run.py writes its brief to runs/<stem>-<name>-<mode>-brief.md (the phase's plan
 section and the plan's Decisions, or the PR's diff from gh), since GPT has no plan tools, gh or network there. A
-codex call that fails marks codex down for the rest of the run and reruns that review on roles.review_fallback.
+codex call that fails marks codex down for the rest of the run and reruns that review on roles.review_fallback;
+a brief that cannot be built (no plan section, no diff) sends only that one review to roles.review_fallback.
 
 TARGET is P<n> (a plan phase), #<pr> (a bare PR number works too, since shells treat # as a
 comment) or empty for the current phase, which is pinned at start and passed as P<n>. Each iteration
@@ -853,7 +854,7 @@ def codex_review(r, mode, name):
     it = {"is_error": True, "error": "", "tag": "", "text": "", "cost": 0.0}
     text, err = review_brief(r, mode)
     if err:
-        return dict(it, error=err)
+        return dict(it, error=err, no_brief=True)
     path = r.log.with_name(f"{r.log.stem}-{name}-{mode}-brief.md")
     secs = int(r.cfg["codex_timeout_minutes"] * 60)
     try:
@@ -880,13 +881,18 @@ def review(r, target, mode, name, verdict):
     """One read-only `/yah:resume <target> <mode>` on review_role, or a codex.py review when that is codex. When
     its YAH-RESULT matches the `verdict` regex, its answer goes to runs/<stem>-<name>-<mode>.md: returns (the
     match, that path). A failed codex call marks codex down for the rest of the run and reruns on
-    roles.review_fallback. An error or another tag is logged as skipped: (None, "")."""
+    roles.review_fallback; a brief that cannot be built (a plan with no spec file, gh pr diff failing) sends only
+    that review there. An error or another tag is logged as skipped: (None, "")."""
     model, effort, why = review_role(r)
     it = None
     if model == "codex":
         say(f"[yah] {mode} {name}: codex.py review on {model} {effort} ({why})")
         it = codex_review(r, mode, name)
-        if it["is_error"]:
+        if it.get("no_brief"):  # nothing to hand GPT (no plan section, no diff): not codex's fault, so this one only
+            tell(r, f"{mode} {name}: no brief for {model}, this review goes to roles.review_fallback: {it['error']}")
+            model, effort = r.cfg["roles"]["review_fallback"].split()
+            why, it = "no brief for codex: roles.review_fallback", None
+        elif it["is_error"]:
             r.codex_down = True
             tell(r, f"{mode} {name}: {model} {effort} failed, codex is off for the rest of this run: {it['error']}")
             model, effort, why = review_role(r)
