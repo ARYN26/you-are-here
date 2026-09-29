@@ -55,7 +55,7 @@ def ultracode_text():
     """The workflow sizing rule, with each model and effort taken from config.json roles."""
     scout, mech, judge, critic, main = (role(r) for r in ("scout", "mechanical", "judge", "critic", "main"))
     keep = (f"Keep {critic[0]} out of workflows: it runs only as yah run's per-phase critic and judge, or /yah:deep "
-            "when asked. ") if critic[0] not in (scout[0], mech[0], judge[0], main[0]) else ""
+            "when asked. ") if critic[0] not in (scout[0], mech[0], judge[0], main[0], "codex") else ""  # codex is GPT
     return ("[yah] Ultracode is on. Questions, single-file edits and reviews of a few files stay in the main thread "
             "(/code-review for small reviews). Use a workflow only for genuinely parallel work, one agent per "
             f"independent unit: lookups on {scout[0]} at {scout[1]} effort, mechanical stages on {mech[0]} at "

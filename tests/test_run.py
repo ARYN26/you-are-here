@@ -84,13 +84,22 @@ if role == "gh":
     elif args[:2] == ["pr", "view"]:  # view-<ref> scripts one PR; view scripts the rest
         ref = "view-" + (args[2] if len(args) > 2 else "")
         print(json.dumps(step(ref if ref in script else "view")))
-    elif args[:2] == ["pr", "checks"]:
-        c = step("required" if "--required" in args else "checks")
+    elif args[:2] in (["pr", "checks"], ["pr", "diff"]):
+        c = step("required" if "--required" in args else args[1])
         sys.stdout.write(c.get("out", ""))
         sys.stderr.write(c.get("err", ""))
         sys.exit(c.get("rc", 0))
     else:
         sys.exit(1)
+elif role == "codex":  # codex exec: the prompt on stdin, the answer into the -o file
+    c = step("codex")
+    with open(os.path.join(d, "codex.stdin"), "a", encoding="utf-8") as f:
+        f.write(sys.stdin.read() + "\n=====\n")
+    if "answer" in c:
+        with open(args[args.index("-o") + 1], "w", encoding="utf-8") as f:
+            f.write(c["answer"])
+    sys.stderr.write(c.get("err", ""))
+    sys.exit(c.get("rc", 0))
 elif role == "claude":  # a mode with its own key (critique) scripts those sessions; claude scripts the rest
     mode = (args[args.index("-p") + 1].split() + ["", "", ""])[2]
     c = step(mode if mode in script else "claude")
@@ -942,6 +951,90 @@ class RunTests(unittest.TestCase):
         self.script(claude=[{"tag": "needs-human"}])
         self.run_yah(repo, code=2)  # the branch is on origin: its first build is past
         self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+
+    def codex(self):
+        """A run env whose codex is the fake, and a repo with the plan file STATE.md names."""
+        (self.tmp / "codex.py").write_text(FAKE, encoding="utf-8")
+        self.config(ultracode=True, codex=True)
+        repo = self.repo()
+        (repo / "docs" / "plans").mkdir(parents=True)
+        (repo / "docs" / "plans" / "checkout.md").write_text(
+            "# Checkout\n\n### P1 Cart API\nDone.\n\n### P2 Payment form\nFiles:\n~ pay.py - the form\n\n"
+            "### P3 Emails\nLater.\n\n## Decisions\n- Stripe, not Adyen.\n", encoding="utf-8")
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", "plan")
+        return repo, dict(self.env, YAH_CODEX=str(self.tmp / "codex.py"))
+
+    def test_codex_critiques_and_judges_with_gpt_at_no_claude_cost(self):
+        repo, env = self.codex()
+        self.script()
+        self.assertIn("critic  would critique P2 on codex high (GPT, no Claude bar) before its first build",
+                      self.run_yah(repo, "--dry-run", env=env, code=0))
+        self.assertEqual(self.calls("codex"), [])
+        self.script(required=[{"rc": 0}], diff=[{"out": "diff --git a/pay.py b/pay.py\n+cents = 0\n"}], **{
+            "view-12": [view()],
+            "codex": [{"answer": "Build the form first.\nYAH-RESULT: critique-done"},
+                      {"answer": "pay.py:1 drops the cents.\n\n**YAH-RESULT: judge block 1**"}],
+            "fix-findings": [{"commit": True, "tag": "pr-open #12"}],
+            "claude": [{"commit": True, "close": True, "tag": "pr-open #12"}]})
+        self.assertIn(GREEN, self.run_yah(repo, "P2", env=env, code=0))
+        prompts = self.prompts()  # claude only builds and fixes
+        self.assertRegex(prompts[0], r"^/yah:resume P2 build critique=.+-P2-critique\.md$")
+        self.assertRegex(prompts[1], r"^/yah:resume P2 fix-findings findings=.+-P2-judge\.md$")
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("Build the form first.", Path(prompts[0].split("critique=", 1)[1]).read_text("utf-8"))
+        self.assertIn("pay.py:1 drops the cents.", Path(prompts[1].split("findings=", 1)[1]).read_text("utf-8"))
+        calls = self.calls("codex")
+        self.assertEqual(len(calls), 2)
+        for argv in calls:  # read-only, in this repo
+            self.assertEqual(argv[:4], ["exec", "--ephemeral", "-s", "read-only"])
+            self.assertEqual(Path(argv[argv.index("-C") + 1]).resolve(), repo.resolve())
+        critique, judge = (self.fake / "codex.stdin").read_text("utf-8").split("=====")[:2]
+        for want in ("### P2 Payment form", "~ pay.py - the form", "## Decisions", "Stripe, not Adyen.",
+                     "YAH-RESULT: critique-done"):
+            self.assertIn(want, critique)
+        for gone in ("### P1", "### P3", "Later."):
+            self.assertNotIn(gone, critique)
+        for want in ("pull request #12", "+cents = 0", "git show origin/checkout/payment:<path>",
+                     "YAH-RESULT: judge block <count>"):
+            self.assertIn(want, judge)
+        runs = self.run_logs()[-1]
+        for name in ("P2-critique", "P2-judge"):  # each brief is kept next to the answer
+            self.assertTrue(runs.with_name(f"{runs.stem}-{name}-brief.md").is_file())
+        log = runs.read_text("utf-8")
+        self.assertIn("critique P2: codex high (GPT, no Claude bar), $0.00, critique-done, ", log)
+        self.assertIn("judge P2: codex high (GPT, no Claude bar), $0.00, judge block 1, ", log)
+
+    def test_a_failed_codex_review_falls_back_once_and_codex_stays_off(self):
+        repo, env = self.codex()
+        base = {"required": [{"rc": 0}], "view-12": [view()], "critique": [{"tag": "critique-done"}],
+                "judge": [{"tag": "judge pass"}], "claude": [{"commit": True, "close": True, "tag": "pr-open #12"}]}
+        cases = [("usage limit", {"rc": 1, "err": "ERROR: You've hit your usage limit. Try again later."},
+                  "codex.py exit 3: codex: codex hit its usage limit"),
+                 ("no answer", {"rc": 0}, "codex.py exit 1: codex: codex gave no answer")]
+        for name, step, text in cases:
+            with self.subTest(name):
+                self.script(codex=[step], **base)
+                self.assertIn(GREEN, self.run_yah(repo, "P2", env=env, code=0))
+                self.assertEqual(len(self.calls("codex")), 1)  # the judge skips codex
+                self.assertEqual([p.split(" critique=")[0] for p in self.prompts()],
+                                 ["/yah:resume P2 critique", "/yah:resume P2 build", "/yah:resume P2 judge"])
+                calls = self.calls("claude")
+                self.assertEqual([self.flag(calls[i], "--model") for i in (0, 2)], ["opus", "opus"])
+                log = self.run_logs()[-1].read_text("utf-8")
+                self.assertIn("critique P2: codex high failed, codex is off for the rest of this run: " + text, log)
+                self.assertIn("critique P2: opus high (codex down: roles.review_fallback), $0.25, critique-done", log)
+                self.assertIn("judge P2: opus high (codex down: roles.review_fallback), $0.25, judge pass", log)
+                self.git(repo, "reset", "-q", "--hard", "HEAD~1")  # the build's commit and closed phase
+        # a judge with no diff to hand GPT goes to claude, which can run gh itself
+        (repo / "STATE.md").write_text(CLOSED, encoding="utf-8")
+        self.git(repo, "commit", "-qam", "closed")
+        self.script(view=[view()], required=[{"rc": 0}], diff=[{"rc": 1, "err": "HTTP 502"}],
+                    judge=[{"tag": "judge pass"}])
+        self.assertIn(GREEN, self.run_yah(repo, "P2", env=env, code=0))
+        self.assertEqual((self.calls("codex"), self.prompts()), ([], ["/yah:resume P2 judge"]))
+        self.assertIn("judge P2: codex high failed, codex is off for the rest of this run: gh pr diff failed: HTTP 502",
+                      self.run_logs()[-1].read_text("utf-8"))
 
     def test_no_config_still_protects_where_open_prs_land(self):
         repo = self.repo()

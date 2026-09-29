@@ -24,6 +24,10 @@ with critique=<path>. Once a phase's PR is open and green, before auto-merge or 
 `/yah:resume <label> judge` on the same model. A `judge block <n>` saves its answer to runs/<stem>-<label>-judge.md
 and runs one `fix-findings findings=<path>` slice, which the iteration cap does not hold back; then the loop goes on
 as usual, with no second judge. A critique or judge that fails is logged and skipped; it never stops the run.
+With config codex on, roles.critic defaults to codex: GPT critiques and judges through `codex.py review`, with
+no Claude bar and $0 logged. run.py writes its brief to runs/<stem>-<name>-<mode>-brief.md (the phase's plan
+section and the plan's Decisions, or the PR's diff from gh), since GPT has no plan tools, gh or network there. A
+codex call that fails marks codex down for the rest of the run and reruns that review on roles.review_fallback.
 
 TARGET is P<n> (a plan phase), #<pr> (a bare PR number works too, since shells treat # as a
 comment) or empty for the current phase, which is pinned at start and passed as P<n>. Each iteration
@@ -90,6 +94,7 @@ from urllib.parse import quote
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import where  # noqa: E402
 from statusline import week_pace  # noqa: E402
+from phasemap import HEAD, is_fence  # noqa: E402
 from yahlib import (NO_WINDOW, config, data_dir, find_git, find_tool, end_run, hold_run, num,  # noqa: E402
                     project_key, read_branch, read_json, run, run_pid_path, run_state, utf8_stdout, write_run)
 
@@ -371,6 +376,7 @@ def plan_phases(r, s):
     if r.plan_key is None:
         r.plan_key = key(b)
     mine = next((p for p in [b, *(s.get("plans") or [])] if isinstance(p, dict) and key(p) == r.plan_key), {})
+    r.spec = (mine.get("plan") or {}).get("spec") or ""
     return [p for p in mine.get("phases") or [] if isinstance(p, dict)]
 
 
@@ -744,8 +750,14 @@ def pool_used(r, model):
 
 def review_role(r):
     """(model, effort, why) for a critique or judge: roles.critic, or roles.judge once the critic model's own
-    weekly bar is at critic_week_skip_pct. A bar that cannot be read counts as under."""
+    weekly bar is at critic_week_skip_pct. A bar that cannot be read counts as under. A codex critic is GPT, at
+    config codex_effort with no Claude bar; with codex off, or down after a failed call, roles.review_fallback."""
     model, effort = r.cfg["roles"]["critic"].split()
+    if model == "codex":
+        if r.cfg["codex"] and not r.codex_down:
+            return model, r.cfg["codex_effort"], "GPT, no Claude bar"
+        model, effort = r.cfg["roles"]["review_fallback"].split()
+        return model, effort, ("codex down" if r.cfg["codex"] else "codex off") + ": roles.review_fallback"
     used, skip = pool_used(r, model), r.cfg["critic_week_skip_pct"]
     if used is None:
         return model, effort, "bar unknown"
@@ -781,14 +793,108 @@ def wants_judge(r):
                 and time.monotonic() - r.t0 < r.cfg["run_total_hours"] * 3600)
 
 
+CRITIQUE_ASK = """You are reviewing the plan for one phase of work in this repository before anyone builds it.
+Read the code the phase will touch, then write at most 300 words: what will break, what the plan is missing,
+and the order to build in. Change nothing.
+
+{plan}
+
+End your answer with this exact last line:
+YAH-RESULT: critique-done"""
+JUDGE_ASK = """Below is the diff of pull request #{pr} in this repository (branch {head}). Find the defects that
+should block the merge: wrong behavior, data loss, a security hole, or a broken or weakened test. Style, naming
+and nits are not defects. Prove each one by reading the code or running a test, and report only the proven
+ones, each with file:line, what goes wrong and the proof. The checked-out branch may not be {head}; read a
+changed file as the PR has it with `git show origin/{head}:<path>`.
+
+```diff
+{diff}
+```
+
+End your answer with this exact last line, where <count> is the number of proven defects:
+YAH-RESULT: judge pass    (when none is proven)
+YAH-RESULT: judge block <count>"""
+
+
+def plan_text(path, label):
+    """The plan's `## Decisions` section and the `### <label>` section, as written; "" when neither is there."""
+    try:
+        lines = Path(path).read_text("utf-8", errors="replace").splitlines() if path else []
+    except (OSError, ValueError):
+        return ""
+    keep, out, fence = False, [], False
+    for ln in lines:
+        if is_fence(ln):
+            fence = not fence
+        elif not fence and HEAD.match(ln):
+            keep = ln.startswith("## Decisions") or re.match(rf"### +{re.escape(label)}\b", ln) is not None
+        if keep:
+            out.append(ln)
+    return "\n".join(out).strip() if any(re.match(r"### ", ln) for ln in out) else ""
+
+
+def review_brief(r, mode):
+    """(brief, error) for a codex critique or judge: GPT reads the repo, but gets no plan tool, gh or network,
+    so run.py hands it the phase's plan section or the PR's diff."""
+    if mode == "critique":
+        spec = Path(r.spec).expanduser() if r.spec else None  # STATE.md may name it from the repo root
+        plan = plan_text(spec if spec is None or spec.is_absolute() else Path(r.top, spec), r.label or "")
+        return (CRITIQUE_ASK.format(plan=plan), "") if plan else ("", f"no ### {r.label} section in the plan")
+    rc, diff, err = gh(r, "pr", "diff", str(r.pr), timeout=60)
+    if rc != 0 or not diff.strip():
+        return "", "gh pr diff failed: " + (brief(err, 200) if rc else "no diff" if rc == 0 else "gh did not run")
+    head = (r.view or {}).get("headRefName") or (r.phase or {}).get("branch") or "the PR's head"
+    return JUDGE_ASK.format(pr=r.pr, head=head, diff=diff.rstrip()), ""
+
+
+def codex_review(r, mode, name):
+    """One `codex.py review <top> <brief>`, its brief in runs/<stem>-<name>-<mode>-brief.md. Returns a dict like
+    session()'s: is_error, error, tag, text, cost (always 0: GPT is not billed to Claude)."""
+    it = {"is_error": True, "error": "", "tag": "", "text": "", "cost": 0.0}
+    text, err = review_brief(r, mode)
+    if err:
+        return dict(it, error=err)
+    path = r.log.with_name(f"{r.log.stem}-{name}-{mode}-brief.md")
+    secs = int(r.cfg["codex_timeout_minutes"] * 60)
+    try:
+        path.write_text(text, encoding="utf-8")
+        # codex.py kills its own tree at --timeout; the minute over it is for a codex.py that hangs anyway
+        p = subprocess.run([sys.executable, str(Path(__file__).resolve().with_name("codex.py")), "review", r.top,
+                            str(path), "--timeout", str(secs)], cwd=r.top, capture_output=True, timeout=secs + 60,
+                           stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return dict(it, error=f"codex.py did not end in {secs // 60 + 1} min")
+    except OSError as e:
+        return dict(it, error=f"could not run codex.py: {e}")
+    out, errs = p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+    if p.returncode != 0:
+        said = [ln.strip() for ln in errs.splitlines() if ln.strip()]
+        return dict(it, error=f"codex.py exit {p.returncode}: " + brief(said[-1] if said else "no message", 200))
+    first, _, answer = out.partition("\n")  # `REPORT <path>`, then the answer
+    answer = (answer if first.startswith("REPORT ") else out).strip()
+    tags = TAG.findall(re.sub(r"[`*]", "", answer))  # GPT may bold or quote the line
+    return dict(it, is_error=False, text=answer, tag=tags[-1] if tags else "")
+
+
 def review(r, target, mode, name, verdict):
-    """One read-only `/yah:resume <target> <mode>` on review_role. When its YAH-RESULT matches the `verdict`
-    regex, its answer goes to runs/<stem>-<name>-<mode>.md: returns (the match, that path). An error or another
-    tag is logged as skipped: (None, "")."""
+    """One read-only `/yah:resume <target> <mode>` on review_role, or a codex.py review when that is codex. When
+    its YAH-RESULT matches the `verdict` regex, its answer goes to runs/<stem>-<name>-<mode>.md: returns (the
+    match, that path). A failed codex call marks codex down for the rest of the run and reruns on
+    roles.review_fallback. An error or another tag is logged as skipped: (None, "")."""
     model, effort, why = review_role(r)
-    argv = claude_argv(r, f"/yah:resume {target} {mode}", (model, effort))
-    say(f"[yah] {mode} {name}: {argv[2]} on {model} {effort} ({why})")
-    it = session(r, argv, f"{name}-{mode}")
+    it = None
+    if model == "codex":
+        say(f"[yah] {mode} {name}: codex.py review on {model} {effort} ({why})")
+        it = codex_review(r, mode, name)
+        if it["is_error"]:
+            r.codex_down = True
+            tell(r, f"{mode} {name}: {model} {effort} failed, codex is off for the rest of this run: {it['error']}")
+            model, effort, why = review_role(r)
+            it = None
+    if it is None:
+        argv = claude_argv(r, f"/yah:resume {target} {mode}", (model, effort))
+        say(f"[yah] {mode} {name}: {argv[2]} on {model} {effort} ({why})")
+        it = session(r, argv, f"{name}-{mode}")
     r.review_cost, r.reviews = r.review_cost + it["cost"], r.reviews + 1
     m = None if it["is_error"] else re.fullmatch(verdict, it["tag"], re.I)
     path = r.log.with_name(f"{r.log.stem}-{name}-{mode}.md")
@@ -1127,7 +1233,8 @@ def main():
         phase=None, phases=[], plan_key=None, next="", head="", mode="build", checks="", url="", waiting=False,
         week=None, pace_logged=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
         chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="",
-        pools={}, critiqued=set(), critique="", judged=set(), findings="", review_cost=0.0, reviews=0)
+        pools={}, critiqued=set(), critique="", judged=set(), findings="", review_cost=0.0, reviews=0,
+        codex_down=False, spec="")
     refresh(r, s)
     if (target[:1] == "P" or a.plan) and r.phase is None:
         what = f"no phase {target} in this repo's plan. " if target else "--plan found no open phase in this repo's plan. "
