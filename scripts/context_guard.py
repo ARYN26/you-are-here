@@ -70,7 +70,8 @@ def codex_text(ultra):
     yah run's reviews."""
     run = "yah run's critiques and judges are GPT's. " if ultra and role("critic")[0] == "codex" else ""
     return ("[yah] Codex is on. Send multi-source web research to /yah:gpt research with a self-contained question; "
-            f"a single lookup stays in Claude. {run}Use Fable only through /yah:deep. A GPT finding is a claim: "
+            f"a single lookup stays in Claude. On UI work: /yah:gpt mockup, build, then /yah:gpt critique --url. "
+            f"{run}Use Fable only through /yah:deep. A GPT finding is a claim: "
             "prove it in the code or with a test before fixing it.")
 
 

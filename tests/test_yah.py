@@ -341,7 +341,7 @@ class GuardTests(Base):
         ctx = r["hookSpecificOutput"]["additionalContext"]
         self.assertTrue(ctx.startswith("[yah] Codex is on."))
         for want in ("/yah:gpt research", "single lookup stays in Claude", "Fable only through /yah:deep",
-                     "A GPT finding is a claim"):
+                     "A GPT finding is a claim", "/yah:gpt mockup, build, then /yah:gpt critique --url"):
             self.assertIn(want, ctx)
         self.assertNotIn("GPT's", ctx)  # without the quality profile, yah run has no critic or judge
         self.assertLessEqual(len(ctx.split()), 60)
@@ -2054,9 +2054,22 @@ if argv[:2] == ["login", "status"]:
 time.sleep(plan.get("sleep", 0))
 if plan.get("answer") is not None and "-o" in argv:
     open(argv[argv.index("-o") + 1], "w", encoding="utf-8").write(plan["answer"])
+for name in plan.get("pngs", []):  # the image tool saves under CODEX_HOME whatever the sandbox
+    path = os.path.join(os.environ["CODEX_HOME"], "generated_images", "thread-1", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "wb").write(b"PNG " + name.encode())
 sys.stderr.write(plan.get("stderr", ""))
 sys.stdout.write(plan.get("stdout", "codex noise: tokens used 1234\n"))
 sys.exit(plan.get("rc", 0))
+"""
+FAKE_BROWSER = r"""
+import json, os, sys
+with open(os.path.join(os.environ["FAKE_CODEX_DIR"], "browser.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+shot = [a.split("=", 1)[1] for a in sys.argv if a.startswith("--screenshot=")][0]
+if not os.environ.get("FAKE_BROWSER_NO_SHOT"):
+    open(shot, "wb").write(b"\x89PNG\r\n\x1a\n")
+sys.stderr.write("browser noise\n")
 """
 CODEX_OK = "ANSWER: pong [1]\nSOURCES:\n1. https://example.com/pong - the reply\nUNSURE: none"
 
@@ -2076,7 +2089,9 @@ class CodexTests(Base):
         self.fake = self.tmp / "fake"
         self.fake.mkdir()
         (self.fake / "codex.py").write_text(FAKE_CODEX, encoding="utf-8")
-        self.env.update(YAH_CODEX=str(self.fake / "codex.py"), FAKE_CODEX_DIR=str(self.fake))
+        self.images = self.tmp / "codex-home" / "generated_images"
+        self.env.update(YAH_CODEX=str(self.fake / "codex.py"), FAKE_CODEX_DIR=str(self.fake),
+                        CODEX_HOME=str(self.images.parent))
         self.codex(CODEX_OK)
         self.config(codex=True)
         self.reports = self.data / "codex"
@@ -2174,6 +2189,126 @@ class CodexTests(Base):
         self.assertEqual(len(left), 20)
         self.assertEqual(left[0], "20200101-000006-1-research.md")
         self.assertIn(self.report(out).name, left)
+
+    def test_mockup_copies_the_new_pngs_next_to_the_report(self):
+        old = self.images / "thread-0" / "exec-old.png"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b"PNG old")
+        self.codex("exec-a.png - the cart\nexec-b.png - checkout", pngs=["exec-a.png", "exec-b.png"])
+        out, err, rc = self.py("codex.py", "mockup", "A cart page and its checkout")
+        self.assertEqual(rc, 0, err)
+        report = self.report(out)
+        self.assertTrue(report.name.endswith("-mockup.md"))
+        lines = out.splitlines()
+        copies = [Path(ln[4:]) for ln in lines if ln.startswith("PNG ")]
+        self.assertEqual(lines[1:3], [f"PNG {c}" for c in copies])
+        self.assertEqual([c.read_bytes() for c in copies], [b"PNG exec-a.png", b"PNG exec-b.png"])
+        stamp = report.name[:-len("-mockup.md")]
+        self.assertEqual([c.name for c in copies], [f"{stamp}-mockup-1.png", f"{stamp}-mockup-2.png"])
+        self.assertEqual({c.parent for c in copies}, {self.reports})
+        self.assertIn("the cart", out)
+        self.assertIn(f"PNG {copies[1]}", report.read_text("utf-8"))
+        [call] = self.calls()
+        argv = call["argv"]
+        self.assertEqual(self.opt(argv, "-s"), "read-only")  # the image tool needs no write access
+        self.assertEqual(self.opt(argv, "--enable"), "image_generation")
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertNotIn("web_search=live", argv)
+        self.assertIn("A cart page and its checkout", call["stdin"])
+        self.assertEqual(Path(call["cwd"]).resolve(), self.reports.resolve())
+
+    def test_mockup_keeps_the_pngs_its_answer_names(self):
+        self.codex("exec-b.png - the only one", pngs=["exec-a.png", "exec-b.png"])  # another session drew a
+        out, err, rc = self.py("codex.py", "mockup", "one page")
+        self.assertEqual(rc, 0, err)
+        [png] = [ln[4:] for ln in out.splitlines() if ln.startswith("PNG ")]
+        self.assertEqual(Path(png).read_bytes(), b"PNG exec-b.png")
+
+    def test_mockup_with_no_new_png_fails(self):
+        self.codex("I cannot draw here.")
+        self.fails("mockup", "one page", says="codex made no image: I cannot draw here.")
+        self.assertEqual(list(self.reports.glob("*")), [])
+
+    def test_pruned_reports_take_their_mockup_pngs(self):
+        self.reports.mkdir(parents=True)
+        for i in range(25):
+            (self.reports / f"20200101-0000{i:02d}-1-mockup.md").write_text("old", encoding="utf-8")
+            (self.reports / f"20200101-0000{i:02d}-1-mockup-1.png").write_bytes(b"PNG")
+        out, err, rc = self.py("codex.py", "research", "q")
+        self.assertEqual(rc, 0, err)
+        left = sorted(p.name for p in self.reports.glob("*.png"))
+        self.assertEqual(len(left), 19)
+        self.assertEqual(left[0], "20200101-000006-1-mockup-1.png")
+
+    def test_critique_attaches_the_pngs_read_only(self):
+        shots = self.tmp / "shots"
+        shots.mkdir()
+        for name in ("home-375.png", "home-1440.PNG"):
+            (shots / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        self.codex("ISSUES: the hero text is too pale")
+        out, err, rc = self.py("codex.py", "critique", "Is the hero readable?", str(shots / "home-375.png"),
+                               str(shots / "home-1440.PNG"))
+        self.assertEqual(rc, 0, err)
+        report = self.report(out)
+        self.assertTrue(report.name.endswith("-critique.md"))
+        self.assertIn("the hero text is too pale", out)
+        self.assertIn("Screenshot: home-1440.PNG", report.read_text("utf-8"))
+        [call] = self.calls()
+        argv = call["argv"]
+        self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == "-i"],
+                         [str((shots / "home-375.png").resolve()), str((shots / "home-1440.PNG").resolve())])
+        self.assertEqual(self.opt(argv, "-s"), "read-only")
+        self.assertEqual(argv[-1], "-")  # the prompt still rides stdin after the images
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertNotIn("web_search=live", argv)
+        self.assertNotIn("--enable", argv)
+        for part in ("Is the hero readable?", "1. home-375.png", "2. home-1440.PNG", "ISSUES"):
+            self.assertIn(part, call["stdin"])
+        self.assertEqual(Path(call["cwd"]).resolve(), self.reports.resolve())
+
+    def test_critique_url_shoots_two_viewports_with_a_headless_browser(self):
+        (self.fake / "browser.py").write_text(FAKE_BROWSER, encoding="utf-8")
+        self.env["YAH_BROWSER"] = str(self.fake / "browser.py")
+        out, err, rc = self.py("codex.py", "critique", "Check the nav", "--url", "https://example.com")
+        self.assertEqual(rc, 0, err)
+        f = self.fake / "browser.jsonl"
+        shots = [json.loads(ln) for ln in f.read_text("utf-8").splitlines()]
+        self.assertEqual(len(shots), 2)
+        for argv, size in zip(shots, ("375,812", "1440,900")):
+            self.assertIn("--headless=new", argv)
+            self.assertIn(f"--window-size={size}", argv)
+            self.assertEqual(argv[-1], "https://example.com")
+        [call] = self.calls()
+        images = [call["argv"][i + 1] for i, a in enumerate(call["argv"]) if a == "-i"]
+        self.assertEqual([Path(i).name for i in images], ["375x812.png", "1440x900.png"])
+        self.assertEqual(Path(images[0]).parent.parent.resolve(), self.reports.resolve())
+        self.assertFalse(Path(images[0]).parent.exists())  # the shots are scratch, gone once codex answered
+        self.assertIn("1. 375x812 (phone) of https://example.com", call["stdin"])
+        self.assertIn("2. 1440x900 (desktop)", call["stdin"])
+        self.assertIn("Screenshot: 1440x900 (desktop)", self.report(out).read_text("utf-8"))
+        self.assertEqual([p.name for p in self.reports.iterdir()], [self.report(out).name])
+
+    def test_critique_needs_url_or_pngs_that_exist(self):
+        png = self.tmp / "a.png"
+        png.write_bytes(b"\x89PNG")
+        (self.tmp / "a.jpg").write_bytes(b"JPG")
+        self.fails("critique", "b", says="--url U or PNG paths")
+        self.fails("critique", "b", str(png), "--url", "https://example.com", says="not both and not neither")
+        self.fails("critique", "b", str(self.tmp / "nope.png"), says="not a PNG file")
+        self.fails("critique", "b", str(self.tmp / "a.jpg"), says="not a PNG file")
+        (self.tmp / "home, v2.png").write_bytes(b"\x89PNG")  # codex splits -i values on commas
+        self.fails("critique", "b", str(self.tmp / "home, v2.png"), says="cannot hold a comma")
+        self.assertEqual(self.calls(), [])
+
+    def test_critique_browser_failures_are_one_line(self):
+        self.env["YAH_BROWSER"] = str(self.tmp / "no-browser.exe")
+        self.fails("critique", "b", "--url", "https://example.com", says="no browser at YAH_BROWSER")
+        (self.fake / "browser.py").write_text(FAKE_BROWSER, encoding="utf-8")
+        self.env.update(YAH_BROWSER=str(self.fake / "browser.py"), FAKE_BROWSER_NO_SHOT="1")
+        self.fails("critique", "b", "--url", "https://example.com",
+                   says="the browser made no 375x812 screenshot of https://example.com: browser noise")
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(list(self.reports.iterdir()), [])  # the scratch shots folder is gone too
 
     def test_off_unless_config_says_json_true(self):
         for cfg in ({}, {"codex": "true"}, {"codex": False}):

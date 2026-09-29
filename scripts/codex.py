@@ -1,8 +1,10 @@
-"""codex.py: hand web research or a read-only code review to GPT through OpenAI's codex CLI.
+"""codex.py: hand web research, a read-only code review, UI mockups or a UI critique to GPT through OpenAI's codex CLI.
 
     codex.py research BRIEF              multi-source web research with cited URLs
     codex.py review REPO BRIEF_FILE      read-only review of REPO; BRIEF_FILE says what to look for
-    Both take --timeout SECONDS (default: config codex_timeout_minutes, 15). A BRIEF or BRIEF_FILE of -
+    codex.py mockup BRIEF                UI mockups from GPT's image tool, as PNG paths
+    codex.py critique BRIEF (--url U | PNG...)  UI critique of PNGs, or of U shot at 375x812 and 1440x900
+    All take --timeout SECONDS (default: config codex_timeout_minutes, 15). A BRIEF or BRIEF_FILE of -
     reads the brief from stdin, so a skill can pass it through a quoted heredoc.
 
 Refuses unless config.json has "codex": true (setup.py --codex). codex is $YAH_CODEX, else codex on PATH;
@@ -10,7 +12,12 @@ a YAH_CODEX that ends in .py runs with this Python (the tests' fake). Every call
 read-only sandbox, ephemeral, with the prompt on stdin (a long brief would pass Windows' command-line cap)
 and the answer read from the -o file. Research runs in the report folder, never in a repo, with live web
 search. The full report goes to <data dir>/codex/<stamp>-<mode>.md (the newest 20 are kept); stdout is
-its path, then the answer: the first 1,500 characters for research, all of it for review. A usage limit
+its path, then the answer: the first 1,500 characters for research and mockup, all of it for review.
+Mockup also runs in the report folder: codex's image tool saves under $CODEX_HOME/generated_images whatever
+the sandbox, so the PNGs new there after the call are copied next to the report as <stamp>-mockup-<n>.png,
+one `PNG <path>` line each; no new PNG is an error. Critique runs in the report folder too and attaches the
+PNGs with -i; a --url is shot first by headless Edge or Chrome ($YAH_BROWSER, which may end in .py, else
+the first found) into a scratch folder that is gone once codex answered. A usage limit
 is one line on stderr and exit 3; any other failure is one line and exit 1. Stdlib only.
 """
 import argparse
@@ -48,6 +55,27 @@ ANSWER: at most 10 lines; tie each claim to a source number like [2].
 SOURCES: numbered, one URL per line, with a few words on what it says.
 UNSURE: what the sources disagree on or leave open, or "none".
 Do not run commands that change anything and do not edit files."""
+MOCKUP = """Draw UI mockups for this brief with your image generation tool.
+
+BRIEF:
+{brief}
+
+Make one image per screen or variant the brief asks for, or one if it names none. Do not write files or run
+commands: the images are collected from your image tool's own folder. Reply with one line per image: its
+file name, then a few words on what it shows."""
+CRITIQUE = """You are a senior UI designer. Review the screenshots attached to this message, in this order:
+{shots}
+
+BRIEF:
+{brief}
+
+For each screenshot, list ISSUES ranked most severe first, at most 8: what is wrong, where on the screen,
+and the fix. Cover layout, hierarchy, spacing, contrast, legibility and what breaks at that width.
+End with the one change that would help most. Do not run commands or edit files."""
+VIEWPORTS = ((375, 812, "phone"), (1440, 900, "desktop"))
+BROWSERS = ("msedge", "microsoft-edge", "google-chrome", "chrome", "chromium", "chromium-browser")
+MAC_BROWSERS = ("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 REVIEW = """{brief}
 
 You are in the repository under review, in a read-only sandbox. Read any file you need; do not edit files
@@ -136,8 +164,8 @@ def limit_line(text):
     return next((ln for ln in text.splitlines() if LIMIT.search(ln)), "")
 
 
-def ask(prompt, cwd, timeout, web=False, repo=None):
-    """codex's final answer text; with no repo it runs outside git (research, setup's smoke call).
+def ask(prompt, cwd, timeout, web=False, repo=None, extra=()):
+    """codex's final answer text; with no repo it runs outside git (research, mockup, setup's smoke call).
     Raises Limit on a usage limit, Fail on a timeout, an error or no answer."""
     cfg = config()
     cmd = command(find_codex()) + ["exec", "--ephemeral", "-s", "read-only", "-m", cfg["codex_model"],
@@ -145,6 +173,7 @@ def ask(prompt, cwd, timeout, web=False, repo=None):
     cmd += ["--skip-git-repo-check"] if repo is None else ["-C", str(repo)]
     if web:
         cmd += ["-c", "web_search=live"]
+    cmd += list(extra)
     scratch = Path(tempfile.mkdtemp(prefix="yah-codex-"))
     answer = scratch / "answer.md"
     try:
@@ -173,9 +202,101 @@ def ask(prompt, cwd, timeout, web=False, repo=None):
     return text
 
 
+def image_folder():
+    """Where codex's image tool saves every PNG, whatever the sandbox."""
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "generated_images"
+
+
+def pngs(folder):
+    return set(folder.rglob("*.png")) if folder.is_dir() else set()
+
+
+def mockup(brief, folder, timeout, stamp):
+    """(answer, PNG copies): the PNGs the image tool saved during the call, the ones the answer names when it
+    names any (another codex session may be drawing too), copied into the report folder."""
+    images = image_folder()
+    before = pngs(images)
+    text = ask(MOCKUP.format(brief=brief), folder, timeout, extra=["--enable", "image_generation"])
+    new = sorted(pngs(images) - before, key=lambda p: (p.stat().st_mtime, p.name))
+    new = [p for p in new if p.name in text] or new
+    if not new:
+        raise Fail(f"codex made no image: {first_line(text)}")
+    copies = []
+    for i, png in enumerate(new, 1):
+        copies.append(folder / f"{stamp}-mockup-{i}.png")
+        shutil.copyfile(png, copies[-1])
+    return text, copies
+
+
+def find_browser():
+    if os.environ.get("YAH_BROWSER"):
+        if not Path(os.environ["YAH_BROWSER"]).is_file():
+            raise Fail(f"no browser at YAH_BROWSER={os.environ['YAH_BROWSER']}.")
+        return os.environ["YAH_BROWSER"]
+    for name in BROWSERS:
+        if found := shutil.which(name):
+            return found
+    dirs = [os.environ.get(k) for k in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA")]
+    tails = (("Microsoft", "Edge", "Application", "msedge.exe"), ("Google", "Chrome", "Application", "chrome.exe"))
+    paths = [Path(d, *t) for d in dirs if d for t in tails] + [Path(p) for p in MAC_BROWSERS]
+    for p in paths:
+        if p.is_file():
+            return str(p)
+    raise Fail("no Edge or Chrome found to shoot the URL; pass PNG paths instead, or set YAH_BROWSER.")
+
+
+def shoot(url, folder):
+    """Two headless screenshots of url into folder: [(path, label)]."""
+    browser = find_browser()
+    shots = []
+    for w, h, kind in VIEWPORTS:
+        png = folder / f"{w}x{h}.png"  # the profile lives in folder too, removed with it
+        got = call(command(browser) + ["--headless=new", "--disable-gpu", "--hide-scrollbars",
+                                       "--no-first-run", f"--user-data-dir={folder / f'profile-{w}'}",
+                                       f"--window-size={w},{h}", f"--screenshot={png}", url], folder, 60)
+        if got is None:
+            raise Fail(f"the browser timed out after 60s shooting {url} at {w}x{h}.")
+        if not png.is_file():
+            raise Fail(f"the browser made no {w}x{h} screenshot of {url}: {first_line(got[2]) or f'exit {got[0]}'}")
+        shots.append((png, f"{w}x{h} ({kind}) of {url}"))
+    return shots
+
+
+def critique(brief, pngs_given, url, folder, timeout, stamp):
+    """(answer, [(path, label)]): codex reads the PNGs, or the two shots of url, attached with -i."""
+    if bool(url) == bool(pngs_given):
+        raise Fail("critique takes --url U or PNG paths, not both and not neither.")
+    shots, scratch, started = [], None, time.time()
+    try:
+        if url:
+            scratch = Path(tempfile.mkdtemp(prefix=f"{stamp}-shots-", dir=folder))
+            shots = shoot(url, scratch)
+        else:
+            for png in pngs_given:
+                path = Path(png).expanduser().resolve()
+                if not path.is_file() or path.suffix.lower() != ".png":
+                    raise Fail(f"not a PNG file: {png}")
+                if "," in str(path):  # codex splits -i values on commas
+                    raise Fail(f"a PNG path cannot hold a comma: {png}")
+                shots.append((path, path.name))
+        listed = "\n".join(f"{i}. {label}" for i, (_, label) in enumerate(shots, 1))
+        prompt = CRITIQUE.format(brief=brief, shots=listed)
+        extra = [arg for path, _ in shots for arg in ("-i", str(path))]
+        left = timeout - round(time.time() - started)  # the shots count against the same --timeout
+        if left < 1:
+            raise Fail(f"the screenshots used up the {timeout}s timeout; try a larger --timeout.")
+        return ask(prompt, folder, left, extra=extra), shots
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, True)
+
+
 def prune(folder):
-    """Keep the newest KEEP reports. Names sort by time; a file another run already removed is fine."""
-    for old in sorted(folder.glob("*.md"))[:-KEEP]:
+    """Keep the newest KEEP reports and their mockup PNGs. Names sort by time; a file another run already
+    removed is fine."""
+    reports = sorted(folder.glob("*.md"))
+    kept = {p.name.rsplit("-", 1)[0] for p in reports[-KEEP:]}
+    for old in reports[:-KEEP] + [p for p in folder.glob("*.png") if p.name.split("-mockup-")[0] not in kept]:
         try:
             old.unlink()
         except OSError:
@@ -184,7 +305,7 @@ def prune(folder):
 
 def main():
     utf8_stdout()
-    ap = argparse.ArgumentParser(prog="codex.py", description="Web research or a read-only review through GPT.")
+    ap = argparse.ArgumentParser(prog="codex.py", description="Web research, a read-only review, UI mockups or a UI critique through GPT.")
     sub = ap.add_subparsers(dest="mode", required=True)
     p = sub.add_parser("research", help="multi-source web research, cited URLs back")
     p.add_argument("brief", help="the question, or - to read it from stdin")
@@ -192,6 +313,14 @@ def main():
     p = sub.add_parser("review", help="read-only review of a repo, led by a brief file")
     p.add_argument("repo")
     p.add_argument("brief_file", help="the brief's file, or - to read it from stdin")
+    p.add_argument("--timeout", type=int)
+    p = sub.add_parser("mockup", help="UI mockups from GPT's image tool, PNG paths back")
+    p.add_argument("brief", help="what to draw, or - to read it from stdin")
+    p.add_argument("--timeout", type=int)
+    p = sub.add_parser("critique", help="UI critique of PNGs, or of a URL shot at 375 and 1440 wide")
+    p.add_argument("brief", help="what to judge, or - to read it from stdin")
+    p.add_argument("pngs", nargs="*", metavar="PNG")
+    p.add_argument("--url")
     p.add_argument("--timeout", type=int)
     a = ap.parse_args()
     try:
@@ -232,7 +361,14 @@ def run(a):
     folder.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     started = time.time()
-    if a.mode == "research":
+    copies = []
+    if a.mode == "mockup":
+        text, copies = mockup(brief, folder, timeout, stamp)
+        head = ["Brief: " + brief, ""] + [f"PNG {png}" for png in copies]
+    elif a.mode == "critique":
+        text, shots = critique(brief, a.pngs, a.url, folder, timeout, stamp)
+        head = ["Brief: " + brief, ""] + [f"Screenshot: {label}" for _, label in shots]
+    elif a.mode == "research":
         text = ask(RESEARCH.format(brief=brief), folder, timeout, web=True)
         head = ["Brief: " + brief]
     else:
@@ -244,9 +380,9 @@ def run(a):
             f"Model {cfg['codex_model']} at {cfg['codex_effort']} effort, {round(time.time() - started)}s.", ""] + head
     report.write_text("\n".join(head) + "\n\n---\n\n" + text + "\n", encoding="utf-8")
     prune(folder)
-    if a.mode == "research" and len(text) > SUMMARY_CHARS:
+    if a.mode != "review" and len(text) > SUMMARY_CHARS:
         text = text[:SUMMARY_CHARS].rstrip() + " ... (the rest is in the report)"
-    print(f"REPORT {report}\n\n{text}")
+    print("\n".join([f"REPORT {report}"] + [f"PNG {png}" for png in copies] + ["", text]))
     return 0
 
 
