@@ -96,6 +96,9 @@ class Base(unittest.TestCase):
         self.data.mkdir(exist_ok=True)
         (self.data / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
 
+    def read_config(self):
+        return json.loads((self.data / "config.json").read_text("utf-8"))
+
     def git(self, repo, *args):
         subprocess.run(["git", *args], cwd=str(repo), env=self.env, check=True, capture_output=True)
 
@@ -1823,9 +1826,6 @@ class SetupTests(Base):
         self.setup_py("--uninstall")
         self.assertEqual(self.settings(), {})  # not a leftover {"source": ...} entry
 
-    def read_config(self):
-        return json.loads((self.data / "config.json").read_text("utf-8"))
-
     def test_auto_merge_opt_in_and_uninstall(self):
         self.settings(self.SETTINGS)
         for prior in (None, False, "true"):  # absent, off, and a string that never counted as on
@@ -2216,9 +2216,6 @@ class CodexTests(Base):
 
     def setup_codex(self, *args):
         return self.py("setup.py", "--codex", *args)
-
-    def read_config(self):
-        return json.loads((self.data / "config.json").read_text("utf-8"))
 
     def test_setup_codex_checks_login_and_a_smoke_call_then_uninstall_restores(self):
         for prior in (None, False):

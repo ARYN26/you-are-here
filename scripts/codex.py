@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from yahlib import NO_WINDOW, config, data_dir, first_line, utf8_stdout  # noqa: E402
+from yahlib import NO_WINDOW, config, data_dir, find_tool, first_line, utf8_stdout  # noqa: E402
 
 KEEP = 20
 SUMMARY_CHARS = 1500
@@ -71,10 +71,11 @@ def command(path):
 def find_codex():
     if os.environ.get("YAH_CODEX"):
         return os.environ["YAH_CODEX"]
-    found = shutil.which("codex")
+    found = find_tool("codex")
     if found:
         return found
-    raise Fail("codex not found: install it with `npm i -g @openai/codex`, or set YAH_CODEX.")
+    raise Fail("codex not found: install it with `npm i -g @openai/codex` and sign in with `codex login`, "
+               "or set YAH_CODEX.")
 
 
 def kill_tree(p):
@@ -135,14 +136,14 @@ def limit_line(text):
     return next((ln for ln in text.splitlines() if LIMIT.search(ln)), "")
 
 
-def ask(mode, prompt, cwd, timeout, repo=None):
+def ask(prompt, cwd, timeout, web=False, repo=None):
     """codex's final answer text; with no repo it runs outside git (research, setup's smoke call).
     Raises Limit on a usage limit, Fail on a timeout, an error or no answer."""
     cfg = config()
     cmd = command(find_codex()) + ["exec", "--ephemeral", "-s", "read-only", "-m", cfg["codex_model"],
                                    "-c", f"model_reasoning_effort={cfg['codex_effort']}"]
     cmd += ["--skip-git-repo-check"] if repo is None else ["-C", str(repo)]
-    if mode == "research":
+    if web:
         cmd += ["-c", "web_search=live"]
     scratch = Path(tempfile.mkdtemp(prefix="yah-codex-"))
     answer = scratch / "answer.md"
@@ -160,7 +161,7 @@ def ask(mode, prompt, cwd, timeout, repo=None):
     said = first_line(errors[-1] if errors else both) or "no output"
     if rc != 0:
         if LIMIT.search(both):
-            raise Limit(f"codex hit its usage limit (exit {rc}): {first_line(limit_line(both)) or said}")
+            raise Limit(f"codex hit its usage limit (exit {rc}): {limit_line(both) or said}")
         if SIGNED_OUT.search(both):
             raise Fail(f"codex is not signed in (exit {rc}): run `codex login`, then try again.")
         if SANDBOX.search(both) and os.name == "nt":
@@ -232,10 +233,10 @@ def run(a):
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
     started = time.time()
     if a.mode == "research":
-        text = ask("research", RESEARCH.format(brief=brief), folder, timeout)
+        text = ask(RESEARCH.format(brief=brief), folder, timeout, web=True)
         head = ["Brief: " + brief]
     else:
-        text = ask("review", REVIEW.format(brief=brief), repo, timeout, repo)
+        text = ask(REVIEW.format(brief=brief), repo, timeout, repo=repo)
         head = [f"Repo: {repo}"] + ([] if a.brief_file == "-" else
                                     [f"Brief file: {Path(a.brief_file).expanduser().resolve()}"])
     report = folder / f"{stamp}-{a.mode}.md"

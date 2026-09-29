@@ -449,11 +449,9 @@ def codex_on(state, state_file, dry, say):
                 got = codex.call(codex.command(codex.find_codex()) + ["login", "status"], tmp, 60)
                 if not got or got[0] != 0:
                     raise codex.Fail("codex is not signed in: run `codex login`, then setup.py --codex again.")
-                codex.ask("smoke", "Reply with the single word ok.", tmp, 180)
+                codex.ask("Reply with the single word ok.", tmp, 180)
         except codex.Fail as e:
             print(f"[yah] {e}", file=sys.stderr)
-            if "not found" in str(e):
-                print("[yah] then sign in with `codex login` and run setup.py --codex again.", file=sys.stderr)
             return 1
         say("codex      signed in; a smoke call answered")
     state["codex"] = {"added": "codex" not in cfg, "prev": cfg.get("codex")}
