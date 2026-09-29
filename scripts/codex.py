@@ -234,8 +234,8 @@ def find_browser():
             raise Fail(f"no browser at YAH_BROWSER={os.environ['YAH_BROWSER']}.")
         return os.environ["YAH_BROWSER"]
     for name in BROWSERS:
-        if shutil.which(name):
-            return shutil.which(name)
+        if found := shutil.which(name):
+            return found
     dirs = [os.environ.get(k) for k in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA")]
     tails = (("Microsoft", "Edge", "Application", "msedge.exe"), ("Google", "Chrome", "Application", "chrome.exe"))
     paths = [Path(d, *t) for d in dirs if d for t in tails] + [Path(p) for p in MAC_BROWSERS]
@@ -250,14 +250,10 @@ def shoot(url, folder):
     browser = find_browser()
     shots = []
     for w, h, kind in VIEWPORTS:
-        png = folder / f"{w}x{h}.png"
-        profile = tempfile.mkdtemp(prefix="yah-browser-")
-        try:
-            got = call(command(browser) + ["--headless=new", "--disable-gpu", "--hide-scrollbars",
-                                           "--no-first-run", f"--user-data-dir={profile}",
-                                           f"--window-size={w},{h}", f"--screenshot={png}", url], folder, 60)
-        finally:
-            shutil.rmtree(profile, True)
+        png = folder / f"{w}x{h}.png"  # the profile lives in folder too, removed with it
+        got = call(command(browser) + ["--headless=new", "--disable-gpu", "--hide-scrollbars",
+                                       "--no-first-run", f"--user-data-dir={folder / f'profile-{w}'}",
+                                       f"--window-size={w},{h}", f"--screenshot={png}", url], folder, 60)
         if got is None:
             raise Fail(f"the browser timed out after 60s shooting {url} at {w}x{h}.")
         if not png.is_file():
@@ -270,7 +266,7 @@ def critique(brief, pngs_given, url, folder, timeout, stamp):
     """(answer, [(path, label)]): codex reads the PNGs, or the two shots of url, attached with -i."""
     if bool(url) == bool(pngs_given):
         raise Fail("critique takes --url U or PNG paths, not both and not neither.")
-    shots, scratch = [], None
+    shots, scratch, started = [], None, time.time()
     try:
         if url:
             scratch = Path(tempfile.mkdtemp(prefix=f"{stamp}-shots-", dir=folder))
@@ -280,11 +276,16 @@ def critique(brief, pngs_given, url, folder, timeout, stamp):
                 path = Path(png).expanduser().resolve()
                 if not path.is_file() or path.suffix.lower() != ".png":
                     raise Fail(f"not a PNG file: {png}")
+                if "," in str(path):  # codex splits -i values on commas
+                    raise Fail(f"a PNG path cannot hold a comma: {png}")
                 shots.append((path, path.name))
         listed = "\n".join(f"{i}. {label}" for i, (_, label) in enumerate(shots, 1))
         prompt = CRITIQUE.format(brief=brief, shots=listed)
         extra = [arg for path, _ in shots for arg in ("-i", str(path))]
-        return ask(prompt, folder, timeout, extra=extra), shots
+        left = timeout - round(time.time() - started)  # the shots count against the same --timeout
+        if left < 1:
+            raise Fail(f"the screenshots used up the {timeout}s timeout; try a larger --timeout.")
+        return ask(prompt, folder, left, extra=extra), shots
     finally:
         if scratch:
             shutil.rmtree(scratch, True)

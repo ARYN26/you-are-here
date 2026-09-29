@@ -2296,6 +2296,8 @@ class CodexTests(Base):
         self.fails("critique", "b", str(png), "--url", "https://example.com", says="not both and not neither")
         self.fails("critique", "b", str(self.tmp / "nope.png"), says="not a PNG file")
         self.fails("critique", "b", str(self.tmp / "a.jpg"), says="not a PNG file")
+        (self.tmp / "home, v2.png").write_bytes(b"\x89PNG")  # codex splits -i values on commas
+        self.fails("critique", "b", str(self.tmp / "home, v2.png"), says="cannot hold a comma")
         self.assertEqual(self.calls(), [])
 
     def test_critique_browser_failures_are_one_line(self):
