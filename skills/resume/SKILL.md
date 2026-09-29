@@ -52,7 +52,7 @@ Do the smallest step toward NEXT that can be tested and committed on its own. No
 - **build:** work toward NEXT. With `critique=<path>`, read that file first and fold it in; each change it makes to the plan is a `Decided:` log line when you wrap. It is a reviewer's advice: never write NEEDS-HUMAN because of it.
 - **fix-checks:** `gh pr checks <n>`, then `gh run view <id> --log-failed` for each failing run (the id is in the check's `/actions/runs/<id>` link). Fix the cause. Never skip, disable or weaken a check or test to make it pass. A failure outside the code (secrets, quota, infra) is NEEDS-HUMAN.
 - **address-review:** `gh pr view <n> --comments`, then `gh api repos/{owner}/{repo}/pulls/<n>/comments` for the inline comments. Make the requested changes. A request that needs a product decision is NEEDS-HUMAN.
-- **fix-findings:** read the judge's findings in the `findings=<path>` file. Fix each one and add a regression test where one fits; each fix is a `Done:` or `Decided:` log line when you wrap. A finding you show is wrong is a `Decided:` line with the proof. A finding that needs a product decision is NEEDS-HUMAN.
+- **fix-findings:** read the judge's findings in the `findings=<path>` file. Each is a claim, whether Claude or GPT wrote it: prove it by reading the code or running a test before you fix it. Fix each proven one and add a regression test where one fits; each fix is a `Done:` or `Decided:` log line when you wrap. A finding you show is wrong is a `Decided:` line with the proof. A finding that needs a product decision is NEEDS-HUMAN.
 
 `<n>` is TARGET's number, else the phase `pr` digits, else `gh pr view --json number` on the branch.
 

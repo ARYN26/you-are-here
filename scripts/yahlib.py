@@ -16,14 +16,15 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 TIERS = {"pro": (100_000, 120_000, 160_000), "max5": (120_000, 150_000, 200_000),
          "max20": (150_000, 200_000, 260_000), "api": (80_000, 100_000, 150_000)}
 # role -> "model effort". config.json "roles" overrides one role at a time: {"roles": {"critic": "opus high"}}.
+# review_fallback runs a yah run critique or judge whose codex (GPT) call failed.
 ROLES = {"main": "opus high", "scout": "sonnet low", "mechanical": "opus medium", "judge": "opus high",
-         "critic": "fable high"}
+         "critic": "fable high", "review_fallback": "opus high"}
 EFFORTS = ("low", "medium", "high", "xhigh")  # max is refused everywhere
 DEFAULTS = {"tier": "max5", "pace_slack": 15, "premium_models": ["fable", "mythos"], "recent_days": 14,
             "brain_dir": "docs/brain", "recall_max_chars": 10000,
             "run_iterations": 8, "run_iteration_minutes": 45, "run_total_hours": 6,
             "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "ultracode": False, "auto_merge": False,
-            "roles": ROLES, "critic_week_skip_pct": 50, "codex": False, "codex_model": "gpt-6.1-sol",
+            "roles": {}, "critic_week_skip_pct": 50, "codex": False, "codex_model": "gpt-6.1-sol",
             "codex_effort": "high", "codex_timeout_minutes": 15}
 # tier -> --max-budget-usd per `yah run` iteration, unless run_budget_usd is set.
 RUN_BUDGET = {"pro": 5, "max5": 10, "max20": 15, "api": 5}
@@ -97,7 +98,9 @@ def config():
         for key in ("codex_model", "codex_effort"):
             cfg[key] = str(cfg[key] or "").strip() or DEFAULTS[key]
         roles = cfg["roles"] if isinstance(cfg["roles"], dict) else {}
-        cfg["roles"] = {name: role_text(roles.get(name), default) for name, default in ROLES.items()}
+        # with codex on, GPT critiques and judges a yah run's phases unless the user named their own critic
+        defaults = dict(ROLES, critic="codex high") if cfg["codex"] else ROLES
+        cfg["roles"] = {name: role_text(roles.get(name), default) for name, default in defaults.items()}
         pm = cfg["premium_models"]
         cfg["premium_models"] = [str(m).lower() for m in ([pm] if isinstance(pm, str) else pm or []) if m]
         if not isinstance(cfg.get("projects"), dict):
