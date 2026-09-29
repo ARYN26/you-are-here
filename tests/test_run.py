@@ -274,6 +274,10 @@ class RunTests(unittest.TestCase):
     def run_logs(self):
         return sorted((self.data / "runs").glob("*.log"))
 
+    def clear_run_logs(self):  # runs started in the same second share a log
+        for log in self.run_logs():
+            log.unlink()
+
     # ------------------------------------------------------------ exit 5
 
     def test_refuses_to_start(self):
@@ -1014,6 +1018,7 @@ class RunTests(unittest.TestCase):
                  ("no answer", {"rc": 0}, "codex.py exit 1: codex: codex gave no answer")]
         for name, step, text in cases:
             with self.subTest(name):
+                self.clear_run_logs()
                 self.script(codex=[step], **base)
                 self.assertIn(GREEN, self.run_yah(repo, "P2", env=env, code=0))
                 self.assertEqual(len(self.calls("codex")), 1)  # the judge skips codex
@@ -1029,6 +1034,7 @@ class RunTests(unittest.TestCase):
         # a judge with no diff to hand GPT goes to claude, which can run gh itself
         (repo / "STATE.md").write_text(CLOSED, encoding="utf-8")
         self.git(repo, "commit", "-qam", "closed")
+        self.clear_run_logs()
         self.script(view=[view()], required=[{"rc": 0}], diff=[{"rc": 1, "err": "HTTP 502"}],
                     judge=[{"tag": "judge pass"}])
         self.assertIn(GREEN, self.run_yah(repo, "P2", env=env, code=0))
