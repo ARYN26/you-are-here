@@ -96,6 +96,9 @@ class Base(unittest.TestCase):
         self.data.mkdir(exist_ok=True)
         (self.data / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
 
+    def read_config(self):
+        return json.loads((self.data / "config.json").read_text("utf-8"))
+
     def git(self, repo, *args):
         subprocess.run(["git", *args], cwd=str(repo), env=self.env, check=True, capture_output=True)
 
@@ -365,6 +368,14 @@ class RolesTests(Base):
         lib = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lib)
         return lib
+
+    def test_codex_keys(self):
+        cfg = self.lib().config()
+        self.assertEqual([cfg[k] for k in ("codex", "codex_model", "codex_effort", "codex_timeout_minutes")],
+                         [False, "gpt-6.1-sol", "high", 15])
+        cfg = self.lib(codex=1, codex_model=" ", codex_effort="xhigh", codex_timeout_minutes="lots").config()
+        self.assertEqual([cfg[k] for k in ("codex", "codex_model", "codex_effort", "codex_timeout_minutes")],
+                         [False, "gpt-6.1-sol", "xhigh", 15])
 
     def test_defaults(self):
         lib = self.lib()
@@ -1613,7 +1624,7 @@ class SetupTests(Base):
         (self.cfg / "plugins" / "known_marketplaces.json").write_text(
             json.dumps({"you-are-here": {"source": {"source": "github", "repo": "ARYN26/you-are-here"}}}), "utf-8")
         before = self.snapshot()
-        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--auto-merge"],
+        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--auto-merge"], ["--codex"],
                      ["--install-launcher", str(self.home / ".bashrc")],
                      ["--install-rules"], ["--uninstall"]):
             out, err, rc = self.setup_py("--dry-run", *args, scripts=scripts)
@@ -1815,9 +1826,6 @@ class SetupTests(Base):
         self.setup_py("--uninstall")
         self.assertEqual(self.settings(), {})  # not a leftover {"source": ...} entry
 
-    def read_config(self):
-        return json.loads((self.data / "config.json").read_text("utf-8"))
-
     def test_auto_merge_opt_in_and_uninstall(self):
         self.settings(self.SETTINGS)
         for prior in (None, False, "true"):  # absent, off, and a string that never counted as on
@@ -1991,6 +1999,273 @@ class SetupTests(Base):
         self.assertEqual(rc, 0, err)
         self.assertIn(f'"{plugins.as_posix()}/marketplaces/you-are-here/scripts/statusline.py"',
                       self.settings()["statusLine"]["command"])
+
+
+# ---------------------------------------------------------------- codex.py
+
+FAKE_CODEX = r"""
+import json, os, sys, time
+d = os.environ["FAKE_CODEX_DIR"]
+argv = sys.argv[1:]
+with open(os.path.join(d, "calls.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "stdin": sys.stdin.read()}) + "\n")
+plan = json.load(open(os.path.join(d, "plan.json"), encoding="utf-8"))
+if argv[:2] == ["login", "status"]:
+    sys.exit(plan.get("login_rc", 0))
+time.sleep(plan.get("sleep", 0))
+if plan.get("answer") is not None and "-o" in argv:
+    open(argv[argv.index("-o") + 1], "w", encoding="utf-8").write(plan["answer"])
+sys.stderr.write(plan.get("stderr", ""))
+sys.stdout.write(plan.get("stdout", "codex noise: tokens used 1234\n"))
+sys.exit(plan.get("rc", 0))
+"""
+CODEX_OK = "ANSWER: pong [1]\nSOURCES:\n1. https://example.com/pong - the reply\nUNSURE: none"
+
+
+def load_codex():
+    spec = importlib.util.spec_from_file_location("yah_codex", SCRIPTS / "codex.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class CodexTests(Base):
+    """A fake codex via YAH_CODEX writes its answer to the -o file; nothing reaches the network or the real codex."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake = self.tmp / "fake"
+        self.fake.mkdir()
+        (self.fake / "codex.py").write_text(FAKE_CODEX, encoding="utf-8")
+        self.env.update(YAH_CODEX=str(self.fake / "codex.py"), FAKE_CODEX_DIR=str(self.fake))
+        self.codex(CODEX_OK)
+        self.config(codex=True)
+        self.reports = self.data / "codex"
+
+    def codex(self, answer, **plan):
+        (self.fake / "plan.json").write_text(json.dumps(dict(plan, answer=answer)), encoding="utf-8")
+
+    def calls(self):
+        f = self.fake / "calls.jsonl"
+        return [json.loads(ln) for ln in f.read_text("utf-8").splitlines()] if f.exists() else []
+
+    def fails(self, *args, says, rc=1):
+        out, err, got = self.py("codex.py", *args)
+        self.assertEqual((got, out), (rc, ""), err)
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+        self.assertIn(says, err)
+        return err
+
+    def report(self, out):
+        return Path(out.splitlines()[0].split(" ", 1)[1])
+
+    def opt(self, argv, flag):
+        return argv[argv.index(flag) + 1]
+
+    def test_research_runs_in_the_reports_folder_with_live_search_and_the_prompt_on_stdin(self):
+        out, err, rc = self.py("codex.py", "research", "Which ping reply is canonical?")
+        self.assertEqual(rc, 0, err)
+        report = self.report(out)
+        self.assertEqual(report.parent, self.reports)
+        self.assertTrue(report.name.endswith("-research.md"))
+        text = report.read_text("utf-8")
+        for part in ("Which ping reply is canonical?", "https://example.com/pong", "gpt-6.1-sol"):
+            self.assertIn(part, text)
+        self.assertNotIn("codex noise", out + text)  # the answer is the -o file, never stdout
+        self.assertIn("ANSWER: pong [1]", out)
+        [call] = self.calls()
+        argv = call["argv"]
+        self.assertEqual((argv[0], argv[-1]), ("exec", "-"))
+        for flag, value in (("-s", "read-only"), ("-m", "gpt-6.1-sol")):
+            self.assertEqual(self.opt(argv, flag), value)
+        for part in ("--skip-git-repo-check", "--ephemeral", "model_reasoning_effort=high", "web_search=live"):
+            self.assertIn(part, argv)
+        self.assertNotIn("-a", argv)  # codex exec has no -a; it always runs with approval never
+        self.assertNotIn("-C", argv)
+        self.assertIn("Which ping reply is canonical?", call["stdin"])
+        self.assertIn("SOURCES", call["stdin"])
+        self.assertEqual(Path(call["cwd"]).resolve(), self.reports.resolve())
+        self.assertFalse(Path(self.opt(argv, "-o")).exists())  # the answer file is scratch
+
+    def test_review_reads_the_repo_read_only_and_prints_the_whole_answer(self):
+        repo = self.tmp / "shop"
+        repo.mkdir()
+        brief = self.tmp / "brief.md"
+        brief.write_text("Find merge blockers in this diff:\n" + "+x\n" * 5000, encoding="utf-8")
+        self.codex("BLOCKERS: none\n" + "y" * 4000)
+        out, err, rc = self.py("codex.py", "review", str(repo), str(brief))
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.report(out).name.endswith("-review.md"))
+        self.assertIn("y" * 4000, out)
+        [call] = self.calls()
+        argv = call["argv"]
+        self.assertEqual(Path(self.opt(argv, "-C")).resolve(), repo.resolve())
+        self.assertEqual(self.opt(argv, "-s"), "read-only")
+        self.assertNotIn("web_search=live", argv)
+        self.assertNotIn("--skip-git-repo-check", argv)
+        self.assertIn("+x\n" * 5000, call["stdin"])  # a long brief rides stdin, never the command line
+        self.assertLess(len(" ".join(argv)), 2000)
+
+    def test_review_needs_a_repo_and_a_brief_file(self):
+        self.fails("review", str(self.tmp / "nope"), str(self.tmp / "brief.md"), says="no repo folder")
+        self.fails("review", str(self.tmp), str(self.tmp / "brief.md"), says="no brief file")
+        self.assertEqual(self.calls(), [])
+
+    def test_model_effort_and_timeout_come_from_config_and_the_summary_is_capped(self):
+        self.config(codex=True, codex_model="gpt-9", codex_effort="xhigh", codex_timeout_minutes=2)
+        self.codex("x" * 4000)
+        out, err, rc = self.py("codex.py", "research", "q")
+        self.assertEqual(rc, 0, err)
+        argv = self.calls()[0]["argv"]
+        self.assertEqual(self.opt(argv, "-m"), "gpt-9")
+        self.assertIn("model_reasoning_effort=xhigh", argv)
+        self.assertLess(len(out), 1700)
+        self.assertIn("the rest is in the report", out)
+        self.assertIn("x" * 4000, self.report(out).read_text("utf-8"))
+        codex = load_codex()
+        self.assertEqual((codex.timeout_seconds(None, 2.0), codex.timeout_seconds(7, 2.0)), (120, 7))
+
+    def test_keeps_the_newest_twenty_reports(self):
+        self.reports.mkdir(parents=True)
+        for i in range(25):
+            (self.reports / f"20200101-0000{i:02d}-1-research.md").write_text("old", encoding="utf-8")
+        out, err, rc = self.py("codex.py", "research", "q")
+        self.assertEqual(rc, 0, err)
+        left = sorted(p.name for p in self.reports.glob("*.md"))
+        self.assertEqual(len(left), 20)
+        self.assertEqual(left[0], "20200101-000006-1-research.md")
+        self.assertIn(self.report(out).name, left)
+
+    def test_off_unless_config_says_json_true(self):
+        for cfg in ({}, {"codex": "true"}, {"codex": False}):
+            self.config(**cfg)
+            self.fails("research", "q", says="yah:gpt is off")
+        self.assertEqual(self.calls(), [])
+
+    def test_codex_missing_is_one_line(self):
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        self.env.update(YAH_CODEX="", PATH=str(empty))
+        self.fails("research", "q", says="codex not found")
+
+    def test_a_hung_codex_times_out(self):
+        self.codex(CODEX_OK, sleep=30)
+        start = time.time()
+        err = self.fails("research", "q", "--timeout", "1", says="timed out after 1s")
+        self.assertLess(time.time() - start, 15, err)
+        self.assertEqual(list(self.reports.glob("*.md")), [])
+
+    def test_a_usage_limit_exits_3(self):
+        for err in ("ERROR: You've hit your usage limit. Try again later.\n", "stream error: 429 Too Many Requests\n",
+                    "error: exceeded your current quota\n", "Rate limit reached for gpt-6.1-sol\n"):
+            self.codex(None, stderr=err, rc=1)
+            self.fails("research", "q", says="usage limit", rc=3)
+
+    def test_limit_words_only_count_on_a_failure_and_as_whole_words(self):
+        self.codex(None, stderr="error: could not generate an accurate answer\n", rc=1)
+        self.fails("research", "q", says="codex failed (exit 1): error: could not generate", rc=1)
+        self.codex("ANSWER: the rate limit is 429 per quota\n", stderr="rate limit warning\n")
+        out, err, rc = self.py("codex.py", "research", "q")
+        self.assertEqual(rc, 0, err)
+
+    def test_only_the_last_lines_classify_a_failure(self):
+        # codex exec streams its banner (sandbox: read-only), the echoed prompt and the model's reads to stderr
+        noise = ("OpenAI Codex v0.50.0\n--------\nsandbox: read-only\n--------\nuser\n"
+                 "What is GitHub's rate limit for signed in users?\nexec rg quota\n401 in auth.py\n")
+        self.codex(None, stderr=noise + "ERROR: stream disconnected before completion\n", rc=1)
+        err = self.fails("research", "What is GitHub's rate limit for signed in users?",
+                         says="codex failed (exit 1): ERROR: stream disconnected")
+        self.assertNotIn("sandbox", err)
+
+    def test_a_brief_can_come_on_stdin(self):
+        repo = self.tmp / "shop"
+        repo.mkdir()
+        out, err, rc = self.py("codex.py", "research", "-", stdin="It's \"$HOME\" - which?\n")
+        self.assertEqual(rc, 0, err)
+        out, err, rc = self.py("codex.py", "review", str(repo), "-", stdin="Find merge blockers\n")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("Brief file", self.report(out).read_text("utf-8"))
+        research, review = self.calls()
+        self.assertIn("It's \"$HOME\" - which?", research["stdin"])
+        self.assertIn("Find merge blockers", review["stdin"])
+        self.fails("research", "-", says="the brief is empty")
+
+    def test_a_codex_that_cannot_start_is_one_line(self):
+        self.env.update(YAH_CODEX=str(self.tmp / "missing" / "codex"))
+        self.fails("research", "q", says="could not start codex")
+
+    def test_not_signed_in_says_codex_login(self):
+        self.codex(None, stderr="Error: Not logged in. Run codex login.\n", rc=1)
+        self.fails("research", "q", says="run `codex login`")
+        self.codex(None, stderr="unexpected status 401 Unauthorized\n", rc=1)
+        self.fails("research", "q", says="run `codex login`")
+
+    def test_other_errors_and_an_empty_answer_are_one_line(self):
+        self.codex(None, stderr="boom: disk full\nmore\n", rc=2)
+        self.fails("research", "q", says="codex failed (exit 2): boom: disk full")
+        self.codex(None)
+        self.fails("research", "q", says="no answer")
+        self.codex("  \n")
+        self.fails("research", "q", says="no answer")
+        self.fails("research", "  ", says="the brief is empty")
+
+    @unittest.skipUnless(os.name == "nt", "the unelevated sandbox fix is Windows-only")
+    def test_a_windows_sandbox_error_names_the_fix(self):
+        self.codex(None, stderr="error: windows sandbox: CreateRestrictedToken failed\n", rc=1)
+        self.fails("research", "q", says='sandbox = "unelevated"')
+
+    def setup_codex(self, *args):
+        return self.py("setup.py", "--codex", *args)
+
+    def test_setup_codex_checks_login_and_a_smoke_call_then_uninstall_restores(self):
+        for prior in (None, False):
+            with self.subTest(prior=prior):
+                cfg = {"tier": "max20", **({} if prior is None else {"codex": prior})}
+                self.config(**cfg)
+                (self.fake / "calls.jsonl").unlink(missing_ok=True)
+                out, err, rc = self.setup_codex("--yes")  # --yes must not reach the statusline
+                self.assertEqual(rc, 0, err)
+                self.assertIn("codex      on:", out)
+                self.assertNotIn("statusLine", out)
+                self.assertEqual(self.read_config(), {**cfg, "codex": True})
+                login, smoke = self.calls()
+                self.assertEqual(login["argv"], ["login", "status"])
+                argv = smoke["argv"]
+                self.assertEqual((argv[0], argv[-1]), ("exec", "-"))
+                for part in ("--skip-git-repo-check", "--ephemeral", "gpt-6.1-sol", "model_reasoning_effort=high"):
+                    self.assertIn(part, argv)
+                for part in ("web_search=live", "-C", "-a"):
+                    self.assertNotIn(part, argv)
+                self.assertEqual(self.opt(argv, "-s"), "read-only")
+                self.assertIn("ok", smoke["stdin"])
+                self.assertIn("codex      unchanged (on)", self.setup_codex()[0])
+                out, err, rc = self.py("setup.py", "--uninstall")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("codex      removed" if prior is None else "codex      restored: false", out)
+                self.assertEqual(self.read_config(), cfg)
+
+    def test_setup_codex_leaves_config_off_when_a_check_fails(self):
+        cases = [({"login_rc": 1}, "run `codex login`", 1),
+                 ({"answer": None, "stderr": "Rate limit reached\n", "rc": 1}, "usage limit", 2),
+                 ({"answer": None, "stderr": "model not found\n", "rc": 1}, "codex failed (exit 1)", 2)]
+        for plan, says, calls in cases:
+            with self.subTest(says=says):
+                self.config(codex=False)
+                (self.fake / "calls.jsonl").unlink(missing_ok=True)
+                self.codex(**{"answer": CODEX_OK, **plan})
+                out, err, rc = self.setup_codex()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(says, err)
+                self.assertEqual(len(self.calls()), calls)
+                self.assertEqual(self.read_config(), {"codex": False})
+                self.assertFalse((self.data / "setup-state.json").exists())
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        self.env.update(YAH_CODEX="", PATH=str(empty))
+        out, err, rc = self.setup_codex()
+        self.assertEqual(rc, 1, out)
+        for part in ("npm i -g @openai/codex", "codex login"):
+            self.assertIn(part, err)
 
 
 # ---------------------------------------------------------------- hooks.json

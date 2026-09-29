@@ -23,7 +23,8 @@ DEFAULTS = {"tier": "max5", "pace_slack": 15, "premium_models": ["fable", "mytho
             "brain_dir": "docs/brain", "recall_max_chars": 10000,
             "run_iterations": 8, "run_iteration_minutes": 45, "run_total_hours": 6,
             "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "ultracode": False, "auto_merge": False,
-            "roles": ROLES, "critic_week_skip_pct": 50}
+            "roles": ROLES, "critic_week_skip_pct": 50, "codex": False, "codex_model": "gpt-6.1-sol",
+            "codex_effort": "high", "codex_timeout_minutes": 15}
 # tier -> --max-budget-usd per `yah run` iteration, unless run_budget_usd is set.
 RUN_BUDGET = {"pro": 5, "max5": 10, "max20": 15, "api": 5}
 _config = None
@@ -86,12 +87,15 @@ def config():
         cfg["pace_slack"] = num(cfg["pace_slack"], 15)
         cfg["recent_days"] = num(cfg["recent_days"], 14)
         for key in ("recall_max_chars", "run_iterations", "run_iteration_minutes", "run_total_hours",
-                    "run_checks_wait_minutes", "run_week_stop_pct", "critic_week_skip_pct"):
+                    "run_checks_wait_minutes", "run_week_stop_pct", "critic_week_skip_pct", "codex_timeout_minutes"):
             cfg[key] = num(cfg[key], DEFAULTS[key])
         cfg["run_budget_usd"] = num(cfg.get("run_budget_usd"), RUN_BUDGET.get(cfg["tier"], RUN_BUDGET["max5"]))
         cfg["brain_dir"] = str(cfg["brain_dir"] or DEFAULTS["brain_dir"]).strip("/\\")
         cfg["auto_merge"] = cfg["auto_merge"] is True  # merging is opt-in: only a JSON true turns it on
         cfg["ultracode"] = cfg["ultracode"] is True
+        cfg["codex"] = cfg["codex"] is True  # sends work to GPT through the codex CLI: opt-in like auto_merge
+        for key in ("codex_model", "codex_effort"):
+            cfg[key] = str(cfg[key] or "").strip() or DEFAULTS[key]
         roles = cfg["roles"] if isinstance(cfg["roles"], dict) else {}
         cfg["roles"] = {name: role_text(roles.get(name), default) for name, default in ROLES.items()}
         pm = cfg["premium_models"]

@@ -8,13 +8,14 @@
     setup.py --ultracode                           opt-in: ultracode on by default, workflows medium
     setup.py --auto-update                         opt-in: Claude Code auto-updates yah's marketplace
     setup.py --auto-merge                          opt-in: `yah run` merges the green phase PRs it opened
+    setup.py --codex                               opt-in: /yah:gpt sends research and reviews to GPT
     setup.py --uninstall                           undo all of the above
 
 Merge-only: settings.json is backed up first and only its statusLine key changes (never model,
 effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode, and
 autoUpdate on yah's extraKnownMarketplaces entry with --auto-update. --auto-merge sets only auto_merge
-in config.json (--ultracode sets ultracode there too); those three run on their own and never touch the
-statusLine. What it changed goes into setup-state.json in the data dir, so --uninstall can put things back.
+in config.json (--ultracode sets ultracode there too, --codex sets codex once a signed-in codex answers a
+smoke call); those four run on their own and never touch the statusLine. What it changed goes into setup-state.json in the data dir, so --uninstall can put things back.
 --dry-run writes nothing. Re-running is safe.
 """
 import argparse
@@ -25,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -429,10 +431,42 @@ def auto_merge(state, state_file, dry, say):
     say(f"automerge  on: `yah run` merges a green phase PR it opened, then retargets and deletes its branch  ({cp})")
 
 
+def codex_on(state, state_file, dry, say):
+    """Opt-in: send web research and reviews to GPT through the codex CLI. It must be signed in and pass a
+    live smoke call (the config's model and effort, read-only sandbox) before config codex turns on. The old
+    value goes into setup-state.json so --uninstall can put it back. Exit 1 when a check fails."""
+    import codex  # scripts/codex.py; only this opt-in needs it
+    cp = data_dir() / "config.json"
+    cfg = load_obj(cp)
+    if cfg.get("codex") is True:  # already on: no login check and no live call to spend GPT quota on
+        say("codex      unchanged (on)")
+        return 0
+    if dry:
+        say("codex      login and smoke checks skipped in a dry run")
+    else:
+        try:
+            with tempfile.TemporaryDirectory(prefix="yah-codex-") as tmp:
+                got = codex.call(codex.command(codex.find_codex()) + ["login", "status"], tmp, 60)
+                if not got or got[0] != 0:
+                    raise codex.Fail("codex is not signed in: run `codex login`, then setup.py --codex again.")
+                codex.ask("Reply with the single word ok.", tmp, 180)
+        except codex.Fail as e:
+            print(f"[yah] {e}", file=sys.stderr)
+            return 1
+        say("codex      signed in; a smoke call answered")
+    state["codex"] = {"added": "codex" not in cfg, "prev": cfg.get("codex")}
+    cfg["codex"] = True
+    save_json(cp, cfg, dry)
+    save_json(state_file, state, dry)
+    say(f"codex      on: /yah:gpt sends web research and reviews to {cfg.get('codex_model') or 'GPT'}  ({cp})")
+    return 0
+
+
 def uninstall(sdir, state, state_file, dry, say):
     # an older setup set config ultracode without a record; it was then only ever setup's, so it goes
     uc = state.get("ultracodeConfig") or ({"added": True} if isinstance(state.get("ultracode"), dict) else None)
     recs = [(key, rec, what) for key, rec, what in (("auto_merge", state.get("autoMerge"), "automerge "),
+                                                    ("codex", state.get("codex"), "codex     "),
                                                     ("ultracode", uc, "ultracode  config")) if isinstance(rec, dict)]
     cp = data_dir() / "config.json"
     cfg, changed = (load_obj(cp) if recs else {}), False
@@ -514,6 +548,8 @@ def main():
                     help="opt-in: turn on Claude Code's auto-update for yah's marketplace (off for third-party ones)")
     ap.add_argument("--auto-merge", action="store_true",
                     help="opt-in: `yah run` merges the green phase PRs it opened (merge commit, never squash)")
+    ap.add_argument("--codex", action="store_true",
+                    help="opt-in: /yah:gpt sends web research and reviews to GPT (needs a signed-in codex CLI)")
     ap.add_argument("--yes", action="store_true", help="no prompts")
     a = ap.parse_args()
     say = (lambda s: print("[dry-run] " + s)) if a.dry_run else print
@@ -533,12 +569,12 @@ def main():
         if edit_block(dest, f"{RULES[0]}\n{rules}\n{RULES[1]}", RULES, a.dry_run, say, "rules") is not None:
             record(state, "rules", dest, state_file, a.dry_run)
         return 0
-    if a.auto_update or a.auto_merge or a.ultracode:  # on their own: a yes here never touches a kept statusline
+    if a.auto_update or a.auto_merge or a.ultracode or a.codex:  # on their own: never touch a kept statusline
         extra = [f for f, v in (("--tier", a.tier), ("--python", a.python), ("--launcher", a.launcher),
                                 ("--install-launcher", a.install_launcher)) if v]
         if extra:
-            say(f"WARNING    {', '.join(extra)} ignored: --ultracode, --auto-update and --auto-merge run on their own. "
-                "Run setup again with just those.")
+            say(f"WARNING    {', '.join(extra)} ignored: --ultracode, --auto-update, --auto-merge and --codex run on "
+                "their own. Run setup again with just those.")
         sp = claude_dir() / "settings.json"
         if a.auto_update:
             auto_update(load_obj(sp), sp, state, state_file, a.dry_run, say)
@@ -546,7 +582,7 @@ def main():
             auto_merge(state, state_file, a.dry_run, say)
         if a.ultracode:
             ultracode(load_obj(sp), sp, state, state_file, a.dry_run, say)
-        return 0
+        return codex_on(state, state_file, a.dry_run, say) if a.codex else 0
 
     py = pick_python(a.python)
     if not py:

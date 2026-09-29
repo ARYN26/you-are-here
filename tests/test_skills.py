@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SKILLS = sorted(ROOT.glob("skills/*/SKILL.md"))
 AGENTS = sorted(ROOT.glob("agents/*.md"))
 MAX_DESC = 100
-MAX_VISIBLE = 600
+MAX_VISIBLE = 740  # 588 before P1 of yah + GPT added the gpt skill and agent
 START_BYTES = 2500  # the restate-first rewrite came in under 2394; P2's phase-memory read adds about 100
 
 
@@ -50,8 +50,8 @@ def body(name):
 class DescriptionTests(unittest.TestCase):
     def test_files_found(self):
         self.assertEqual({p.parent.name for p in SKILLS},
-                         {"auto", "deep", "phases", "resume", "setup", "start", "tree", "where", "wrap"})
-        self.assertEqual({p.stem for p in AGENTS}, {"deep", "scout"})
+                         {"auto", "deep", "gpt", "phases", "resume", "setup", "start", "tree", "where", "wrap"})
+        self.assertEqual({p.stem for p in AGENTS}, {"deep", "gpt", "scout"})
 
     def test_each_description_short(self):
         for f in SKILLS + AGENTS:
@@ -62,7 +62,7 @@ class DescriptionTests(unittest.TestCase):
 
     def test_model_visible_total(self):
         visible = [f for f in SKILLS + AGENTS if model_visible(f)]
-        self.assertEqual(len(visible), 7)  # 5 skills + 2 agents; auto, resume, setup and tree are user-only
+        self.assertEqual(len(visible), 9)  # 6 skills + 3 agents; auto, resume, setup and tree are user-only
         total = sum(len(parse(f)[0]["description"]) for f in visible)
         self.assertLessEqual(total, MAX_VISIBLE)
 
@@ -81,6 +81,8 @@ class DescriptionTests(unittest.TestCase):
             ROOT / "skills/start/SKILL.md": ["/yah:start"],
             ROOT / "agents/deep.md": ["/yah:deep", "two attempts"],
             ROOT / "agents/scout.md": ["proactively", "read-only", "lookups"],
+            ROOT / "skills/gpt/SKILL.md": ["web research", "review", "/yah:gpt research"],
+            ROOT / "agents/gpt.md": ["/yah:gpt", "codex.py"],
         }
         for f, words in want.items():
             desc = parse(f)[0]["description"]
@@ -561,6 +563,56 @@ class BeadsTests(unittest.TestCase):
         text = (ROOT / "agents/scout.md").read_text("utf-8")
         self.assertIn("Plan state is in STATE.md", text)
         self.assertLess(text.index("STATE.md"), text.index("bd show/list"))
+
+
+class GptTests(unittest.TestCase):
+    """/yah:gpt forks to the gpt agent, which makes one codex.py call and relays a short answer."""
+
+    def setUp(self):
+        self.meta, self.body = parse(ROOT / "skills/gpt/SKILL.md")
+        self.agent_meta, self.agent = parse(ROOT / "agents/gpt.md")
+
+    def test_forks_to_a_cheap_agent(self):
+        self.assertEqual(self.meta["context"], "fork")
+        self.assertEqual(self.meta["agent"], "yah:gpt")
+        self.assertEqual(self.agent_meta["model"], "sonnet")
+        self.assertEqual(self.agent_meta["effort"], "low")
+        self.assertEqual(self.agent_meta["tools"], "Bash, Read")  # no Edit or Write: GPT does the work
+
+    def test_allowed_tools_match_the_quoted_script_path(self):
+        tools = self.meta["allowed-tools"]
+        for py in ("python3", "python", "py -3"):  # the skill quotes the path: `PY ".../codex.py" research`
+            for mode in ("research", "review"):
+                self.assertIn(f"Bash({py} *scripts/codex.py* {mode} *)", tools)
+        self.assertNotIn("codex.py research", tools)
+        self.assertIn('`PY "${CLAUDE_SKILL_DIR}/../../scripts/codex.py"`', self.body)
+
+    def test_brief_goes_through_a_quoted_heredoc(self):
+        # quotes, backticks and $ in a brief would break or run in a double-quoted argument
+        self.assertIn("<<'YAH_BRIEF'", self.body)
+        self.assertIn("must stand alone", self.body)
+
+    def test_the_call_ends_before_the_bash_tool_cap(self):
+        # Bash tops out at 600000 ms, and codex_timeout_minutes defaults to 15
+        self.assertEqual(self.body.count("--timeout 570"), 2)
+        self.assertIn("600000 ms timeout", self.agent)
+        self.assertIn("--timeout 570", self.agent)
+
+    def test_agent_makes_one_call_and_relays_failures(self):
+        self.assertIn("exactly one codex.py call", self.agent)
+        self.assertIn("never retry", self.agent)
+        self.assertIn("Exit 3 means GPT hit its usage limit", self.agent)
+        self.assertIn("at most 1,500 characters", self.agent)
+        for field in ("ANSWER:", "SOURCES:", "REPORT:", "UNSURE:"):
+            self.assertIn(field, self.agent)
+
+    def test_setup_offers_codex_only_when_installed(self):
+        setup = body("setup")
+        section = setup[setup.index("## 3e. GPT"):setup.index("## 4.")]
+        self.assertIn("Only when `codex` is on PATH", section)
+        self.assertIn("run `setup.py --codex`", section)
+        self.assertIn("`codex login`", section)
+        self.assertIn("`--uninstall` restores", section)
 
 
 class DocsTests(unittest.TestCase):
