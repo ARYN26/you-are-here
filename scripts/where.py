@@ -236,10 +236,10 @@ def state_md(top, main_root=None):
         phase_lines = {n for n, sec, ml in items if sec in lead and ml[4] == lead[sec]}
         rest = [(n, ml) for n, _, ml in items if n not in phase_lines]
         follow = [i for i, (_, h) in enumerate(heads) if re.fullmatch(r"follow[- ]?ups?", h, re.I)]
-        top = {}  # a follow-up's sub-tasks are part of it, not candidates of their own
+        lead_fu = {}  # a follow-up's sub-tasks are part of it, not candidates of their own
         for _, sec, ml in items:
             if sec in follow:
-                top[sec] = min(top.get(sec, ml[4]), ml[4])
+                lead_fu[sec] = min(lead_fu.get(sec, ml[4]), ml[4])
         out: dict = {**empty_state(), "file": name, "path": str(f), "head": "", "next": "", "at": "",
                      "human": [{"id": f"{name}:{n}", "title": ml[1]} for n, _, ml in items
                                if ml[0] != "closed" and ml[3]],
@@ -248,7 +248,7 @@ def state_md(top, main_root=None):
                      "open_count": sum(1 for _, ml in rest if ml[0] == "open" and not ml[3]),
                      "aim": next((a for _, sec, a in aims if a and sec not in dated), None),
                      "followups": [{"id": f"{name}:{n}", "title": ml[1]} for n, sec, ml in items
-                                   if sec in top and ml[4] == top[sec] and ml[0] == "open" and not ml[3]]}
+                                   if sec in lead_fu and ml[4] == lead_fu[sec] and ml[0] == "open" and not ml[3]]}
         if dated:
             i = max(dated, key=lambda j: heads[j][1][:10])  # the newest date, whatever the order
             nxt = re.search(r"^- Next:\s*(.+(?:\n(?!- )\s+.+)*)", body(i), re.M)
