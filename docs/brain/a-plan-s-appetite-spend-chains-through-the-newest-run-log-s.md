@@ -5,4 +5,4 @@ paths: ["scripts/run.py"]
 status: active
 source: scripts/run.py:plan_spend
 ---
-Run logs start 'plan <file> | before $X and Hh'. Spend = newest log on the plan (before + session lines + stamp span) + this run. Editing iteration/review log lines means editing SESSION.
+Run logs start 'plan <file> | before $X and Hh'. Spend = newest log on the plan (before + session lines + stamp span) + this run; prune keeps that log (newest_by_plan). Editing iteration/review log lines means editing SESSION.

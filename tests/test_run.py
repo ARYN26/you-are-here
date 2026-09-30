@@ -1340,6 +1340,22 @@ class HelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(self.mod.appetite_hint(Path(d), 2), "$14 and 1.2h")  # no run finished a phase
 
+    def test_prune_keeps_the_newest_log_on_each_plan(self):
+        with tempfile.TemporaryDirectory() as d:
+            runs, keep = Path(d), self.mod.KEEP_RUNS
+            names = ["plan-old", "plan-new"] + [f"other-{i:02}" for i in range(keep)]
+            for i, name in enumerate(names):  # oldest first: the plan's two logs fall past KEEP_RUNS
+                head = f"2026-09-29 10:{i:02}:00 plan /p.md | before $1.00 and 0.10h" if name.startswith("plan") \
+                    else f"2026-09-29 10:{i:02}:00 iteration 1: $1.00, 5 turns, progress, HEAD a, NEXT -"
+                f = runs / f"{name}.log"
+                f.write_text(head + "\n", encoding="utf-8")
+                os.utime(f, (1_000_000 + i, 1_000_000 + i))
+            self.mod.prune(runs)
+            left = {p.stem for p in runs.glob("*.log")}
+            self.assertIn("plan-new", left)  # its spend chain: exit 9 would forget the plan's spend without it
+            self.assertNotIn("plan-old", left)
+            self.assertEqual(len(left), keep + 1)
+
 
 if __name__ == "__main__":
     unittest.main()

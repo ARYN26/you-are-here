@@ -915,17 +915,24 @@ def log_spend(path):
     return s
 
 
+def newest_by_plan(runs):
+    """{plan: (log_spend, path)} for the newest run log on each plan: it holds the plan's whole spend chain."""
+    newest = {}
+    for p in Path(runs).glob("*.log"):
+        s = log_spend(p)
+        if s and s["plan"] and (s["plan"] not in newest or s["at"] > newest[s["plan"]][0]["at"]):
+            newest[s["plan"]] = (s, p)
+    return newest
+
+
 def plan_spend(runs, plan):
     """(dollars, hours) the plan spent in earlier runs. The newest run log on it holds what came before it plus its
     own sessions and time, so logs prune dropped still count. (0, 0) with no plan or no log on it."""
-    newest = None
-    for p in Path(runs).glob("*.log") if plan else ():
-        s = log_spend(p)
-        if s and s["plan"] == plan and (newest is None or s["at"] > newest["at"]):
-            newest = s
+    newest = newest_by_plan(runs).get(plan) if plan else None
     if newest is None:
         return 0.0, 0.0
-    return newest["before"][0] + newest["cost"], newest["before"][1] + newest["hours"]
+    s = newest[0]
+    return s["before"][0] + s["cost"], s["before"][1] + s["hours"]
 
 
 def over_appetite(r):
@@ -1063,10 +1070,12 @@ def log(r, line):
 
 
 def prune(runs):
-    """Keep the KEEP_RUNS newest runs: each .log, its --detach .out and its per-iteration .jsonl files."""
+    """Keep the KEEP_RUNS newest runs, plus the newest run on each plan (its spend chain): each .log, its --detach
+    .out and its per-iteration .jsonl files."""
     try:
         logs = sorted(runs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for old in logs[KEEP_RUNS:]:
+        keep = {p for _, p in newest_by_plan(runs).values()}  # each plan's spend chain (exit 9) stays
+        for old in [p for p in logs[KEEP_RUNS:] if p not in keep]:
             for f in [old, old.with_suffix(".out"), *runs.glob(old.stem + "-*.jsonl"), *runs.glob(old.stem + "-*.md")]:
                 f.unlink(missing_ok=True)
     except Exception:
