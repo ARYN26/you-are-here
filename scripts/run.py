@@ -215,6 +215,9 @@ def command(path, args):
     return [path, *args]
 
 
+CATCH_UP_BUDGET = 1.5  # x --max-budget-usd for a build in catch-up
+
+
 def claude_argv(r, prompt=None, role=None):
     """A build session's argv, or with `role` (model, effort) a read-only critique or judge running `prompt`.
     critique=<path> or findings=<path> goes last: the skill reads the path to the end of the prompt."""
@@ -222,11 +225,11 @@ def claude_argv(r, prompt=None, role=None):
                                             r.critique and "critique=" + r.critique,
                                             r.mode == "fix-findings" and "findings=" + r.findings) if x)
     # the quality profile (config ultracode) runs roles.main; a user --model replaces only its model. In catch-up
-    # a build runs one effort step higher on 1.5 x the budget: the pool it spends is lost at the reset anyway
+    # a build runs one effort step higher on CATCH_UP_BUDGET x the budget: the pool it spends is lost at the reset
     model, effort = role or (r.cfg["roles"]["main"].split() if r.cfg["ultracode"] else (None, None))
     model = model if role else r.model or model
     lift = not role and effort and r.catch_up
-    effort, budget = (bump(effort), r.budget * 1.5) if lift else (effort, r.budget)
+    effort, budget = (bump(effort), r.budget * CATCH_UP_BUDGET) if lift else (effort, r.budget)
     argv = [r.claude, "-p", prompt, "--permission-mode", "auto", "--permission-prompts", "none",
             "--disallowedTools", *r.deny, *(READ_ONLY if role else []), "--max-budget-usd", "{:g}".format(budget),
             "--output-format", "stream-json", "--verbose", "--settings", guard_settings()]
@@ -420,8 +423,8 @@ def fresh_limits(now):
 
 
 def week_usage(r):
-    """(used %, pace %, resets_at) from the stream's latest rate_limit_event, else from a limits.json under 6 h
-    old; resets_at may be None. A reading whose reset time has passed is last week's: None, like no reading."""
+    """(used %, pace %, reset epoch) from the stream's latest rate_limit_event, else from a limits.json under 6 h
+    old; the epoch may be None. A reading whose reset time has passed is last week's: None, like no reading."""
     now = time.time()
     if r.week:
         used, reset, pace = r.week[0], r.week[1], None
@@ -434,21 +437,21 @@ def week_usage(r):
     at = to_epoch(reset) if reset else None
     if at is not None and at <= now:
         return None
-    return used, (pace if at is None else week_pace(reset, now)), reset
+    return used, (pace if at is None else week_pace(reset, now)), at
 
 
 def pace_state(r):
     """The week's reading for this turn, at the top of evaluate so every critique, build and judge sees a fresh
-    one: r.used, r.pace and r.hours_left (None when unknown). With the quality profile on, r.catch_up is
+    one: r.used, r.pace, r.gap (pace - used) and r.hours_left (None when unknown). With the quality profile on, r.catch_up is
     pace - used >= catch_up_pct; each flip is told once. With it off, catch-up is never computed."""
     usage = week_usage(r)
-    r.used, pace, reset = usage or (None, None, None)
+    r.used, pace, at = usage or (None, None, None)
     r.pace = None if pace is None else num(pace, None)
-    at = to_epoch(reset) if reset else None
+    r.gap = None if r.used is None or r.pace is None else r.pace - r.used
     r.hours_left = None if at is None else max(0.0, (at - time.time()) / 3600)
     if not r.cfg["ultracode"]:
         return
-    gap = None if r.used is None or r.pace is None else r.pace - r.used
+    gap = r.gap
     on = gap is not None and gap >= r.cfg["catch_up_pct"]
     if on == r.catch_up:
         return
@@ -457,10 +460,9 @@ def pace_state(r):
         tell(r, "catch-up off: " + ("pace unknown" if gap is None else f"{gap:.0f} pts under pace"))
         return
     effort = r.cfg["roles"]["main"].split()[1]
-    left = "" if r.hours_left is None else f", {r.hours_left:.0f}h to reset"
     crit = r.cfg["roles"]["critic"].split()[0] == "codex"
-    tell(r, f"catch-up on: {gap:.0f} pts under pace ({r.used:.0f}% used, {r.pace:.0f}% of the week gone{left}): "
-         f"builds at {bump(effort)} with a ${r.budget * 1.5:g} budget, critique "
+    tell(r, f"catch-up on: {gap:.0f} pts under pace ({r.used:.0f}% used, {r.pace:.0f}% of the week gone"
+         f"{to_reset(r)}): builds at {bump(effort)} with a ${r.budget * CATCH_UP_BUDGET:g} budget, critique "
          + ("on " + r.cfg["roles"]["premium"] if crit else "unchanged"))
 
 
@@ -534,6 +536,11 @@ def evaluate(r, wait=True):
 
 
 # ---------------------------------------------------------------- auto-merge (config auto_merge, off by default)
+
+def to_reset(r):
+    """`, 7h to reset` for a catch-up message, or nothing when the reset time is unknown."""
+    return "" if r.hours_left is None else f", {r.hours_left:.0f}h to reset"
+
 
 def tell(r, line):
     say("[yah] " + line)
@@ -833,16 +840,16 @@ def review_role(r, mode):
     if model == "codex":
         if mode == "critique" and r.catch_up:
             model, effort = r.cfg["roles"]["premium"].split()
-            return model, effort, f"catch-up: {r.pace - r.used:.0f} pts under pace"
+            return model, effort, f"catch-up: {r.gap:.0f} pts under pace"
         if r.cfg["codex"] and not r.codex_down:
             return model, r.cfg["codex_effort"], "GPT, no Claude bar"
         model, effort = r.cfg["roles"]["review_fallback"].split()
         return model, effort, ("codex down" if r.cfg["codex"] else "codex off") + ": roles.review_fallback"
-    used, skip = pool_used(r, model), r.cfg["critic_week_skip_pct"]
-    if used is None and r.used is None:
+    pool, skip = pool_used(r, model), r.cfg["critic_week_skip_pct"]
+    used = r.used if pool is None else pool
+    if used is None:
         return model, effort, "bar unknown"
-    why = f"{model} bar {used:.0f}%" if used is not None else f"week {r.used:.0f}%"
-    used = r.used if used is None else used
+    why = f"{model} bar {used:.0f}%" if pool is not None else f"week {used:.0f}%"
     if used < skip:
         return model, effort, why
     model, effort = r.cfg["roles"]["judge"].split()
@@ -1332,7 +1339,7 @@ def dry_run(r):
     say(f"deny    {len(r.deny)} patterns")
     for p in r.deny:
         say(f"          {p}")
-    lift = f" (${r.budget * 1.5:g} per build in catch-up)" if r.catch_up else ""
+    lift = f" (${r.budget * CATCH_UP_BUDGET:g} per build in catch-up)" if r.catch_up else ""
     say(f"caps    {r.cap} iterations, ${r.budget:g} per iteration{lift}, {c['run_iteration_minutes']:g} min per "
         f"iteration, {c['run_total_hours']:g} h total, checks wait {c['run_checks_wait_minutes']:g} min, "
         f"week stop {c['run_week_stop_pct']:g}% or pace + {c['pace_slack']:g}")
@@ -1340,10 +1347,9 @@ def dry_run(r):
     say("bet     no appetite (no `appetite:` line in the plan's ## Bet): no limit" if cost is None and hours is None
         else "bet     appetite " + " and ".join(x for x in (cost and f"${cost:g}", hours and f"{hours:g}h") if x)
         + f", spent ${r.before[0]:.2f} and {r.before[1]:.1f}h in earlier runs")
-    left = "" if r.hours_left is None else f", {r.hours_left:.0f}h to reset"
     say("week    pace unknown" if r.used is None else f"week    {r.used:.0f}% used"
         + ("" if r.pace is None else f", pace {r.pace:.0f}%")
-        + (f", catch-up ({r.pace - r.used:.0f} pts under{left})" if r.catch_up else ""))
+        + (f", catch-up ({r.gap:.0f} pts under{to_reset(r)})" if r.catch_up else ""))
     am = "on" if c["auto_merge"] else "off"
     if c["auto_merge"] and code == 0 and r.pr_state == "OPEN":  # open and green: what it would do, never doing it
         ok, why = mergeable(r, r.view or {})
@@ -1443,7 +1449,7 @@ def main():
         budget=cfg["run_budget_usd"] if a.budget is None else a.budget,
         pr=int(target[1:]) if target[:1] == "#" else None, label=target if target[:1] == "P" else None,
         phase=None, phases=[], plan_key=None, next="", head="", mode="build", checks="", url="", waiting=False,
-        week=None, pace_logged=False, used=None, pace=None, hours_left=None, catch_up=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
+        week=None, pace_logged=False, used=None, pace=None, gap=None, hours_left=None, catch_up=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
         chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="",
         pools={}, critiqued=set(), critique="", judged=set(), findings="", review_cost=0.0, reviews=0,
         codex_down=False, spec="", plan_file=None, before=(0.0, 0.0))
