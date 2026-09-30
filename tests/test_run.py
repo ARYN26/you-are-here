@@ -404,7 +404,7 @@ class RunTests(unittest.TestCase):
         out = self.run_yah(self.repo(), code=0)
         self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
         self.assertIn("  Bash npm test -- --run", out)
-        self.assertRegex(out, r"iteration 1: \$0\.25, 3 turns, pr-open #12, HEAD [0-9a-f]{7}, NEXT Start P3\.")
+        self.assertRegex(out, r"iteration 1: \$0\.25, 3 turns, default, pr-open #12, HEAD [0-9a-f]{7}, NEXT Start P3\.")
         self.assertIn(GREEN, out)
         log = self.run_logs()[0]
         self.assertIn("iteration 1: $0.25", log.read_text("utf-8"))
@@ -1080,7 +1080,8 @@ class RunTests(unittest.TestCase):
                      "with a $15 budget, critique on fable high",
                      "critique P2: fable high (catch-up: 56 pts under pace), $0.25, critique-done",
                      "catch-up off: 17 pts under pace",
-                     "judge P2: codex high (GPT, no Claude bar), $0.00, judge pass"):
+                     "judge P2: codex high (GPT, no Claude bar), $0.00, judge pass",
+                     " turns, opus xhigh, pr-open #12, HEAD "):  # the iteration line names the build's model
             self.assertIn(want, log)
         for name, used, hours in (("6 under", 70, 40), ("no reading", None, None)):
             with self.subTest(name):
@@ -1094,7 +1095,9 @@ class RunTests(unittest.TestCase):
                 build = self.calls("claude")[-1]
                 self.assertEqual(len(self.calls("claude")), 1)  # the critique ran on codex
                 self.assertEqual([self.flag(build, f) for f in ("--effort", "--max-budget-usd")], ["high", "10"])
-                self.assertNotIn("catch-up", self.run_logs()[-1].read_text("utf-8"))
+                log = self.run_logs()[-1].read_text("utf-8")
+                self.assertNotIn("catch-up", log)
+                self.assertIn(" turns, opus high, needs-human, HEAD ", log)
 
     def test_a_claude_critic_reads_the_weekly_bar_when_no_pool_is_sent(self):
         self.config(ultracode=True)
@@ -1105,8 +1108,10 @@ class RunTests(unittest.TestCase):
                                    ((55, {"seven_day_fable": 12}), "fable high (fable bar 12%)")):
             with self.subTest(why):
                 self.week(used, 7, **pools)
-                self.assertIn(f"critic  would critique P2 on {why} before its first build",
-                              self.run_yah(repo, "--dry-run", code=0))
+                out = self.run_yah(repo, "--dry-run", code=0)
+                self.assertIn(f"critic  would critique P2 on {why} before its first build", out)
+        self.assertIn("week    55% used, pace 96%, catch-up (41 pts under, 7h to reset)", out)  # the last case
+        self.assertIn("caps    8 iterations, $10 per iteration ($15 per build in catch-up), ", out)
 
     def test_a_reading_past_its_reset_is_no_reading(self):
         repo = self.repo()

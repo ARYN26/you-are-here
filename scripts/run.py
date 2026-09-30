@@ -19,8 +19,8 @@ deleted unless protected. --plan then goes on, and the next phase builds on that
 
 The quality profile (config.json "ultracode": true) starts builds with --model/--effort from roles.main (a user
 --model replaces only the model). Before a plan phase's first build (no PR, no phase branch on origin) it runs one
-read-only `/yah:resume <label> critique` on roles.critic, or on roles.judge once the critic model's own weekly pool
-is at critic_week_skip_pct. Its answer goes to runs/<stem>-<label>-critique.md, and the next build prompt ends
+read-only `/yah:resume <label> critique` on roles.critic, or on roles.judge once the critic model's bar is at
+critic_week_skip_pct: its own weekly pool if Claude Code sends one, else the weekly bar. Its answer goes to runs/<stem>-<label>-critique.md, and the next build prompt ends
 with critique=<path>. Once a phase's PR is open and green, before auto-merge or exit 0, it runs one read-only
 `/yah:resume <label> judge` on the same model. A `judge block <n>` saves its answer to runs/<stem>-<label>-judge.md
 and runs one `fix-findings findings=<path>` slice, which the iteration cap does not hold back; then the loop goes on
@@ -30,6 +30,9 @@ no Claude bar and $0 logged. run.py writes its brief to runs/<stem>-<name>-<mode
 section and the plan's Decisions, or the PR's diff from gh), since GPT has no plan tools, gh or network there. A
 codex call that fails marks codex down for the rest of the run and reruns that review on roles.review_fallback;
 a brief that cannot be built (no plan section, no diff) sends only that one review to roles.review_fallback.
+Catch-up: while the week is catch_up_pct or more points under pace, each build runs one effort step higher on 1.5 x
+the budget, and with a codex critic each critique runs on roles.premium (Fable high); the judge stays GPT. Each
+iteration line names the build's model: `iteration 1: $1.25, 38 turns, opus xhigh, progress, HEAD ...`.
 
 TARGET is P<n> (a plan phase), #<pr> (a bare PR number works too, since shells treat # as a
 comment) or empty for the current phase, which is pinned at start and passed as P<n>. Each iteration
@@ -751,11 +754,18 @@ def iterate(r):
         r.findings = ""  # one slice; the loop goes on as usual
     say(f"[yah] iteration {r.n}/{r.cap}: {argv[2]}")
     it = session(r, argv, f"{r.total}", r.n)
+    it["ran"] = ran_as(argv)
     m = re.match(r"pr-open\s+#?(\d+)", it["tag"], re.I)
     if m:
         r.pr = int(m.group(1))
     r.cost += it["cost"]
     return it
+
+
+def ran_as(argv):
+    """The model and effort a session's argv names, e.g. `opus xhigh`; `default` with no --model."""
+    flag = lambda f: argv[argv.index(f) + 1] if f in argv else None  # noqa: E731
+    return " ".join(x for x in (flag("--model") or "default", flag("--effort")) if x)
 
 
 def session(r, argv, name, n=0):
@@ -1322,15 +1332,18 @@ def dry_run(r):
     say(f"deny    {len(r.deny)} patterns")
     for p in r.deny:
         say(f"          {p}")
-    say(f"caps    {r.cap} iterations, ${r.budget:g} per iteration, {c['run_iteration_minutes']:g} min per "
+    lift = f" (${r.budget * 1.5:g} per build in catch-up)" if r.catch_up else ""
+    say(f"caps    {r.cap} iterations, ${r.budget:g} per iteration{lift}, {c['run_iteration_minutes']:g} min per "
         f"iteration, {c['run_total_hours']:g} h total, checks wait {c['run_checks_wait_minutes']:g} min, "
         f"week stop {c['run_week_stop_pct']:g}% or pace + {c['pace_slack']:g}")
     cost, hours = appetite(r.plan_file)
     say("bet     no appetite (no `appetite:` line in the plan's ## Bet): no limit" if cost is None and hours is None
         else "bet     appetite " + " and ".join(x for x in (cost and f"${cost:g}", hours and f"{hours:g}h") if x)
         + f", spent ${r.before[0]:.2f} and {r.before[1]:.1f}h in earlier runs")
+    left = "" if r.hours_left is None else f", {r.hours_left:.0f}h to reset"
     say("week    pace unknown" if r.used is None else f"week    {r.used:.0f}% used"
-        + ("" if r.pace is None else f", pace {r.pace:.0f}%"))
+        + ("" if r.pace is None else f", pace {r.pace:.0f}%")
+        + (f", catch-up ({r.pace - r.used:.0f} pts under{left})" if r.catch_up else ""))
     am = "on" if c["auto_merge"] else "off"
     if c["auto_merge"] and code == 0 and r.pr_state == "OPEN":  # open and green: what it would do, never doing it
         ok, why = mergeable(r, r.view or {})
@@ -1497,8 +1510,8 @@ def main():
             refresh(r)
             r.stalls = r.stalls + 1 if (r.head, r.next) == before else 0
             it = r.last
-            line = "iteration {}: ${:.2f}, {} turns, {}, HEAD {}, NEXT {}".format(
-                it["n"], it["cost"], it["turns"], it["tag"] or "no YAH-RESULT", r.head, r.next[:80] or "-")
+            line = "iteration {}: ${:.2f}, {} turns, {}, {}, HEAD {}, NEXT {}".format(
+                it["n"], it["cost"], it["turns"], it["ran"], it["tag"] or "no YAH-RESULT", r.head, r.next[:80] or "-")
             tell(r, line)
     except KeyboardInterrupt:
         code, reason = 130, "interrupted."
