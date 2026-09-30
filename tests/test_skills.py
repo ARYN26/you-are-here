@@ -458,7 +458,7 @@ class AutoTests(unittest.TestCase):
         self.assertIn("read the table again", rows[aim])
         q1 = self.body[self.body.index("**Q1, the aim**"):self.body.index("**Q2, the pick**")]
         for s in ("`Help [primary user] [outcome] when [situation]`", "README's first 40 lines", "never explore further",
-                  "`AIM: <sentence>`", "under STATE.md's `#` title", "`AIM: none`"):
+                  "`AIM: <sentence>`", "file at `store.path`", "Never create a second STATE.md", "`AIM: none`"):
             self.assertIn(s, q1)
 
     def test_q2_offers_a_b_c_from_the_follow_ups_and_keeps_the_old_question_without_them(self):
@@ -466,7 +466,7 @@ class AutoTests(unittest.TestCase):
         self.assertIn("`state_md.followups`", row)
         self.assertLess(row.index("**Q2**"), row.index("nothing to rank. Ask one question"))
         q2 = self.body[self.body.index("**Q2, the pick**"):self.body.index("## 3. Plan it")]
-        for s in ("impact H/M/L", "effort S/M/L", "words you quote", "`absent`", "never an estimate",
+        for s in ("own `text`", "impact H/M/L", "effort S/M/L", "words you quote", "`absent`", "never an estimate",
                   "discovery task", "Never read code or docs to rank",
                   "`A/B/C | id title | outcome | impact/effort | evidence | done-when`",
                   "I recommend A; 'auto' lets me choose", "Other for a new task", "Route the pick"):

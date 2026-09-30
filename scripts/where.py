@@ -215,7 +215,8 @@ def state_md(top, main_root=None):
     file:line, so the model can go straight to it. A linked worktree with neither file reads the main checkout's,
     as beads does: STATE.md is gitignored, so a new worktree never has one. `path` is the file wrap must edit.
     `aim`: the first non-empty `AIM:` line outside dated sections, else None (`none` means the user declined one).
-    `followups`: the open top-level lines under `## Follow-ups` that do not wait on you, in file order."""
+    `followups`: the open top-level lines under `## Follow-ups` that do not wait on you, in file order. `text` is
+    the whole item, fields after `|` or `·` included, since those are the evidence Q2 ranks on."""
     for f in (d / name for d in repo_dirs(top, main_root) for name in ("STATE.md", "NOW.md")):
         if not f.is_file():
             continue
@@ -243,7 +244,8 @@ def state_md(top, main_root=None):
                                      if ml[0] == "in_progress"],
                      "open_count": sum(1 for _, ml in rest if ml[0] == "open" and not ml[3]),
                      "aim": next((a for _, sec, a in aims if a and sec not in dated), None),
-                     "followups": [{"id": f"{name}:{n}", "title": ml[1]} for n, sec, ml in items
+                     "followups": [{"id": f"{name}:{n}", "title": ml[1],
+                                    "text": CHECKBOX.match(lines[n - 1]).group(3).strip()} for n, sec, ml in items
                                    if sec in follow and ml[4] == lead[sec] and ml[0] == "open" and not ml[3]]}
         if dated:
             i = max(dated, key=lambda j: heads[j][1][:10])  # the newest date, whatever the order

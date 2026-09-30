@@ -41,9 +41,9 @@ Use the `[yah]` SessionStart block already in context. Run `PY "${CLAUDE_SKILL_D
 
 A given task or a NEXT already says what to do, so Q1 and Q2 come only when nothing does, and a tiny task skips the `## Bet` and Q3 too. Ask each in one AskUserQuestion, recommended option first.
 
-**Q1, the aim** (once per project): "Who is this project primarily for, and what should it help them accomplish?" Offer 2-3 aims as `Help [primary user] [outcome] when [situation]`, drafted only from README's first 40 lines and the PROD line; never explore further. Put the one you would pick first. Write the answer as `AIM: <sentence>` on its own line under STATE.md's `#` title (create STATE.md with a `#` title if it is missing). A user who declines gets `AIM: none`, so Q1 is never asked again.
+**Q1, the aim** (once per project): "Who is this project primarily for, and what should it help them accomplish?" Offer 2-3 aims as `Help [primary user] [outcome] when [situation]`, drafted only from README's first 40 lines and the PROD line; never explore further. Put the one you would pick first. Write the answer as `AIM: <sentence>` on its own line under the `#` title of the file at `store.path` in `where.py --json --no-gh`, which may be NOW.md or the main checkout's STATE.md (create that file with a `#` title if it is missing; a file with no `#` title gets the line at its top). Never create a second STATE.md beside it: it would shadow the project's state. A user who declines gets `AIM: none`, so Q1 is never asked again.
 
-**Q2, the pick**: rank the follow-ups against the AIM, judging each only from its own text:
+**Q2, the pick**: rank the follow-ups against the AIM, judging each only from its own `text` (the whole line, fields after `|` included):
 - impact H/M/L (how much it moves the AIM) and effort S/M/L, each resting on words you quote from the item; say `absent` where the text gives nothing, never an estimate.
 - An item the text says blocks others comes first. An item whose effort is absent is offered as a discovery task: find out what it takes, done when that is written down.
 - Never read code or docs to rank; the item's text is the evidence.

@@ -750,8 +750,10 @@ class WhereTests(Base):
         (self.tmp / "STATE.md").write_text(text, encoding="utf-8")
         sm = w.state_md(self.tmp)
         self.assertEqual(sm["aim"], "Help shoppers pay when they are on mobile")
-        self.assertEqual(sm["followups"], [{"id": "STATE.md:11", "title": "Update the README"},
-                                           {"id": "STATE.md:19", "title": "Bump the deps"}])
+        self.assertEqual(sm["followups"], [{"id": "STATE.md:11", "title": "Update the README",
+                                            "text": "Update the README"},
+                                           {"id": "STATE.md:19", "title": "Bump the deps",
+                                            "text": "Bump the deps | effort S"}])  # Q2's evidence survives the split
         self.assertEqual(sm["next"], "Ship it.")
         dated = "# Shop\n\n## 2026-09-23\nAIM: Help from a dated entry\n- Next: Ship it.\n"
         (self.tmp / "STATE.md").write_text(dated, encoding="utf-8")
