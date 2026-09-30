@@ -3,6 +3,7 @@
     yah run [TARGET] [--plan] [--cwd DIR | --project NAME] [--iterations N] [--budget USD] [--dry-run]
             [--model M] [--plugin-dir DIR] [--detach]
     yah run --stop [--cwd DIR | --project NAME]
+    yah run --appetite-hint PHASES
 
 --plan goes on past exit 0: once a phase's PR is open and green (or merged) and the phase is closed, it
 pins the next open phase and runs that, until none is left ("plan done", exit 0). The iteration cap is per
@@ -49,9 +50,19 @@ matches sets the exit code:
     5  refused to start (also a start or --stop inside a run's own session, where YAH_PROTECTED is set)
     6  PR merged or closed (--plan goes on past a merged PR of a closed phase)
     7  weekly usage at run_week_stop_pct or over pace + pace_slack
+    9  the plan's spend reached the appetite in its ## Bet
     8  PR merged by yah (auto_merge on; --plan goes on to the next phase instead)
     1  run.py itself failed
   130  Ctrl-C, or ended by --stop
+
+The appetite is the `appetite: $<X> and <H>h` line in the plan file's `## Bet` (either part alone works; no Bet,
+no line or a part not above 0: no limit on it). Before every session, critiques and fix slices included, the plan's
+spend is checked against it: the dollars and hours of the runs before this one plus this run's sessions and time
+so far. Reaching either stops with exit 9. The judge of an open, green PR still runs, since it guards the merge.
+Each run's log starts with `plan <file> | before $<X> and <H>h`, the plan's spend before it, so the newest log on a
+plan holds its whole spend even after older logs are pruned. A log with no plan line (runs before this) counts for
+no plan. --appetite-hint PHASES prints `$<X> and <H>h` for a plan that size: the median cost and time per finished
+phase over runs/*.log, else $7 and 0.6h a phase.
 
 Logs go to <data dir>/runs/. The driver writes nothing inside the repo. Each run holds a lock on
 runs/<project>-<hash>.pid (<project>-<hash>@<worktree>.pid in a linked worktree), a JSON file with its pid, target, log and,
@@ -79,11 +90,13 @@ What a real `claude -p --output-format stream-json --verbose` stream carries (ch
 """
 import argparse
 import json
+import math
 import os
 import re
 import shlex
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -115,6 +128,16 @@ DENY_BRANCH = ["Bash(git push * {})", "Bash(git push * {} *)", "Bash(git push * 
 READ_ONLY = ["Edit", "Write", "NotebookEdit", "Bash(git commit*)", "Bash(git push*)"]
 PR_JSON = ("state,url,reviewDecision,reviews,commits,headRefName,baseRefName,mergeable,mergeStateStatus,isDraft,"
            "author,headRefOid")
+# the plan's ## Bet appetite (exit 9) and the run log lines its spend is read from
+APPETITE = re.compile(r"^\s*(?:[-+]\s+)?appetite\s*:\s*(.*)$", re.I)
+MONEY = re.compile(r"\$\s*(\d+(?:\.\d+)?)")
+HOURS = re.compile(r"(\d+(?:\.\d+)?)\s*h(?:ours?|rs?)?\b", re.I)
+HINT_PHASE = (7.0, 0.6)  # dollars and hours a phase when no run log finished one
+STAMP = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ")
+PLAN_LINE = re.compile(r"^\S+ \S+ plan (.+) \| before \$(\d+(?:\.\d+)?) and (\d+(?:\.\d+)?)h$")
+SESSION = re.compile(r"^\S+ \S+ (?:iteration \d+: \$(\d+(?:\.\d+)?), \d+ turns|"
+                     r"(?:critique|judge) \S+: \S+ \S+ \([^)]*\), \$(\d+(?:\.\d+)?), )")
+PHASE_DONE = re.compile(r"^\S+ \S+ (?:P\d+ done: PR |stop, exit [08]: )")
 NO_TAG = "session ended without a YAH-RESULT line; is the yah plugin loaded? (--plugin-dir)"
 NO_BASE = ("cannot tell which branch {} targets: no base in the plan, no open PR for {}, no origin/HEAD and no "
            "prod in config.json, so it cannot be protected. Set base in the plan (`| base <branch>` on the STATE.md "
@@ -450,6 +473,9 @@ def evaluate(r, wait=True):
         return 4, f"reached the cap of {r.cap} iterations."
     if time.monotonic() - r.t0 > r.cfg["run_total_hours"] * 3600:
         return 4, f"passed run_total_hours ({r.cfg['run_total_hours']:g} h)."
+    code, reason = over_appetite(r)
+    if code:
+        return code, reason
     usage = week_usage(r)
     if usage is None:
         if not r.pace_logged:
@@ -834,12 +860,100 @@ def plan_text(path, label):
     return "\n".join(out).strip() if any(re.match(r"### ", ln) for ln in out) else ""
 
 
+def spec_path(r):
+    """The plan file this run is on, absolute (STATE.md may name it from the repo root); None without one."""
+    spec = Path(r.spec).expanduser() if r.spec else None
+    return spec if spec is None or spec.is_absolute() else Path(r.top, spec)
+
+
+def plan_id(path):
+    """How run logs name a plan: its file, resolved and case-folded where the OS folds case. "" without one."""
+    return os.path.normcase(str(Path(path).resolve())) if path else ""
+
+
+def appetite(path):
+    """(dollars, hours) from the `appetite: $<X> and <H>h` line in the plan file's `## Bet` section (bold and a list
+    dash allowed, outside code fences). A part that is missing or not above 0 is None: no limit on it."""
+    try:
+        lines = Path(path).read_text("utf-8", errors="replace").splitlines() if path else []
+    except (OSError, ValueError):
+        return None, None
+    bet, fence = False, False
+    for ln in lines:
+        if is_fence(ln):
+            fence = not fence
+        elif not fence and re.match(r"#{1,2} ", ln):
+            bet = re.match(r"## +Bet\s*$", ln) is not None
+        elif not fence and bet and (m := APPETITE.match(ln.replace("*", ""))):
+            cost, hours = MONEY.search(m[1]), HOURS.search(MONEY.sub("", m[1]))
+            return tuple(float(x[1]) if x and float(x[1]) > 0 else None for x in (cost, hours))
+    return None, None
+
+
+def log_spend(path):
+    """One run log: its plan and what the plan spent before it (from its first `plan` line; "" and 0 without one),
+    its sessions' cost (iterations, critiques and judges), its hours from the first to the last line, and the
+    phases it took to an open, green or merged PR. None when it cannot be read."""
+    try:
+        lines = Path(path).read_text("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    s = dict(plan="", before=(0.0, 0.0), cost=0.0, hours=0.0, phases=0, sessions=0, at="")
+    stamps = [m[1] for m in map(STAMP.match, lines) if m]
+    if stamps:
+        s["at"] = stamps[0]
+        t = [time.mktime(time.strptime(x, "%Y-%m-%d %H:%M:%S")) for x in (stamps[0], stamps[-1])]
+        s["hours"] = max(0.0, t[1] - t[0]) / 3600
+    for ln in lines:
+        if not s["plan"] and (m := PLAN_LINE.match(ln)):
+            s["plan"], s["before"] = m[1], (float(m[2]), float(m[3]))
+        elif m := SESSION.match(ln):
+            s["cost"] += float(m[1] or m[2])
+            s["sessions"] += bool(m[1])
+        elif PHASE_DONE.match(ln):
+            s["phases"] += 1
+    return s
+
+
+def plan_spend(runs, plan):
+    """(dollars, hours) the plan spent in earlier runs. The newest run log on it holds what came before it plus its
+    own sessions and time, so logs prune dropped still count. (0, 0) with no plan or no log on it."""
+    newest = None
+    for p in Path(runs).glob("*.log") if plan else ():
+        s = log_spend(p)
+        if s and s["plan"] == plan and (newest is None or s["at"] > newest["at"]):
+            newest = s
+    if newest is None:
+        return 0.0, 0.0
+    return newest["before"][0] + newest["cost"], newest["before"][1] + newest["hours"]
+
+
+def over_appetite(r):
+    """Exit 9 once the plan's spend (runs before this one, plus this run's sessions and time) reaches the dollars or
+    the hours of its `## Bet` appetite. No Bet or no appetite: no limit."""
+    cost, hours = appetite(r.plan_file)
+    spent = (r.before[0] + r.cost + r.review_cost, r.before[1] + (time.monotonic() - r.t0) / 3600)
+    if cost is not None and spent[0] >= cost:
+        return 9, f"appetite reached: ${spent[0]:.2f} of ${cost:g}."
+    if hours is not None and spent[1] >= hours:
+        return 9, f"appetite reached: {spent[1]:.1f}h of {hours:g}h."
+    return None, ""
+
+
+def appetite_hint(runs, phases):
+    """`$<X> and <H>h` for a plan of `phases` phases: the median cost and time per finished phase over the run logs
+    that built one (their sessions and time over the phases they finished), else HINT_PHASE a phase."""
+    per = [(s["cost"] / s["phases"], s["hours"] / s["phases"]) for s in map(log_spend, Path(runs).glob("*.log"))
+           if s and s["phases"] and s["sessions"]]
+    cost, hours = (statistics.median(x[0] for x in per), statistics.median(x[1] for x in per)) if per else HINT_PHASE
+    return f"${math.ceil(cost * phases - 1e-9)} and {math.ceil(hours * phases * 10 - 1e-9) / 10:g}h"
+
+
 def review_brief(r, mode):
     """(brief, error) for a codex critique or judge: GPT reads the repo, but gets no plan tool, gh or network,
     so run.py hands it the phase's plan section or the PR's diff."""
     if mode == "critique":
-        spec = Path(r.spec).expanduser() if r.spec else None  # STATE.md may name it from the repo root
-        plan = plan_text(spec if spec is None or spec.is_absolute() else Path(r.top, spec), r.label or "")
+        plan = plan_text(spec_path(r), r.label or "")
         return (CRITIQUE_ASK.format(plan=plan), "") if plan else ("", f"no ### {r.label} section in the plan")
     rc, diff, err = gh(r, "pr", "diff", str(r.pr), timeout=60)
     if rc != 0 or not diff.strip():
@@ -1143,6 +1257,10 @@ def dry_run(r):
     say(f"caps    {r.cap} iterations, ${r.budget:g} per iteration, {c['run_iteration_minutes']:g} min per "
         f"iteration, {c['run_total_hours']:g} h total, checks wait {c['run_checks_wait_minutes']:g} min, "
         f"week stop {c['run_week_stop_pct']:g}% or pace + {c['pace_slack']:g}")
+    cost, hours = appetite(r.plan_file)
+    say("bet     no appetite (no `appetite:` line in the plan's ## Bet): no limit" if cost is None and hours is None
+        else "bet     appetite " + " and ".join(x for x in (cost and f"${cost:g}", hours and f"{hours:g}h") if x)
+        + f", spent ${r.before[0]:.2f} and {r.before[1]:.1f}h in earlier runs")
     say("week    pace unknown" if usage is None else f"week    {usage[0]:.0f}% used"
         + ("" if usage[1] is None else f", pace {num(usage[1], 0):.0f}%"))
     am = "on" if c["auto_merge"] else "off"
@@ -1179,9 +1297,14 @@ def main():
     ap.add_argument("--plugin-dir", help="passed to claude as --plugin-dir (testing an uninstalled yah checkout)")
     ap.add_argument("--detach", action="store_true", help="run in the background, output to <data dir>/runs/, and "
                     "return once it has started")
+    ap.add_argument("--appetite-hint", type=int, metavar="PHASES", help="print a `$<X> and <H>h` appetite for a "
+                    "plan of PHASES phases, from past runs")
     ap.add_argument("--stop", action="store_true", help="end the run going in this checkout, and every process "
                     "under it")
     a = ap.parse_args()
+    if a.appetite_hint is not None:  # read-only, so a session may ask too
+        say(appetite_hint(data_dir() / "runs", max(1, a.appetite_hint)))
+        return 0
     if os.environ.get("YAH_PROTECTED") and not a.dry_run:  # set only in a run's own claude sessions
         return refuse("inside a yah run session. A run starts or stops from your own terminal or session.")
     if a.stop and (a.target or a.plan or a.detach or a.dry_run or a.iterations is not None or a.budget is not None
@@ -1240,8 +1363,10 @@ def main():
         week=None, pace_logged=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
         chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="",
         pools={}, critiqued=set(), critique="", judged=set(), findings="", review_cost=0.0, reviews=0,
-        codex_down=False, spec="")
+        codex_down=False, spec="", plan_file=None, before=(0.0, 0.0))
     refresh(r, s)
+    r.plan_file = spec_path(r)  # pinned, like the plan: its ## Bet is read before every session
+    r.before = plan_spend(data_dir() / "runs", plan_id(r.plan_file))
     if (target[:1] == "P" or a.plan) and r.phase is None:
         what = f"no phase {target} in this repo's plan. " if target else "--plan found no open phase in this repo's plan. "
         labels = [p.get("label") for p in r.phases]
@@ -1266,6 +1391,8 @@ def main():
     if hold is None:
         return refuse(busy(run_state(pidf)))
     r.log.touch()
+    if r.plan_file:  # what the next run on this plan reads as spent before it
+        log(r, f"plan {plan_id(r.plan_file)} | before ${r.before[0]:.2f} and {r.before[1]:.2f}h")
     prune(runs)
     try:
         while True:
