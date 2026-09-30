@@ -636,6 +636,49 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(self.calls("claude")), 1)
         self.assertIn("pace unknown", self.run_logs()[-1].read_text("utf-8"))
 
+    def test_appetite_stops_with_exit_9_before_the_next_session(self):
+        repo = self.repo()
+        plan = repo / "docs" / "plans" / "checkout.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Checkout\n\n## Bet\n- outcome: pay\n- **appetite:** $0.40 and 5h\n\n### P2 Payment form\n",
+                        encoding="utf-8")
+        self.script(claude=[{"commit": True}])
+        out = self.run_yah(repo, code=9)
+        self.assertIn("appetite reached: $0.50 of $0.4.", out)  # $0.25 a session: the third never starts
+        self.assertEqual(len(self.calls("claude")), 2)
+        self.assertIn(f"plan {os.path.normcase(str(plan.resolve()))} | before $0.00 and 0.000000h",
+                      self.run_logs()[-1].read_text("utf-8"))
+        self.script(claude=[{"commit": True}])
+        self.assertIn("bet     appetite $0.4 and 5h, spent $0.50", self.run_yah(repo, "--dry-run", code=0))
+        self.assertIn("appetite reached: $0.50 of $0.4.", self.run_yah(repo, code=9))  # the earlier run counts
+        self.assertEqual(self.calls("claude"), [])
+        self.assertIn("$14 and 1.2h", self.run_yah(repo, "--appetite-hint", "2", code=0))  # no run finished a phase
+
+    def test_one_run_per_plan_and_short_runs_keep_their_hours(self):
+        repo = self.repo()
+        plan = repo / "docs" / "plans" / "checkout.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Checkout\n\n## Bet\n- appetite: $0.10\n\n### P2 Payment form\n", encoding="utf-8")
+        pid, runs = os.path.normcase(str(plan.resolve())), self.data / "runs"
+        runs.mkdir(parents=True)
+        (runs / "short.log").write_text(f"2026-09-29 10:00:00 plan {pid} | before $0.00 and 0.002778h\n"
+                                        "2026-09-29 10:00:10 stop, exit 2: blocked: x\n", encoding="utf-8")
+        HelperTests.setUpClass()
+        lock = yahlib.hold_run(HelperTests.mod.plan_lock(runs, pid), {"pid": 1, "top": str(self.tmp / "other")})
+        try:  # a run on the plan in another checkout: a second would start from the same spend and lose one
+            self.script(claude=[{"commit": True}])
+            out = self.run_yah(repo, code=5)
+        finally:
+            os.close(lock)
+        self.assertIn(f"a run on this plan is already going in {self.tmp / 'other'}", out)
+        self.assertEqual(self.calls("claude"), [])
+        self.script(claude=[{"commit": True}])
+        self.run_yah(repo, code=9)
+        new = [f for f in self.run_logs() if f.name != "short.log"]
+        self.assertEqual(len(new), 1)
+        # 10 s carried unrounded: at 2 decimals it was 0.00h, and a chain of short runs forgot its hours
+        self.assertIn(f"plan {pid} | before $0.00 and 0.005556h", new[0].read_text("utf-8"))
+
     # ------------------------------------------------------------ auto-merge (exit 8)
 
     def auto(self, cfg=None, **script):
@@ -1268,6 +1311,75 @@ class HelperTests(unittest.TestCase):
                 ok, reason = self.mod.mergeable(run, v)
                 self.assertEqual(ok, not why, reason)
                 self.assertIn(why, reason)
+
+    def test_appetite_is_read_from_the_plans_bet(self):
+        ap = self.mod.appetite
+        cases = [("## Bet\n- appetite: $14 and 1.2h\n", (14.0, 1.2)),
+                 ("# Plan\n## Bet\n- outcome: pay\n- **Appetite:** $7.50\n", (7.5, None)),
+                 ("## Bet\nappetite: 3 hours\n", (None, 3.0)),
+                 ("## Bet\n### Detail\nappetite: $5 and 1h\n", (5.0, 1.0)),
+                 ("## Bet\n```\nappetite: $5 and 1h\n```\n", (None, None)),
+                 ("## Context\nappetite: $5 and 1h\n## Bet\n- outcome: x\n", (None, None)),
+                 ("## Bet\n- outcome: x\n## Decisions\nappetite: $5 and 1h\n", (None, None)),
+                 ("## Bet\nappetite: $0 and 0h\n", (None, None)),
+                 ("# Plan\n### P1 Cart\n", (None, None))]
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d, "plan.md")
+            for text, want in cases:
+                with self.subTest(text):
+                    f.write_text(text, encoding="utf-8")
+                    self.assertEqual(ap(f), want)
+            self.assertEqual(ap(Path(d, "missing.md")), (None, None))
+        self.assertEqual(ap(None), (None, None))
+
+    def test_plan_spend_adds_up_run_logs_and_the_hint_takes_the_median_phase(self):
+        with tempfile.TemporaryDirectory() as d:
+            runs = Path(d)
+            plan = self.mod.plan_id(runs / "plan.md")
+            logs = {"shop-1": [f"2026-09-29 10:00:00 plan {plan} | before $0.00 and 0.00h",
+                               "2026-09-29 10:10:00 critique P1: codex high (GPT, no Claude bar), $0.50, critique-done, x.md",
+                               "2026-09-29 10:20:00 iteration 1: $1.25, 38 turns, progress, HEAD a, NEXT -",
+                               "2026-09-29 10:25:00 critique P2: codex high failed, codex is off: $9 boom",
+                               "2026-09-29 10:30:00 P1 done: PR #1 open and green. Next: P2 on main",
+                               "2026-09-29 11:00:00 iteration 1: $2.25, 40 turns, pr-open #2, HEAD b, NEXT -",
+                               "2026-09-29 11:00:00 stop, exit 0: plan done: P1 PR #1 green, P2 PR #2 green. "
+                               "Cost $3.50 over 2 iterations, plus $0.50 over 1 critic/judge sessions."],
+                    "shop-2": [f"2026-09-29 12:00:00 plan {plan} | before $4.00 and 1.00h",
+                               "2026-09-29 12:30:00 iteration 1: $1.00, 5 turns, blocked x, HEAD c, NEXT -",
+                               "2026-09-29 12:30:00 stop, exit 2: blocked: x Cost $1.00 over 1 iterations."],
+                    "other-1": [f"2026-09-29 13:00:00 plan {plan}x | before $99.00 and 9.00h",
+                                "2026-09-29 13:10:00 iteration 1: $8.00, 5 turns, progress, HEAD d, NEXT -"],
+                    "old-1": ["2026-09-20 09:00:00 iteration 1: $3.00, 5 turns, pr-open #5, HEAD e, NEXT -",
+                              "2026-09-20 09:30:00 stop, exit 0: PR #5 is open and green. The merge is yours."]}
+            for name, lines in logs.items():
+                (runs / f"{name}.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            spent = self.mod.plan_spend(runs, plan)
+            self.assertAlmostEqual(spent[0], 5.0)
+            self.assertAlmostEqual(spent[1], 1.5)
+            (runs / "shop-1.log").unlink()  # pruned: the newest log on the plan still holds its spend
+            self.assertEqual(self.mod.plan_spend(runs, plan), spent)
+            self.assertEqual(self.mod.plan_spend(runs, ""), (0.0, 0.0))
+            (runs / "shop-1.log").write_text("\n".join(logs["shop-1"]) + "\n", encoding="utf-8")
+            # a phase: shop-1 $2 and 0.5h (two phases), old-1 $3 and 0.5h; shop-2 and other-1 finished none
+            self.assertEqual(self.mod.appetite_hint(runs, 2), "$5 and 1h")
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(self.mod.appetite_hint(Path(d), 2), "$14 and 1.2h")  # no run finished a phase
+
+    def test_prune_keeps_the_newest_log_on_each_plan(self):
+        with tempfile.TemporaryDirectory() as d:
+            runs, keep = Path(d), self.mod.KEEP_RUNS
+            names = ["plan-old", "plan-new"] + [f"other-{i:02}" for i in range(keep)]
+            for i, name in enumerate(names):  # oldest first: the plan's two logs fall past KEEP_RUNS
+                head = f"2026-09-29 10:{i:02}:00 plan /p.md | before $1.00 and 0.10h" if name.startswith("plan") \
+                    else f"2026-09-29 10:{i:02}:00 iteration 1: $1.00, 5 turns, progress, HEAD a, NEXT -"
+                f = runs / f"{name}.log"
+                f.write_text(head + "\n", encoding="utf-8")
+                os.utime(f, (1_000_000 + i, 1_000_000 + i))
+            self.mod.prune(runs)
+            left = {p.stem for p in runs.glob("*.log")}
+            self.assertIn("plan-new", left)  # its spend chain: exit 9 would forget the plan's spend without it
+            self.assertNotIn("plan-old", left)
+            self.assertEqual(len(left), keep + 1)
 
 
 if __name__ == "__main__":

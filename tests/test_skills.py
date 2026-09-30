@@ -349,6 +349,21 @@ class AutoTests(unittest.TestCase):
         self.assertIn("never restart it unasked", rows[stopped])
         self.assertNotIn("**Start the run", rows[stopped])
 
+    def test_an_appetite_stop_asks_continue_shrink_or_drop(self):
+        rows, spent = self.rows(), self.row("The RUN line says the run `ended` with exit 9")
+        self.assertLess(spent, self.row("A plan with an open phase"))  # else the open phase reruns it unasked
+        row = rows[spent]
+        self.assertIn("never rerun it unasked", row)
+        self.assertIn("ask: continue, shrink or drop", row)
+        self.assertIn('scripts/run.py" --plan --dry-run`', row)  # its bet line holds the spend so far
+        self.assertIn("--appetite-hint <open phases>", row)
+        self.assertIn("  - Decided: appetite raised to", row)
+        self.assertIn("under `## Follow-ups`", row)
+        self.assertIn("the plan file stays", row)
+        tools = self.meta["allowed-tools"]
+        for py in ("python3", "python", "py -3"):
+            self.assertIn(f"Bash({py} *scripts/run.py* --plan --dry-run)", tools)
+
     def test_needs_human_writes_the_answer_into_next_then_starts_the_run(self):
         row = self.rows()[self.row("NEXT starts with `NEEDS-HUMAN:`")]
         self.assertIn("Ask that question as it is", row)
