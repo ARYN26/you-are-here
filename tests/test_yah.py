@@ -411,9 +411,11 @@ class RolesTests(Base):
         lib = self.lib()
         self.assertEqual({name: lib.role(name) for name in lib.ROLES},
                          {"main": ("opus", "high"), "scout": ("sonnet", "low"), "mechanical": ("opus", "medium"),
-                          "judge": ("opus", "high"), "critic": ("fable", "high"), "review_fallback": ("opus", "high")})
+                          "judge": ("opus", "high"), "critic": ("fable", "high"), "review_fallback": ("opus", "high"),
+                          "premium": ("fable", "high")})
         self.assertEqual(lib.role("nope"), ("opus", "high"))  # an unknown role gets main's
         self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
+        self.assertEqual(lib.config()["catch_up_pct"], 20)
         self.assertIs(lib.config()["ultracode"], False)
 
     def test_codex_moves_only_the_critic_to_gpt(self):
@@ -423,6 +425,18 @@ class RolesTests(Base):
         lib = self.lib(codex=True, roles={"critic": "opus xhigh"})  # the user's own critic wins
         self.assertEqual(lib.role("critic"), ("opus", "xhigh"))
         self.assertEqual(self.lib(codex=True, roles={"critic": "medium"}).role("critic"), ("codex", "medium"))
+        self.assertEqual(self.lib(codex=True).role("premium"), ("fable", "high"))  # catch-up's model is Claude's
+
+    def test_premium_and_catch_up_are_the_users_to_change(self):
+        lib = self.lib(roles={"premium": "opus xhigh"}, catch_up_pct="30")
+        self.assertEqual(lib.role("premium"), ("opus", "xhigh"))
+        self.assertEqual(lib.config()["catch_up_pct"], 30)
+        self.assertEqual(self.lib(catch_up_pct="lots").config()["catch_up_pct"], 20)
+
+    def test_bump_is_one_effort_step_up(self):
+        lib = self.lib()
+        self.assertEqual([lib.bump(e) for e in ("low", "medium", "high", "xhigh")], ["medium", "high", "xhigh", "xhigh"])
+        self.assertEqual(lib.bump("max"), "max")  # outside EFFORTS: left as is
 
     def test_user_roles_merge_one_at_a_time(self):
         lib = self.lib(roles={"critic": "opus high"}, critic_week_skip_pct=60, ultracode=True)
@@ -437,7 +451,7 @@ class RolesTests(Base):
         self.assertEqual({name: lib.role(name) for name in lib.ROLES},
                          {"critic": ("opus", "high"), "judge": ("sonnet", "high"), "scout": ("sonnet", "low"),
                           "main": ("haiku", "high"), "mechanical": ("opus", "medium"),
-                          "review_fallback": ("opus", "high")})
+                          "review_fallback": ("opus", "high"), "premium": ("fable", "high")})
         self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
         self.assertIs(lib.config()["ultracode"], False)
         self.assertEqual(self.lib(roles="fable max").role("critic"), ("fable", "high"))
