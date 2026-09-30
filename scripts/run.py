@@ -441,9 +441,10 @@ def week_usage(r):
 
 
 def pace_state(r):
-    """The week's reading for this turn, at the top of evaluate so every critique, build and judge sees a fresh
-    one: r.used, r.pace, r.gap (pace - used) and r.hours_left (None when unknown). With the quality profile on, r.catch_up is
-    pace - used >= catch_up_pct; each flip is told once. With it off, catch-up is never computed."""
+    """The week's reading for this turn, at the top of evaluate and again after a checks wait, so every critique,
+    build, judge and stop rule sees a fresh one: r.used, r.pace, r.gap (pace - used) and r.hours_left (None when
+    unknown). With the quality profile on, r.catch_up is pace - used >= catch_up_pct; each flip is told once. With it
+    off, catch-up is never computed."""
     usage = week_usage(r)
     r.used, pace, at = usage or (None, None, None)
     r.pace = None if pace is None else num(pace, None)
@@ -501,6 +502,7 @@ def evaluate(r, wait=True):
             return 6, f"PR #{r.pr} is {state.lower()}."
         if state == "OPEN":
             r.checks, cr = checks(r, wait), changes_requested(view)
+            pace_state(r)  # checks can wait run_checks_wait_minutes: the stop rules read the week after it
             phase_done = r.target.startswith("#") or r.phase is None or r.phase.get("status") == "closed"
             if r.checks in ("pass", "none") and not cr and phase_done and not r.findings:
                 return 0, f"PR #{r.pr} is open and green. The merge is yours."

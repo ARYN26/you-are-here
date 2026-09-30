@@ -86,6 +86,9 @@ if role == "gh":
         print(json.dumps(step(ref if ref in script else "view")))
     elif args[:2] in (["pr", "checks"], ["pr", "diff"]):
         c = step("required" if "--required" in args else args[1])
+        for path, text in c.get("write", []):  # e.g. another session's limits.json while checks are pending
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
         sys.stdout.write(c.get("out", ""))
         sys.stderr.write(c.get("err", ""))
         sys.exit(c.get("rc", 0))
@@ -423,6 +426,16 @@ class RunTests(unittest.TestCase):
         out = self.run_yah(self.repo(), "#12", code=0)
         self.assertIn("checks pending", out)
         self.assertEqual(len([a for a in self.calls("gh") if "--required" in a]), 3)
+        self.assertEqual(self.calls("claude"), [])
+
+    def test_the_weekly_stop_reads_the_week_after_a_checks_wait(self):
+        # 79% before the wait, 81% once another session wrote limits.json: the stop sees 81, not the cached 79
+        now = time.time()
+        self.week(79, 7)
+        lim = {"ts": now, "seven_day": {"used_pct": 81, "resets_at": now + 7 * 3600}}
+        self.script(view=[view()], required=[{"rc": 8, "write": [[str(self.data / "limits.json"), json.dumps(lim)]]},
+                                             {"rc": 1, "out": "ci\tfail\t1m\turl\n"}])
+        self.assertIn("weekly usage 81% is at or over", self.run_yah(self.repo(), "#12", code=7))
         self.assertEqual(self.calls("claude"), [])
 
     def test_no_required_checks_falls_back_and_no_checks_pass(self):
