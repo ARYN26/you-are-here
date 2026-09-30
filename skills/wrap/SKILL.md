@@ -38,7 +38,7 @@ Edit the file at `store.path`, or create it if it does not exist. In a linked wo
 - A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Mark one being worked on `[~]`. Delete finished ones; the commit or PR is their record.
 - Delete a `## Plan:` section whose phases are all `[x]` once none of their PRs is open (`gh pr view <N> --json state`). The plan file and the PRs keep its history, and the file the model reads each session stays short.
 - A step only the user can do (a review, a merge, a console step) ends with `(you)`, and names the command that does it when there is one, ready to paste in a terminal: `Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user.
-- Keep only the 5 newest dated entries; delete older ones. Leave anything else in the file alone.
+- Keep only the 5 newest dated entries; delete older ones. Leave anything else in the file alone, above all the `AIM:` line under the `#` title: never move, reword or delete it.
 
 ## 2b. Beads: rewrite the phase bead's notes
 

@@ -126,6 +126,16 @@ You decide at the start; the rest runs without you.
 
 `yah shop here` opts out at the start: an open phase runs in the session through `/yah:start`, as in the daily loop. Its `/yah:wrap` still hands the rest of the plan to a run.
 
+## Aim and bets
+
+yah asks why before it spends a run, in at most three questions. A tiny task skips all three, and a given task or a NEXT skips the first two.
+
+1. **The aim**, once per project, when there is no plan and nothing to continue: "Who is this project primarily for, and what should it help them accomplish?" Claude drafts 2-3 answers as job stories, `Help [primary user] [outcome] when [situation]`, from the README's first 40 lines and the PROD line only. The answer goes into STATE.md as `AIM: <sentence>` under its title, and shows at every session start and in `/yah:where`. Decline it and yah writes `AIM: none` and never asks again.
+2. **The pick**, each time there is no plan and no NEXT: `/yah:auto` ranks the `## Follow-ups` against the AIM in impact (H/M/L) and effort (S/M/L) buckets, judged only from each item's own text and quoting the words each rests on. A blocker comes first; an item whose effort the text does not give becomes a discovery task, never a guess. You get three rows, `A/B/C | id title | outcome | impact/effort | evidence | done-when`, with A recommended; `auto` takes A, and Other names a new task. With no follow-ups it asks what to build or fix.
+3. **The bet**, in plan mode: the plan file gets a `## Bet` with the outcome (tied to the AIM), non-goals, `appetite: $<X> and <H>h` (from past runs, else $7 and 0.6h a phase) and two `stop if <signal> by <checkpoint>` lines. `/yah:deep` runs a pre-mortem on the plan to find them. The last planning round asks "Is <outcome> worth <appetite>, done when <done-when>, stopping if <stop-ifs>?": run, shrink (cut phases and ask again) or skip (drop the plan). A build session that sees a stop-if fire stops with `NEEDS-HUMAN: stop-if hit: <which>, <evidence>`.
+
+Sources: job stories (Intercom) and Lean Canvas for the aim; coarse impact/effort buckets with quoted evidence in place of RICE or WSJF, which need numbers a backlog line cannot give; Shape Up's appetite, Gary Klein's pre-mortem and Annie Duke's kill criteria for the bet.
+
 ## The brain
 
 Plan state (STATE.md) holds open work and is rewritten every session. Durable facts, such as "Vercel builds production only from main" or "the API rate-limits at 10 rps, batch writes", live nowhere, so each session rediscovers them. The brain is a folder of one-fact notes in your repo, `docs/brain` by default (`brain_dir` in config). It is plain markdown: no database, no embeddings, no MCP server. The folder opens as an Obsidian vault.
@@ -499,6 +509,7 @@ For larger repos:
 - The current phase's NEXT is the `- Next:` line of the newest dated entry. An untracked STATE.md stamps it with a `- At: <sha>` line under it, which `/yah:wrap` writes; a tracked one is stamped by its own last non-merge commit on the branch, so merging the base does not restamp it. Merge commits never count as work NEXT predates. If the phase base is gone (merged and deleted), commits on any other branch are left out instead.
 - In the plan file, a `### P<n>` section may carry an `After it merges:` line and a `Files:` block (`+ path — note` new, `~` changed, `-` removed, `> old -> new` renamed), which the phase map draws: in plan mode under `## Map`, in each phase PR's description (a `<!-- yah:map -->` section that `/yah:wrap` and a run keep up to date), in `/yah:where` and in `/yah:tree`. Both are optional: without an after line the stack shows the phase's done-when, and without a `Files:` block the planned tree comes from paths in bolded bullets. Once a phase has commits, its tree is its branch diff, with the plan's notes kept.
 - Dated entries without a plan section still show as STATE and NEXT.
+- An `AIM: <sentence>` line outside dated sections and code blocks is the project's aim (the first one wins); `/yah:where` and the session-start block show it, and `AIM: none` shows nothing. `/yah:wrap` and `/yah:phases` never move or rewrite it.
 - `/yah:wrap` keeps only the 5 newest dated entries.
 
 ## If you already use beads

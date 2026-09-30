@@ -14,7 +14,7 @@ Run `PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh` and read it
 
 ## STATE.md
 
-Edit the file at `store.path` from the JSON above (in a linked worktree, the main checkout's), or create it if it does not exist. Keep any dated entries. If a `## Plan:` section already names this plan path, replace it; otherwise add one at the top:
+Edit the file at `store.path` from the JSON above (in a linked worktree, the main checkout's), or create it if it does not exist. Keep any dated entries, and keep the `AIM:` line under the `#` title as it is: never move or rewrite it. If a `## Plan:` section already names this plan path, replace it; otherwise add one at the top:
 
 ```markdown
 ## Plan: <plan name> (<plan path>)
