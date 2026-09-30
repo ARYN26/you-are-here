@@ -225,7 +225,7 @@ claude -p "/yah:resume P2 build" --permission-mode auto --permission-prompts non
 | 2 | The last session needs you: it ended in an error (a timeout included), a permission was denied during it, it ended `needs-human` or `blocked`, or it ended without a `YAH-RESULT:` line (usually the plugin was not loaded). Also a failed auto-merge step. The denial or question is printed. |
 | 3 | Stalled: HEAD and NEXT unchanged for 2 iterations in a row. |
 | 4 | The iteration cap, or `run_total_hours` of wall clock. |
-| 7 | Weekly usage at or over `run_week_stop_pct`, or more than `pace_slack` points ahead of pace. |
+| 7 | Weekly usage at or over `run_week_stop_pct`, or more than `pace_slack` points ahead of pace. On the other side of pace, `catch_up_pct` points or more under it, the quality profile's [catch-up](#critic-and-judge-quality-profile) spends the rest of the week instead. |
 | 9 | The plan's spend reached the dollars or the hours of the `appetite:` in its `## Bet`, "appetite reached: $<spent> of $<X>". Checked before every session, critiques and fix slices included, so a restarted run stops before its first one. The judge of an open, green PR still runs. |
 | 5 | Refused: not a git repo, on a trunk or the PROD branch with no TARGET, `claude` not on PATH, `gh` missing, an invalid TARGET, a `P<n>` with no such phase, an unknown or ambiguous project, or no way to name the branch the PR targets (no base in the plan, no open PR, no `origin/HEAD` and no `prod` in config), so it cannot be protected. That last check also runs before each iteration. Also another run already going in this checkout (below), or a start or `--stop` from inside a run's own session (`--dry-run` still works there). |
 | 1, 130 | run.py itself failed, or you pressed Ctrl-C or ran `yah run --stop`. |
@@ -271,18 +271,22 @@ With the [quality profile](#quality-profile) on (`ultracode: true` in config.jso
 
 Each runs once per phase per run, with Edit, Write, NotebookEdit, `git commit` and `git push` denied on top of the DENY list, and under the same push guard, `--max-budget-usd` and `run_iteration_minutes` as a build. No judge runs after a session that stopped for you, since the run stops there anyway, nor once `run_total_hours` has passed. A judge that blocks after a build that ended in an error or without a `YAH-RESULT:` line still gets its fix slice: the PR was green, so that ending stopped nothing. A critique or judge that fails (an error, a timeout, or not the `YAH-RESULT:` line it should end with) is logged as skipped, and the run goes on without it.
 
-**Fable fallback.** Before each one, the run reads the critic model's own weekly bar: the fullest rate-limit pool whose key contains the model name, such as `seven_day_fable`, from the last session's stream, else from `limits.json` if it is under 6 h old. At `critic_week_skip_pct` (50%) or more, the session runs on `roles.judge` (Opus at high effort) instead. A bar it cannot read counts as under, so the critic stays on Fable. To move both off Fable for good, set `roles.critic`.
+**Catch-up.** Before every critique, build and judge, the run reads the week: the same weekly % and pace the exit-7 stop uses, from the last session's stream, else from `limits.json`. A reading past its reset counts as none. When the week is `catch_up_pct` (20) points or more under pace, the pool would go unspent, so the run turns catch-up on and says so once, with the gap and the hours to the reset. In catch-up each build runs one effort step higher (high becomes xhigh) with 1.5 times its `--max-budget-usd` ($15 on max5), since a build at xhigh costs more and a session that ends on its budget stops the run. With a `codex` critic, each phase's critique moves to `roles.premium` (Fable at high effort), even with codex down; the judge stays GPT, because it gates the merge and is the other model family. A Claude critic already spends the pool, so its critique is unchanged. Catch-up turns off, and says so, once the gap closes or the reading goes unknown. With the profile off, nothing changes.
+
+**The critic's bar.** Before each review, a Claude critic reads its model's own weekly pool, such as `seven_day_fable`, if Claude Code ever sends one; today it sends only the weekly bar, so that is the one it reads. At `critic_week_skip_pct` (50%) or more, the session runs on `roles.judge` (Opus at high effort) instead. Only with no reading at all does it log `bar unknown` and run on the critic. To move both off Fable for good, set `roles.critic`.
 
 **GPT critic.** With `codex` on, `roles.critic` defaults to `codex high`, unless you set it yourself. The critique and judge then run as `codex.py review` in a read-only sandbox, not as `/yah:resume` sessions. GPT gets no plan tools, `gh` or network there, so run.py writes its brief to `runs/<run>-P2-critique-brief.md` or `-P2-judge-brief.md`: the phase's plan section and the plan's Decisions, or the PR's diff. They run at `codex_effort` on `codex_model`, have no Claude bar, and log $0, since they spend your ChatGPT plan's weekly allowance instead. A codex call that fails or hits its limit reruns that review on `roles.review_fallback` (Opus at high effort) and turns codex off for the rest of the run. A brief that cannot be built (no plan section, no diff) sends only that one review to `roles.review_fallback`.
 
 **Log lines.** The console shows each one as it starts. The console and the `.log` show how it ended: model and effort, why that model, cost, then its result and file, or why it was skipped:
 
 ```
-[yah] critique P2: /yah:resume P2 critique on fable high (bar unknown)
-[yah] critique P2: fable high (bar unknown), $0.62, critique-done, youarehere-20260926-113655-P2-critique.md
-[yah] judge P2: /yah:resume P2 judge on opus high (fable bar 55%, at or over 50%: roles.judge)
-[yah] judge P2: opus high (fable bar 55%, at or over 50%: roles.judge), $1.10, judge block 2, youarehere-20260926-113655-P2-judge.md
-[yah] judge P3: fable high (fable bar 12%), $0.40, skipped: it ended with YAH-RESULT: blocked dirty tree
+[yah] catch-up on: 44 pts under pace (52% used, 96% of the week gone, 7h to reset): builds at xhigh with a $15 budget, critique on fable high
+[yah] critique P2: /yah:resume P2 critique on fable high (catch-up: 44 pts under pace)
+[yah] critique P2: fable high (catch-up: 44 pts under pace), $0.62, critique-done, youarehere-20260926-113655-P2-critique.md
+[yah] iteration 1: $1.25, 38 turns, opus xhigh, progress, HEAD 5c591ee, NEXT P2: ...
+[yah] judge P2: /yah:resume P2 judge on opus high (week 55%, at or over 50%: roles.judge)
+[yah] judge P2: opus high (week 55%, at or over 50%: roles.judge), $1.10, judge block 2, youarehere-20260926-113655-P2-judge.md
+[yah] judge P3: fable high (week 40%), $0.40, skipped: it ended with YAH-RESULT: blocked dirty tree
 [yah] critique P4: codex.py review on codex high (GPT, no Claude bar)
 [yah] critique P4: codex high (GPT, no Claude bar), $0.00, critique-done, youarehere-20260926-113655-P4-critique.md
 ```
@@ -354,9 +358,9 @@ The quality profile has Opus do the work at high effort with ultracode on, and g
 - `ultracode: true` in `settings.json`, so every session starts with it on;
 - `workflowSizeGuideline: "medium"`, so workflows stay under 10 agents;
 - `ultracode: true` in yah's `config.json`, which turns on the profile:
-  - **Once per session:** questions, single-file edits and small reviews stay in the main thread. A workflow is only for genuinely parallel work, with one agent per independent unit, and the model and effort for lookups, mechanical stages, and research and judges come from `roles`. The critic's model stays out of workflows. Before a Workflow call, Claude gives one line with its agent count and rough $ cost. A workflow reuses one schema across its agents and passes on the branch and PROD rules. One verifier per finding, and reports of 1,500 characters or fewer.
+  - **Once per session:** questions, single-file edits and small reviews stay in the main thread. A workflow is only for genuinely parallel work, with one agent per independent unit, and the model and effort for lookups, mechanical stages, and research and judges come from `roles`. `roles.premium` and a Claude critic stay out of workflows unless a workflow role uses the same model. Before a Workflow call, Claude gives one line with its agent count and rough $ cost. A workflow reuses one schema across its agents and passes on the branch and PROD rules. One verifier per finding, and reports of 1,500 characters or fewer.
   - **When weekly use runs ahead of pace:** keep workflows under 5 agents, and suggest `/effort high` for work that is not parallel. Changing effort does not rewrite the cache.
-  - **In `yah run`:** child sessions start with `--effort` from `roles.main`, and its model unless you pass `--model`. Each phase gets one critique of its plan before the build and one merge-blocker judge on its green PR, on `roles.critic`. When the critic model's own weekly bar is at `critic_week_skip_pct` (50%) or more, both run on `roles.judge` instead. See [Critic and judge](#critic-and-judge-quality-profile). With the profile off, `yah run` passes no `--effort` and runs no critic or judge.
+  - **In `yah run`:** child sessions start with `--effort` from `roles.main`, and its model unless you pass `--model`. Each phase gets one critique of its plan before the build and one merge-blocker judge on its green PR, on `roles.critic`. When the critic's weekly bar is at `critic_week_skip_pct` (50%) or more, both run on `roles.judge` instead. When the week is `catch_up_pct` (20) points or more under pace, catch-up builds one effort step higher with a bigger budget and, with a GPT critic, puts each critique on `roles.premium`. See [Critic and judge](#critic-and-judge-quality-profile). With the profile off, `yah run` passes no `--effort` and runs no critic or judge.
 
 **Roles** are `"model effort"` strings in `config.json`:
 
@@ -368,6 +372,7 @@ The quality profile has Opus do the work at high effort with ultracode on, and g
 | `judge` | `opus high` | research and judges in workflows; the critic and judge when the critic's bar is high |
 | `critic` | `fable high`, or `codex high` with codex on | `yah run`'s per-phase critique and judge |
 | `review_fallback` | `opus high` | a GPT critique or judge whose codex call failed |
+| `premium` | `fable high` | the critique in [catch-up](#critic-and-judge-quality-profile) with a GPT critic; kept out of workflows; codex leaves it alone |
 
 Set only the role you want to change: `{"roles": {"critic": "opus high"}}` moves the critic and judge off Fable. Effort must be low, medium, high or xhigh; `max`, junk or a missing value falls back to that role's default. `/yah:deep` stays on Fable either way, because its agent file pins the model.
 
@@ -547,8 +552,10 @@ yah never needs beads, and beads shows nothing STATE.md does not. A repo that al
 | `premium_models` | Model ids or names that get a red tag in the statusline and a once-per-session nudge. |
 | `auto_merge` | Default `false`. Set by `setup.py --auto-merge`. Only a JSON `true` turns it on; then `yah run` merges a green phase PR it opened. See [auto-merge](#auto-merge-opt-in). |
 | `ultracode` | Default `false`. Set by `setup.py --ultracode`; only a JSON `true` turns it on. Turns on the [quality profile](#quality-profile): the once-per-session workflow sizing rule, the pace nudge toward smaller workflows, and in `yah run` the `--effort`, critic and judge. |
-| `roles` | `"model effort"` per job: `main`, `scout`, `mechanical`, `judge`, `critic` and `review_fallback`. Set only the roles you change; the rest keep their defaults (see the [roles table](#quality-profile)). Effort is low, medium, high or xhigh; `max` or junk falls back to the role's default. |
-| `critic_week_skip_pct` | Default 50. With the profile on, when the critic model's own weekly bar is at this % or more, `yah run`'s critic and judge run on `roles.judge` instead. A `codex` critic has no Claude bar and ignores it. |
+| `roles` | `"model effort"` per job: `main`, `scout`, `mechanical`, `judge`, `critic`, `review_fallback` and `premium`. Set only the roles you change; the rest keep their defaults (see the [roles table](#quality-profile)). Effort is low, medium, high or xhigh; `max` or junk falls back to the role's default. |
+| `critic_week_skip_pct` | Default 50. With the profile on, when the critic's weekly bar (its model's own pool if Claude Code sends one, else the week) is at this % or more, `yah run`'s critic and judge run on `roles.judge` instead. With a `codex` critic, only catch-up changes the model. |
+| `catch_up_pct` | Default 20. With the profile on, when the week is this many points or more under pace, `yah run` goes into [catch-up](#critic-and-judge-quality-profile): builds one effort step higher with 1.5 times the budget and, with a `codex` critic, each critique on `roles.premium`. Junk falls back to 20. |
+| `roles.premium` | Default `fable high`. The model catch-up spends and the workflow sizing rule keeps out of workflows. Codex does not change it. |
 | `codex` | Default `false`. Set by `setup.py --codex` once a signed-in codex CLI answers a smoke call; only a JSON `true` turns it on. Turns on `/yah:gpt` and makes GPT the default `roles.critic`. See [Claude + GPT](#claude--gpt). |
 | `codex_model` | Default `gpt-6.1-sol`. The model every codex call passes with `-m`. |
 | `codex_effort` | Default `high`. Passed as `-c model_reasoning_effort` on every codex call, since Codex's own default for Sol is low. |

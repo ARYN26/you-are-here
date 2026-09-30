@@ -312,7 +312,8 @@ class GuardTests(Base):
         ctx = r["hookSpecificOutput"]["additionalContext"]
         self.assertTrue(ctx.startswith("[yah] Ultracode is on."))
         for want in ("lookups on sonnet at low effort", "mechanical stages on opus at medium",
-                     "research and judges on opus at high", "Keep fable out of workflows", "/yah:deep",
+                     "research and judges on opus at high",
+                     "Keep fable out of workflows: yah run's reviews and /yah:deep only.",
                      "agent count and rough $ cost", "one schema", "branch and PROD rules", "One verifier per finding",
                      "1,500 characters"):
             self.assertIn(want, ctx)
@@ -321,13 +322,16 @@ class GuardTests(Base):
         self.assertIsNone(self.guard(sid="u1"))
         self.config(ultracode=True, roles={"critic": "mythos high", "scout": "haiku max"})
         ctx = self.guard(sid="u3")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Keep mythos out of workflows", ctx)
+        self.assertIn("Keep fable and mythos out of workflows: yah run's reviews and /yah:deep only.", ctx)
         self.assertIn("lookups on haiku at low effort", ctx)  # max is refused: the role's default effort
-        self.assertNotIn("fable", ctx)
         self.config(ultracode=True, roles={"critic": "opus xhigh"})  # the critic shares a workflow model
-        self.assertNotIn("out of workflows", self.guard(sid="u4")["hookSpecificOutput"]["additionalContext"])
-        self.config(ultracode=True, codex=True)  # GPT critiques: no Claude model to keep out
-        self.assertNotIn("out of workflows", self.guard(sid="u5")["hookSpecificOutput"]["additionalContext"])
+        ctx = self.guard(sid="u4")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Keep fable out of workflows", ctx)  # roles.premium is still catch-up's
+        self.assertNotIn("opus out of workflows", ctx)
+        self.config(ultracode=True, codex=True)  # GPT critiques; roles.premium stays Claude's
+        self.assertIn("Keep fable out of workflows", self.guard(sid="u5")["hookSpecificOutput"]["additionalContext"])
+        self.config(ultracode=True, roles={"premium": "opus high", "critic": "opus xhigh"})  # all workflow models
+        self.assertNotIn("out of workflows", self.guard(sid="u6")["hookSpecificOutput"]["additionalContext"])
         self.state("u2", week=60, pace=30, tokens=1000)
         ctx = self.guard(sid="u2")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("under 5 agents", ctx)
