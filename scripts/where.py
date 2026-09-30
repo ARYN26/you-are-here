@@ -148,8 +148,8 @@ def md_scan(lines):
         ml = md_line(ln)
         if ml:
             items.append((n, len(heads) - 1 if heads else None, ml))
-        elif AIM.match(ln):
-            aims.append((n, len(heads) - 1 if heads else None, AIM.match(ln).group(1)))
+        elif aim := AIM.match(ln):
+            aims.append((n, len(heads) - 1 if heads else None, aim.group(1)))
         elif ln.strip() and not ln.startswith("#"):
             prose.append(ln.strip())
     return heads, items, prose, aims
@@ -229,17 +229,13 @@ def state_md(top, main_root=None):
 
         dated = [i for i, (_, h) in enumerate(heads) if re.match(r"\d{4}-\d{2}-\d{2}", h)]
         plans = [i for i, (_, h) in enumerate(heads) if re.match(r"Plan:", h, re.I)]
-        lead = {}  # a plan section's phase indent: its least indented checkbox lines are the phases
-        for _, sec, ml in items:
-            if sec in plans:
-                lead[sec] = min(lead.get(sec, ml[4]), ml[4])
-        phase_lines = {n for n, sec, ml in items if sec in lead and ml[4] == lead[sec]}
-        rest = [(n, ml) for n, _, ml in items if n not in phase_lines]
         follow = [i for i, (_, h) in enumerate(heads) if re.fullmatch(r"follow[- ]?ups?", h, re.I)]
-        lead_fu = {}  # a follow-up's sub-tasks are part of it, not candidates of their own
+        lead = {}  # a section's least indented checkbox lines: a plan's phases, or the follow-ups (not their sub-tasks)
         for _, sec, ml in items:
-            if sec in follow:
-                lead_fu[sec] = min(lead_fu.get(sec, ml[4]), ml[4])
+            if sec in plans or sec in follow:
+                lead[sec] = min(lead.get(sec, ml[4]), ml[4])
+        phase_lines = {n for n, sec, ml in items if sec in plans and ml[4] == lead[sec]}
+        rest = [(n, ml) for n, _, ml in items if n not in phase_lines]
         out: dict = {**empty_state(), "file": name, "path": str(f), "head": "", "next": "", "at": "",
                      "human": [{"id": f"{name}:{n}", "title": ml[1]} for n, _, ml in items
                                if ml[0] != "closed" and ml[3]],
@@ -248,7 +244,7 @@ def state_md(top, main_root=None):
                      "open_count": sum(1 for _, ml in rest if ml[0] == "open" and not ml[3]),
                      "aim": next((a for _, sec, a in aims if a and sec not in dated), None),
                      "followups": [{"id": f"{name}:{n}", "title": ml[1]} for n, sec, ml in items
-                                   if sec in lead_fu and ml[4] == lead_fu[sec] and ml[0] == "open" and not ml[3]]}
+                                   if sec in follow and ml[4] == lead[sec] and ml[0] == "open" and not ml[3]]}
         if dated:
             i = max(dated, key=lambda j: heads[j][1][:10])  # the newest date, whatever the order
             nxt = re.search(r"^- Next:\s*(.+(?:\n(?!- )\s+.+)*)", body(i), re.M)
