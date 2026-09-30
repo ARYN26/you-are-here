@@ -60,7 +60,9 @@ no line or a part not above 0: no limit on it). Before every session, critiques 
 spend is checked against it: the dollars and hours of the runs before this one plus this run's sessions and time
 so far. Reaching either stops with exit 9. The judge of an open, green PR still runs, since it guards the merge.
 Each run's log starts with `plan <file> | before $<X> and <H>h`, the plan's spend before it, so the newest log on a
-plan holds its whole spend even after older logs are pruned. A log with no plan line (runs before this) counts for
+plan holds its whole spend even after older logs are pruned. One run at a time per plan, across checkouts (a
+lock on runs/plan-<hash>.lock), so each run reads the whole spend of the one before it; a second is refused
+(exit 5). A log with no plan line (runs before this) counts for
 no plan. --appetite-hint PHASES prints `$<X> and <H>h` for a plan that size: the median cost and time per finished
 phase over runs/*.log, else $7 and 0.6h a phase.
 
@@ -89,6 +91,7 @@ What a real `claude -p --output-format stream-json --verbose` stream carries (ch
   weekly usage, so the pace check prefers it over limits.json.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -935,6 +938,12 @@ def plan_spend(runs, plan):
     return s["before"][0] + s["cost"], s["before"][1] + s["hours"]
 
 
+def plan_lock(runs, plan):
+    """runs/plan-<hash>.lock: one run per plan file across checkouts and worktrees, so a run's `before` is the whole
+    spend of the runs before it, never a copy a concurrent run on the plan also starts from."""
+    return Path(runs) / ("plan-" + hashlib.sha1(plan.encode("utf-8")).hexdigest()[:12] + ".lock")
+
+
 def over_appetite(r):
     """Exit 9 once the plan's spend (runs before this one, plus this run's sessions and time) reaches the dollars or
     the hours of its `## Bet` appetite. No Bet or no appetite: no limit."""
@@ -1177,6 +1186,15 @@ def busy(st):
             f", since {since}, log {st.get('log', '?')}. Let it finish, or end it with `yah run --stop`.")
 
 
+def plan_busy(r, st, pidf):
+    st = st or {}
+    if st.get("top") and os.path.normcase(str(st["top"])) == os.path.normcase(str(r.top)):
+        return busy(run_state(pidf) or st)
+    return (f"a run on this plan is already going in {st.get('top', 'another checkout')}: pid {st.get('pid', '?')}, "
+            f"log {st.get('log', '?')}. One run at a time per plan keeps its spend (the ## Bet appetite) whole. "
+            "Let it finish, or end it there with `yah run --stop`.")
+
+
 def stop_run(pidf):
     """--stop: end the checkout's run and everything under it, then write its exit code for the RUN line."""
     st = run_state(pidf)
@@ -1396,12 +1414,19 @@ def main():
     r.log = Path(f"{stem}.log")
     info = {"pid": os.getpid(), "stem": str(stem), "started": int(time.time()), "top": r.top, "branch": branch,
             "target": r.label or target, "plan": a.plan, "log": str(r.log), "out": f"{stem}.out" if child else ""}
+    plock = plan_lock(runs, plan_id(r.plan_file)) if r.plan_file else None
+    held = hold_run(plock, info) if plock else None  # held for the life of the run, like the checkout's lock
+    if plock and held is None:
+        return refuse(plan_busy(r, read_json(plock), pidf))
     hold = hold_run(pidf, info)
     if hold is None:
+        if held is not None:
+            os.close(held)
         return refuse(busy(run_state(pidf)))
     r.log.touch()
-    if r.plan_file:  # what the next run on this plan reads as spent before it
-        log(r, f"plan {plan_id(r.plan_file)} | before ${r.before[0]:.2f} and {r.before[1]:.2f}h")
+    if r.plan_file:  # read again under the plan's lock: what the next run on this plan reads as spent before it
+        r.before = plan_spend(runs, plan_id(r.plan_file))  # hours unrounded: a rounded carry drops short runs
+        log(r, f"plan {plan_id(r.plan_file)} | before ${r.before[0]:.2f} and {r.before[1]:.6f}h")
     prune(runs)
     try:
         while True:

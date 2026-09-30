@@ -646,13 +646,38 @@ class RunTests(unittest.TestCase):
         out = self.run_yah(repo, code=9)
         self.assertIn("appetite reached: $0.50 of $0.4.", out)  # $0.25 a session: the third never starts
         self.assertEqual(len(self.calls("claude")), 2)
-        self.assertIn(f"plan {os.path.normcase(str(plan.resolve()))} | before $0.00 and 0.00h",
+        self.assertIn(f"plan {os.path.normcase(str(plan.resolve()))} | before $0.00 and 0.000000h",
                       self.run_logs()[-1].read_text("utf-8"))
         self.script(claude=[{"commit": True}])
         self.assertIn("bet     appetite $0.4 and 5h, spent $0.50", self.run_yah(repo, "--dry-run", code=0))
         self.assertIn("appetite reached: $0.50 of $0.4.", self.run_yah(repo, code=9))  # the earlier run counts
         self.assertEqual(self.calls("claude"), [])
         self.assertIn("$14 and 1.2h", self.run_yah(repo, "--appetite-hint", "2", code=0))  # no run finished a phase
+
+    def test_one_run_per_plan_and_short_runs_keep_their_hours(self):
+        repo = self.repo()
+        plan = repo / "docs" / "plans" / "checkout.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Checkout\n\n## Bet\n- appetite: $0.10\n\n### P2 Payment form\n", encoding="utf-8")
+        pid, runs = os.path.normcase(str(plan.resolve())), self.data / "runs"
+        runs.mkdir(parents=True)
+        (runs / "short.log").write_text(f"2026-09-29 10:00:00 plan {pid} | before $0.00 and 0.002778h\n"
+                                        "2026-09-29 10:00:10 stop, exit 2: blocked: x\n", encoding="utf-8")
+        HelperTests.setUpClass()
+        lock = yahlib.hold_run(HelperTests.mod.plan_lock(runs, pid), {"pid": 1, "top": str(self.tmp / "other")})
+        try:  # a run on the plan in another checkout: a second would start from the same spend and lose one
+            self.script(claude=[{"commit": True}])
+            out = self.run_yah(repo, code=5)
+        finally:
+            os.close(lock)
+        self.assertIn(f"a run on this plan is already going in {self.tmp / 'other'}", out)
+        self.assertEqual(self.calls("claude"), [])
+        self.script(claude=[{"commit": True}])
+        self.run_yah(repo, code=9)
+        new = [f for f in self.run_logs() if f.name != "short.log"]
+        self.assertEqual(len(new), 1)
+        # 10 s carried unrounded: at 2 decimals it was 0.00h, and a chain of short runs forgot its hours
+        self.assertIn(f"plan {pid} | before $0.00 and 0.005556h", new[0].read_text("utf-8"))
 
     # ------------------------------------------------------------ auto-merge (exit 8)
 
