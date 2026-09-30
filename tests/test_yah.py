@@ -739,6 +739,43 @@ class WhereTests(Base):
                          [("P1", "in_progress"), ("P2", "open")])
         self.assertEqual(sm["open_count"], 1)
 
+    def test_state_md_aim_and_followups(self):
+        """`AIM:` outside fences and dated sections, first non-empty one wins; followups are the open top-level
+        lines under `## Follow-ups` that do not wait on you, in file order, fences skipped."""
+        w = load_where()
+        text = ("# Shop\n\n~~~\nAIM: Help a fenced example\n~~~\nAIM:\nAIM: Help shoppers pay when they are on mobile\n"
+                "AIM: Help a second aim\n\n## Follow-ups\n- [ ] Update the README\n  - [ ] a sub-task\n"
+                "```\n- [ ] fenced example\n```\n- [x] Old thing\n- [ ] Rotate the keys (you)\n- [~] Fix the flaky test\n"
+                "* [ ] Bump the deps | effort S\n\n## Notes\n- [ ] not a follow-up\n\n## 2026-09-23\n- Next: Ship it.\n")
+        (self.tmp / "STATE.md").write_text(text, encoding="utf-8")
+        sm = w.state_md(self.tmp)
+        self.assertEqual(sm["aim"], "Help shoppers pay when they are on mobile")
+        self.assertEqual(sm["followups"], [{"id": "STATE.md:11", "title": "Update the README",
+                                            "text": "Update the README"},
+                                           {"id": "STATE.md:19", "title": "Bump the deps",
+                                            "text": "Bump the deps | effort S"}])  # Q2's evidence survives the split
+        self.assertEqual(sm["next"], "Ship it.")
+        dated = "# Shop\n\n## 2026-09-23\nAIM: Help from a dated entry\n- Next: Ship it.\n"
+        (self.tmp / "STATE.md").write_text(dated, encoding="utf-8")
+        sm = w.state_md(self.tmp)
+        self.assertEqual((sm["aim"], sm["followups"]), (None, []))  # a dated entry is a log, never the AIM
+        (self.tmp / "STATE.md").write_text("# Shop\nAIM: Help devs ship when tired\n\nFix the login\n", encoding="utf-8")
+        self.assertEqual(w.state_md(self.tmp)["next"], "Fix the login")  # the AIM is not a plan-less NEXT
+
+    def test_aim_line_in_the_views(self):
+        aimed = STATE_YOU.replace("# Shop\n\n", "# Shop\nAIM: Help shoppers pay when they are on mobile\n")  # same ids
+        brief = self.where(self.state_repo(aimed, name="aimed"), "--brief").splitlines()
+        plain = self.where(self.state_repo(name="plain"), "--brief").splitlines()
+        self.assertEqual(brief[1:], ["AIM Help shoppers pay when they are on mobile"] + plain[1:])  # [0]: the key
+        full = self.where(self.tmp / "aimed").splitlines()
+        self.assertEqual(full[1], "AIM     Help shoppers pay when they are on mobile")
+        s = json.loads(self.where(self.tmp / "aimed", "--json"))["state_md"]
+        self.assertEqual((s["aim"], s["followups"]), ("Help shoppers pay when they are on mobile", []))
+        for text, name in ((STATE_YOU, "plain"), (STATE_YOU.replace("# Shop\n", "# Shop\nAIM: none\n"), "declined")):
+            repo = self.tmp / name if name == "plain" else self.state_repo(text, name=name)
+            self.assertNotIn("AIM", self.where(repo, "--brief") + self.where(repo))  # no AIM, or declined: nothing
+        self.assertEqual(json.loads(self.where(self.tmp / "declined", "--json"))["state_md"]["aim"], "none")
+
     def test_state_md_plan_without_running_phase(self):
         text = "## Plan: Emails\n- [x] P1 Templates\n- [ ] P2 Sending\n\n## 2026-09-23\n- Next: Pick a mail provider.\n"
         out = self.where(self.repo({"STATE.md": text}))

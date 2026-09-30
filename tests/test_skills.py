@@ -450,6 +450,48 @@ class AutoTests(unittest.TestCase):
         self.assertIn("Never merge a PR yourself", self.body)
         self.assertIn("Only the run driver merges, and only when `auto_merge` is on", self.body)
 
+    def test_q1_asks_the_aim_once_right_before_the_pick(self):
+        rows, aim, empty = self.rows(), self.row("No AIM"), self.row("No plan and no NEXT")
+        self.assertEqual(aim + 1, empty)  # only where nothing says what to do: never before a task or a NEXT
+        self.assertLess(self.row("A task was given"), aim)
+        self.assertIn("`none` included", rows[aim])  # the block hides `AIM: none`, so --json decides
+        self.assertIn("read the table again", rows[aim])
+        q1 = self.body[self.body.index("**Q1, the aim**"):self.body.index("**Q2, the pick**")]
+        for s in ("`Help [primary user] [outcome] when [situation]`", "README's first 40 lines", "never explore further",
+                  "`AIM: <sentence>`", "file at `store.path`", "Never create a second STATE.md", "`AIM: none`"):
+            self.assertIn(s, q1)
+
+    def test_q2_offers_a_b_c_from_the_follow_ups_and_keeps_the_old_question_without_them(self):
+        row = self.rows()[self.row("No plan and no NEXT")]
+        self.assertIn("`state_md.followups`", row)
+        self.assertLess(row.index("**Q2**"), row.index("nothing to rank. Ask one question"))
+        q2 = self.body[self.body.index("**Q2, the pick**"):self.body.index("## 3. Plan it")]
+        for s in ("own `text`", "impact H/M/L", "effort S/M/L", "words you quote", "`absent`", "never an estimate",
+                  "discovery task", "Never read code or docs to rank",
+                  "`A/B/C | id title | outcome | impact/effort | evidence | done-when`",
+                  "I recommend A; 'auto' lets me choose", "Other for a new task", "Route the pick"):
+            self.assertIn(s, q2)
+
+    def test_every_plan_gets_a_bet_and_ends_with_q3(self):
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        for s in ("`## Bet`", "`appetite: $<X> and <H>h`", "`stop if <signal> by <checkpoint>`",
+                  'scripts/run.py" --appetite-hint <phases>', "$7 and 0.6h a phase", "pre-mortem",
+                  "does not serve the AIM", "run / shrink / skip", "ask Q3 again", "Skip: drop the plan"):
+            self.assertIn(s, plan)
+        self.assertLess(plan.index("`## Bet`"), plan.index("pre-mortem"))  # deep sees the Bet it critiques
+        self.assertLess(plan.index("**Q3**"), plan.index("Then ExitPlanMode"))
+        for py in ("python3", "python", "py -3"):
+            self.assertIn(f"Bash({py} *scripts/run.py* --appetite-hint *)", self.meta["allowed-tools"])
+
+    def test_resume_reads_the_bet_and_stops_on_a_stop_if(self):
+        text = body("resume")
+        self.assertIn("`## Decisions` and `## Bet` sections", text)
+        self.assertIn("`NEEDS-HUMAN: stop-if hit: <which>, <evidence>`", text)
+
+    def test_wrap_and_phases_keep_the_aim_line(self):
+        self.assertIn("never move, reword or delete it", body("wrap"))
+        self.assertIn("never move or rewrite it", body("phases"))
+
 
 class BeadsTests(unittest.TestCase):
     def test_wrap_and_resume_stay_in_this_repo(self):

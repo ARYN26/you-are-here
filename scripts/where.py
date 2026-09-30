@@ -1,7 +1,7 @@
 """where.py: the "you are here" view of a repo, or the project list in the home dir.
 
     where.py              full view, at most 15 lines, then the phase map (stack and the phase's files)
-    where.py --brief      at most 6 lines plus one per plan phase, for the SessionStart hook
+    where.py --brief      at most 6 lines plus one per plan phase and one for the AIM, for the SessionStart hook
     where.py --json       the collected state, for /yah:wrap and /yah:phases
     where.py --cwd DIR    run as if started in DIR
     where.py --path NAME  print a project's path (for the `yah` launcher)
@@ -113,6 +113,7 @@ def clip(text, n=170):
 CHECKBOX = re.compile(r"^(\s*)[-*]\s*\[([ xX~>])\]\s*(.+)$")
 STATUS = {"x": "closed", "~": "in_progress", ">": "in_progress", " ": "open"}
 YOU_MARK = re.compile(r"\s*\(you\)\s*$", re.I)
+AIM = re.compile(r"AIM:\s*(.*?)\s*$")
 
 
 def md_line(ln):
@@ -131,8 +132,9 @@ def md_line(ln):
 def md_scan(lines):
     """The `## ` headings, checkbox lines and other text lines outside code fences, so an example in a fence is
     never a plan or a NEXT. heads: [(line number, heading)]. items: [(line number, the index in heads of its section
-    or None, md_line)]. prose: the stripped lines that are neither, nor any other heading."""
-    heads, items, prose, fence = [], [], [], False
+    or None, md_line)]. prose: the stripped lines that are neither, nor any other heading nor an `AIM:` line.
+    aims: [(line number, the index in heads of its section or None, the AIM text)]."""
+    heads, items, prose, aims, fence = [], [], [], [], False
     for n, ln in enumerate(lines, 1):
         if ln.lstrip().startswith(("```", "~~~")):
             fence = not fence
@@ -146,9 +148,11 @@ def md_scan(lines):
         ml = md_line(ln)
         if ml:
             items.append((n, len(heads) - 1 if heads else None, ml))
+        elif aim := AIM.match(ln):
+            aims.append((n, len(heads) - 1 if heads else None, aim.group(1)))
         elif ln.strip() and not ln.startswith("#"):
             prose.append(ln.strip())
-    return heads, items, prose
+    return heads, items, prose, aims
 
 
 def md_log(lines, n):
@@ -209,32 +213,40 @@ def state_md(top, main_root=None):
     An open or in-progress line marked `(you)` waits on you. A [~] line that is not a phase is work in progress,
     `(you)` or not. An open line that is neither a phase nor `(you)` counts as an open task. Their id is
     file:line, so the model can go straight to it. A linked worktree with neither file reads the main checkout's,
-    as beads does: STATE.md is gitignored, so a new worktree never has one. `path` is the file wrap must edit."""
+    as beads does: STATE.md is gitignored, so a new worktree never has one. `path` is the file wrap must edit.
+    `aim`: the first non-empty `AIM:` line outside dated sections, else None (`none` means the user declined one).
+    `followups`: the open top-level lines under `## Follow-ups` that do not wait on you, in file order. `text` is
+    the whole item, fields after `|` or `·` included, since those are the evidence Q2 ranks on."""
     for f in (d / name for d in repo_dirs(top, main_root) for name in ("STATE.md", "NOW.md")):
         if not f.is_file():
             continue
         name = f.name
         text = f.read_text(encoding="utf-8", errors="replace")
         lines = text.split("\n")
-        heads, items, prose = md_scan(lines)
+        heads, items, prose, aims = md_scan(lines)
 
         def body(i):
             return "\n".join(lines[heads[i][0]:heads[i + 1][0] - 1 if i + 1 < len(heads) else len(lines)])
 
         dated = [i for i, (_, h) in enumerate(heads) if re.match(r"\d{4}-\d{2}-\d{2}", h)]
         plans = [i for i, (_, h) in enumerate(heads) if re.match(r"Plan:", h, re.I)]
-        lead = {}  # a plan section's phase indent: its least indented checkbox lines are the phases
+        follow = [i for i, (_, h) in enumerate(heads) if re.fullmatch(r"follow[- ]?ups?", h, re.I)]
+        lead = {}  # a section's least indented checkbox lines: a plan's phases, or the follow-ups (not their sub-tasks)
         for _, sec, ml in items:
-            if sec in plans:
+            if sec in plans or sec in follow:
                 lead[sec] = min(lead.get(sec, ml[4]), ml[4])
-        phase_lines = {n for n, sec, ml in items if sec in lead and ml[4] == lead[sec]}
+        phase_lines = {n for n, sec, ml in items if sec in plans and ml[4] == lead[sec]}
         rest = [(n, ml) for n, _, ml in items if n not in phase_lines]
         out: dict = {**empty_state(), "file": name, "path": str(f), "head": "", "next": "", "at": "",
                      "human": [{"id": f"{name}:{n}", "title": ml[1]} for n, _, ml in items
                                if ml[0] != "closed" and ml[3]],
                      "in_progress": [{"id": f"{name}:{n}", "title": ml[1]} for n, ml in rest
                                      if ml[0] == "in_progress"],
-                     "open_count": sum(1 for _, ml in rest if ml[0] == "open" and not ml[3])}
+                     "open_count": sum(1 for _, ml in rest if ml[0] == "open" and not ml[3]),
+                     "aim": next((a for _, sec, a in aims if a and sec not in dated), None),
+                     "followups": [{"id": f"{name}:{n}", "title": ml[1],
+                                    "text": CHECKBOX.match(lines[n - 1]).group(3).strip()} for n, sec, ml in items
+                                   if sec in follow and ml[4] == lead[sec] and ml[0] == "open" and not ml[3]]}
         if dated:
             i = max(dated, key=lambda j: heads[j][1][:10])  # the newest date, whatever the order
             nxt = re.search(r"^- Next:\s*(.+(?:\n(?!- )\s+.+)*)", body(i), re.M)
@@ -691,9 +703,14 @@ def render(s, brief=False):
             "/yah:wrap first" if st else ""
     lines = []
 
-    if brief:  # at most 6 lines, plus one per plan phase
+    sm = s["state_md"] or {}
+    aim = sm.get("aim") if (sm.get("aim") or "").lower() != "none" else ""  # `AIM: none`: declined, so not shown
+
+    if brief:  # at most 6 lines, plus one per plan phase and one for the AIM
         warn = f"  ! phase branch is {off_branch}" if off_branch else ""
         lines.append(f"[yah] {s['key']}  branch {branch} ({', '.join([tree] + sync)}){warn}")
+        if aim:
+            lines.append(f"AIM {clip(aim, 160)}")
         swarn = f"  ! {stale}" if stale else ""
         if plan:
             p = phase or nxt_phase
@@ -726,6 +743,8 @@ def render(s, brief=False):
         return lines
 
     lines.append(f"BRANCH  {branch}  {', '.join([tree] + sync)}")
+    if aim:
+        lines.append(f"AIM     {clip(aim)}")
     if plan:
         spec = f"  {Path(plan['spec']).name}" if plan["spec"] else ""
         lines.append(f"PLAN    {clip(plan['title'], 58)}  [{plan['done']}/{plan['total']} done]  {plan['id']}{spec}")

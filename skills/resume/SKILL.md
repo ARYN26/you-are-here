@@ -30,7 +30,7 @@ Run `where.py --json`. Pick the phase: TARGET `P<n>` is the `state.phases` entry
 
 Read what earlier sessions left before you recall:
 - The phase's `log`: its `Done:`, `Tried: <what> failed because <why>` and `Decided: <what> because <why>` lines. Build on them; do not redo a tried approach or reopen a decision unless NEXT says to.
-- The plan file (`state.plan.spec`): only its `## Decisions` section and the section whose heading starts with `### <label>`. Find them with `grep -n "^#"` and read just those line ranges. No spec or no such section: say so in one line and go on.
+- The plan file (`state.plan.spec`): only its `## Decisions` and `## Bet` sections and the section whose heading starts with `### <label>`. Find them with `grep -n "^#"` and read just those line ranges. No spec or no such section: say so in one line and go on.
 
 Then run `brain.py recall --phase "<title>. <NEXT>"` and follow the notes it prints.
 
@@ -60,6 +60,7 @@ Stop the slice as soon as:
 - the step is done
 - a `[yah]` context message says to wrap
 - a decision needs the user (NEXT = `NEEDS-HUMAN: <one question>`)
+- in build, a `stop if <signal> by <checkpoint>` line of the `## Bet` fires: its signal is seen and its checkpoint reached (NEXT = `NEEDS-HUMAN: stop-if hit: <which>, <evidence>`)
 - an action was denied, or the next one would be. Do not work around a denial.
 
 ## 4. Test, then wrap
