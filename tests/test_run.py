@@ -1340,9 +1340,10 @@ class HelperTests(unittest.TestCase):
             "2026-09-28 00:40:00 critique P2: fable high (bar unknown), $1.25, critique-done, a-P2-critique.md\n"
             "2026-09-28 00:45:00 critique P3: fable high failed, codex is off for the rest of this run: x\n"
             "2026-09-28 01:00:00 stop, exit 7: weekly usage 80% Cost $3.50 over 2 iterations.\n", encoding="utf-8")
-        (tmp / "b.log").write_text(  # from before P1: no model on the iteration line, so `?`
+        (tmp / "b.log").write_text(  # from before P1: no model on the iteration line, so `?`, comma or not
             "2026-09-29 10:00:00 iteration 1: $4.00, 20 turns, pr-open #4, HEAD abc1236, NEXT -\n"
-            "2026-09-29 10:05:00 iteration 2: $0.65, 3 turns, opus h\n"  # cut off mid-write
+            "2026-09-29 10:02:00 iteration 2: $0.00, 1 turns, blocked dirty tree, user edits, HEAD a, NEXT -\n"
+            "2026-09-29 10:05:00 iteration 3: $0.65, 3 turns, opus h\n"  # cut off mid-write
             "2026-09-29 10:10:00 judge P4: opus high (fable bar 60%, at or over 50%: roles.judge), $0.40, judge pass\n"
             "2026-09-29 10:20:00 stop, exit 0: PR #4 is open and green.\n", encoding="utf-8")
         (tmp / "c.log").write_text(  # still going: no stop line
@@ -1354,12 +1355,12 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(self.mod.spend(tmp, csv, 2, "2026-09-29").splitlines(), [  # the 27th's catch-up counts
             "day         builds               reviews                           catch-up  stops",
             "2026-09-28  $2.50 (1 opus)       $1.25 (1 codex, 1 fable)          2         7: 1",
-            "2026-09-29  $5.10 (1 ?, 1 opus)  $0.40 (1 opus)                    0         0: 1",
-            "total       $7.60 (2 opus, 1 ?)  $1.65 (1 codex, 1 fable, 1 opus)  2         2 runs, 1 with no stop line",
+            "2026-09-29  $5.10 (2 ?, 1 opus)  $0.40 (1 opus)                    0         0: 1",
+            "total       $7.60 (2 ?, 2 opus)  $1.65 (1 codex, 1 fable, 1 opus)  2         2 runs, 1 with no stop line",
             "", "2026-09-28  wk 45%  pace 40%", "2026-09-29  wk ?  pace ?"])
         one = self.mod.spend(tmp, csv, 1, "2026-09-29")
         self.assertNotIn("2026-09-28", one)
-        self.assertRegex(one, r"total +\$5\.10 \(1 \?, 1 opus\) +\$0\.40 \(1 opus\) +0 +1 run, 1 with no stop line")
+        self.assertRegex(one, r"total +\$5\.10 \(2 \?, 1 opus\) +\$0\.40 \(1 opus\) +0 +1 run, 1 with no stop line")
         self.assertEqual(self.mod.spend(tmp / "none", tmp / "none.csv", 1, "2026-09-29"),
                          "no yah run sessions today\n\nno weekly readings in usage-log.csv today")
 
@@ -1511,6 +1512,18 @@ class HelperTests(unittest.TestCase):
             self.assertIn("plan-new", left)  # its spend chain: exit 9 would forget the plan's spend without it
             self.assertNotIn("plan-old", left)
             self.assertEqual(len(left), keep + 1)
+            # past KEEP_RUNS, a log within KEEP_LOG_DAYS stays for --spend; its session files go
+            young = runs / "young.log"
+            young.write_text("2026-09-29 09:00:00 iteration 1: $1.00, 5 turns, progress, HEAD a, NEXT -\n",
+                             encoding="utf-8")
+            (runs / "young-1.jsonl").write_text("{}\n", encoding="utf-8")
+            os.utime(young, (time.time() - 86400, time.time() - 86400))
+            for p in runs.glob("other-*.log"):
+                os.utime(p, None)  # now: all newer than young
+            self.mod.prune(runs)
+            self.assertTrue(young.exists())
+            self.assertFalse((runs / "young-1.jsonl").exists())
+            self.assertIn("are pruned after", self.mod.spend(runs, runs / "none.csv", self.mod.KEEP_LOG_DAYS + 1))
 
 
 if __name__ == "__main__":

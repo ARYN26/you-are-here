@@ -125,6 +125,7 @@ from yahlib import (NO_WINDOW, bump, config, data_dir, find_git, find_tool, end_
 
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
 KEEP_RUNS = 20
+KEEP_LOG_DAYS = 31  # past KEEP_RUNS, prune keeps a run's .log this long (not its sessions' files) for --spend
 DETACH_WAIT_S = 60  # how long --detach waits for the background run to take its lock
 STOP_WAIT_S = 15  # how long --stop waits for the ended run to let go of its lock
 STOPPED = "ended by yah run --stop."
@@ -150,8 +151,11 @@ SESSION = re.compile(r"^\S+ \S+ (?:iteration \d+: \$(\d+(?:\.\d+)?), \d+ turns|"
                      r"(?:critique|judge) \S+: \S+ \S+ \([^)]*\), \$(\d+(?:\.\d+)?), )")
 PHASE_DONE = re.compile(r"^\S+ \S+ (?:P\d+ done: PR |stop, exit [08]: )")
 # --spend: an iteration line names its model after its turns (`opus xhigh, pr-open #12`); lines from before
-# P1 have only the tag there, so the model is `?`
+# P1 have only the tag there, so the model is `?`. RAN takes a model only in ran_as's shape and never a tag's
+# first word, since an old tag can hold a comma (`blocked dirty tree, user edits`)
 BUILD = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ iteration \d+: \$(\d+(?:\.\d+)?), \d+ turns, (.*?), HEAD ")
+RAN = re.compile(r"(?!(?:progress|phase-done|pr-open|needs-human|blocked|no)\b)([^\s,]+)"
+                 r"(?: (?:low|medium|high|xhigh|max))?, ")
 REVIEW = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ (?:critique|judge) \S+: (\S+) \S+ \([^)]*\), \$(\d+(?:\.\d+)?), ")
 STOP = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ stop, exit (-?\d+): ")
 CATCH_UP = re.compile(r"^\S+ \S+ catch-up (on|off): ")
@@ -1067,8 +1071,8 @@ def spend(runs, usage, days, today=None):
                 row["stops"][int(s[2])] += 1
                 continue
             active = True
-            role, cost, model = (row["build"], b[2], b[3].split(", ")[0].split()[0] if ", " in b[3] else "?") \
-                if b else (row["review"], v[3], v[2])
+            role, cost, model = (row["build"], b[2], (ran := RAN.match(b[3])) and ran[1] or "?") if b \
+                else (row["review"], v[3], v[2])
             role[0] += float(cost)
             role[1][model] += 1
             row["catch"] += on
@@ -1095,6 +1099,8 @@ def spend(runs, usage, days, today=None):
         out = ["  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip() for r in table]
     else:
         out = [f"no yah run sessions {span}"]
+    if days > KEEP_LOG_DAYS:
+        out.append(f"(past the newest {KEEP_RUNS} runs, logs are pruned after {KEEP_LOG_DAYS} days)")
     try:
         csv = Path(usage).read_text("utf-8", errors="replace").splitlines()
     except OSError:  # none yet
@@ -1220,12 +1226,14 @@ def log(r, line):
 
 def prune(runs):
     """Keep the KEEP_RUNS newest runs, plus the newest run on each plan (its spend chain): each .log, its --detach
-    .out and its per-iteration .jsonl files."""
+    .out and its per-iteration .jsonl and .md files. Past those, a .log alone stays KEEP_LOG_DAYS for --spend."""
     try:
         logs = sorted(runs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
         keep = {p for _, p in newest_by_plan(runs).values()}  # each plan's spend chain (exit 9) stays
+        cutoff = time.time() - KEEP_LOG_DAYS * 86400
         for old in [p for p in logs[KEEP_RUNS:] if p not in keep]:
-            for f in [old, old.with_suffix(".out"), *runs.glob(old.stem + "-*.jsonl"), *runs.glob(old.stem + "-*.md")]:
+            for f in [*[old] * (old.stat().st_mtime < cutoff), old.with_suffix(".out"),
+                      *runs.glob(old.stem + "-*.jsonl"), *runs.glob(old.stem + "-*.md")]:
                 f.unlink(missing_ok=True)
     except Exception:
         pass
