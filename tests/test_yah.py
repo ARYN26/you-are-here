@@ -185,6 +185,15 @@ class StatuslineTests(Base):
         rl["seven_day"]["used_percentage"] = 60
         self.assertIn(f"{RED}wk 60%", self.line(rate_limits=rl))
 
+    def test_wk_green_in_catch_up(self):
+        week = {"resets_at": time.time() + 0.4 * WEEK}  # pace 60
+        line = lambda used: self.line(rate_limits={"seven_day": dict(week, used_percentage=used)}).rstrip()
+        self.assertTrue(line(20).endswith(f"{RST}{GREEN}wk 20% (pace 60%){RST}"))
+        self.assertTrue(line(40).endswith(f"{RST}{GREEN}wk 40% (pace 60%){RST}"))  # exactly catch_up_pct under
+        self.assertTrue(line(41).endswith(f"{RST}wk 41% (pace 60%)"))  # plain
+        self.config(catch_up_pct=50)
+        self.assertTrue(line(20).endswith(f"{RST}wk 20% (pace 60%)"))
+
     def test_extra_pools_saved_to_state_and_limits_json(self):
         now = time.time()
         pools = {"seven_day_fable": {"used_percentage": 12, "resets_at": now + 86400},  # a guessed key name
@@ -303,6 +312,62 @@ class GuardTests(Base):
         self.assertIsNone(self.guard(sid="g4"))
         self.state("g5", week=60, pace=30, tokens=1000)
         self.assertIsNone(self.guard(sid="g5"))  # once a day, across sessions
+
+    def test_daily_catch_up_nudge(self):
+        daily = self.data / "guard-daily.json"
+        self.state("c1", week=80, pace=96, tokens=1000)  # 16 points under: not catch-up
+        self.assertIsNone(self.guard(sid="c1"))
+        self.state("c2", week=52, pace=96, tokens=1000)
+        r = self.guard(sid="c2")
+        ctx = r["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(ctx, "[yah] Weekly usage is 52% with 96% of the week gone: 44 points under pace, and what "
+                              "is unspent at the reset is lost. Today: /yah:deep for any hard question and /effort "
+                              "xhigh for work that is not parallel.")  # ultracode off: no workflow clause
+        self.assertEqual(r["systemMessage"], "Weekly 52% vs 96% of the week gone: under pace, spend freely today.")
+        self.assertIsNone(self.guard(sid="c2"))
+        self.state("c3", week=52, pace=96, tokens=1000)
+        self.assertIsNone(self.guard(sid="c3"))  # once a day, across sessions
+        daily.write_text(json.dumps({"catch_up": "2000-01-01"}), encoding="utf-8")
+        self.state("c4", week=76, pace=96, tokens=1000)  # exactly catch_up_pct under: fires; a new day re-arms
+        self.assertIn("20 points under pace", self.guard(sid="c4")["hookSpecificOutput"]["additionalContext"])
+
+        daily.unlink()
+        self.config(catch_up_pct=50)
+        self.state("c5", week=52, pace=96, tokens=1000)
+        self.assertIsNone(self.guard(sid="c5"))
+        self.config(ultracode=True)
+        self.guard(sid="c6")  # c6 has no state: only the ultracode rule
+        self.state("c6", week=52, pace=96, tokens=1000)
+        ctx = self.guard(sid="c6")["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.endswith(", /effort xhigh for work that is not parallel, and workflows up to the size "
+                                     "guideline."))
+        self.assertLess(len(ctx.split()), 60)
+
+        # yah run's own sessions and PostToolUse neither get the nudge nor spend the day's flag
+        daily.unlink()
+        self.config()
+        self.state("c7", week=52, pace=96, tokens=1000)
+        self.env["YAH_PROTECTED"] = "main"
+        self.assertIsNone(self.guard(sid="c7"))
+        del self.env["YAH_PROTECTED"]
+        d = {"session_id": "c7", "hook_event_name": "PostToolUse"}
+        self.assertEqual(self.py("context_guard.py", stdin=json.dumps(d)), ("", "", 0))
+        self.assertFalse(daily.exists())
+        self.assertIn("spend freely", self.guard(sid="c7")["systemMessage"])
+
+    def test_pace_and_catch_up_nudges_each_once_a_day(self):
+        self.state("m1", week=60, pace=30, tokens=1000)  # a morning over pace
+        r = self.guard(sid="m1")["systemMessage"]
+        self.assertIn("run lean today", r)
+        self.assertNotIn("spend freely", r)
+        self.state("m2", week=60, pace=96, tokens=1000)  # an evening under pace, after the reset
+        r = self.guard(sid="m2")["systemMessage"]
+        self.assertIn("spend freely", r)
+        self.assertNotIn("run lean", r)
+        self.state("m3", week=60, pace=30, tokens=1000)
+        self.assertIsNone(self.guard(sid="m3"))
+        self.state("m4", week=60, pace=96, tokens=1000)
+        self.assertIsNone(self.guard(sid="m4"))
 
     def test_ultracode_rules_once_per_session(self):
         self.config(ultracode="true")  # only a JSON true turns it on
