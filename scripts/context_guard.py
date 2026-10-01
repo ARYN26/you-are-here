@@ -156,10 +156,12 @@ def main():
           and event == "UserPromptSubmit" and not os.environ.get("YAH_PROTECTED")):
         daily["catch_up"] = today
         write_json(daily_path, daily)
+        # on Pro, Fable takes extra-usage credits, which the reset does not waste; Claude cannot set its own effort
+        tips = ([] if cfg["tier"] == "pro" else ["/yah:deep for any hard question"]) + [
+            "suggest /effort xhigh for work that is not parallel"] + (["workflows up to the size guideline"] if ultra else [])
+        tips = tips[0] if len(tips) == 1 else ", ".join(tips[:-1]) + (", and " if len(tips) > 2 else " and ") + tips[-1]
         to_claude.append(f"[yah] Weekly usage is {week:.0f}% with {pace}% of the week gone: {pace - week:.0f} points "
-                         "under pace, and what is unspent at the reset is lost. Today: /yah:deep for any hard question"
-                         + (", /effort xhigh for work that is not parallel, and workflows up to the size guideline."
-                            if ultra else " and /effort xhigh for work that is not parallel."))
+                         f"under pace, and what is unspent at the reset is lost. Today: {tips}.")
         to_user.append(f"Weekly {week:.0f}% vs {pace}% of the week gone: under pace, spend freely today.")
 
     write_json(flags_path, flags)

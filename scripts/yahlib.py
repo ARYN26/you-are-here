@@ -92,6 +92,8 @@ def config():
                     "run_checks_wait_minutes", "run_week_stop_pct", "critic_week_skip_pct", "catch_up_pct",
                     "codex_timeout_minutes"):
             cfg[key] = num(cfg[key], DEFAULTS[key])
+        if cfg["catch_up_pct"] <= 0:  # 0 or less would call a week on or over pace catch-up
+            cfg["catch_up_pct"] = DEFAULTS["catch_up_pct"]
         cfg["run_budget_usd"] = num(cfg.get("run_budget_usd"), RUN_BUDGET.get(cfg["tier"], RUN_BUDGET["max5"]))
         cfg["brain_dir"] = str(cfg["brain_dir"] or DEFAULTS["brain_dir"]).strip("/\\")
         cfg["auto_merge"] = cfg["auto_merge"] is True  # merging is opt-in: only a JSON true turns it on

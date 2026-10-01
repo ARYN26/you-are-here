@@ -321,8 +321,8 @@ class GuardTests(Base):
         r = self.guard(sid="c2")
         ctx = r["hookSpecificOutput"]["additionalContext"]
         self.assertEqual(ctx, "[yah] Weekly usage is 52% with 96% of the week gone: 44 points under pace, and what "
-                              "is unspent at the reset is lost. Today: /yah:deep for any hard question and /effort "
-                              "xhigh for work that is not parallel.")  # ultracode off: no workflow clause
+                              "is unspent at the reset is lost. Today: /yah:deep for any hard question and suggest "
+                              "/effort xhigh for work that is not parallel.")  # ultracode off: no workflow clause
         self.assertEqual(r["systemMessage"], "Weekly 52% vs 96% of the week gone: under pace, spend freely today.")
         self.assertIsNone(self.guard(sid="c2"))
         self.state("c3", week=52, pace=96, tokens=1000)
@@ -339,9 +339,14 @@ class GuardTests(Base):
         self.guard(sid="c6")  # c6 has no state: only the ultracode rule
         self.state("c6", week=52, pace=96, tokens=1000)
         ctx = self.guard(sid="c6")["hookSpecificOutput"]["additionalContext"]
-        self.assertTrue(ctx.endswith(", /effort xhigh for work that is not parallel, and workflows up to the size "
-                                     "guideline."))
+        self.assertTrue(ctx.endswith(", suggest /effort xhigh for work that is not parallel, and workflows up to the "
+                                     "size guideline."))
         self.assertLess(len(ctx.split()), 60)
+        daily.unlink()
+        self.config(tier="pro")  # Fable takes extra-usage credits on Pro: no /yah:deep push
+        self.state("c8", week=52, pace=96, tokens=1000)
+        ctx = self.guard(sid="c8")["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.endswith("Today: suggest /effort xhigh for work that is not parallel."))
 
         # yah run's own sessions and PostToolUse neither get the nudge nor spend the day's flag
         daily.unlink()
@@ -501,6 +506,8 @@ class RolesTests(Base):
         self.assertEqual(lib.role("premium"), ("opus", "xhigh"))
         self.assertEqual(lib.config()["catch_up_pct"], 30)
         self.assertEqual(self.lib(catch_up_pct="lots").config()["catch_up_pct"], 20)
+        self.assertEqual(self.lib(catch_up_pct=0).config()["catch_up_pct"], 20)  # 0 or less: catch-up while over pace
+        self.assertEqual(self.lib(catch_up_pct=-5).config()["catch_up_pct"], 20)
 
     def test_bump_is_one_effort_step_up(self):
         lib = self.lib()
