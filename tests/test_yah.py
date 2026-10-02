@@ -312,7 +312,8 @@ class GuardTests(Base):
         ctx = r["hookSpecificOutput"]["additionalContext"]
         self.assertTrue(ctx.startswith("[yah] Ultracode is on."))
         for want in ("lookups on sonnet at low effort", "mechanical stages on opus at medium",
-                     "research and judges on opus at high", "Keep fable out of workflows", "/yah:deep",
+                     "research and judges on opus at high",
+                     "Keep fable out of workflows: yah run's reviews and /yah:deep only.",
                      "agent count and rough $ cost", "one schema", "branch and PROD rules", "One verifier per finding",
                      "1,500 characters"):
             self.assertIn(want, ctx)
@@ -321,13 +322,16 @@ class GuardTests(Base):
         self.assertIsNone(self.guard(sid="u1"))
         self.config(ultracode=True, roles={"critic": "mythos high", "scout": "haiku max"})
         ctx = self.guard(sid="u3")["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Keep mythos out of workflows", ctx)
+        self.assertIn("Keep fable and mythos out of workflows: yah run's reviews and /yah:deep only.", ctx)
         self.assertIn("lookups on haiku at low effort", ctx)  # max is refused: the role's default effort
-        self.assertNotIn("fable", ctx)
         self.config(ultracode=True, roles={"critic": "opus xhigh"})  # the critic shares a workflow model
-        self.assertNotIn("out of workflows", self.guard(sid="u4")["hookSpecificOutput"]["additionalContext"])
-        self.config(ultracode=True, codex=True)  # GPT critiques: no Claude model to keep out
-        self.assertNotIn("out of workflows", self.guard(sid="u5")["hookSpecificOutput"]["additionalContext"])
+        ctx = self.guard(sid="u4")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Keep fable out of workflows", ctx)  # roles.premium is still catch-up's
+        self.assertNotIn("opus out of workflows", ctx)
+        self.config(ultracode=True, codex=True)  # GPT critiques; roles.premium stays Claude's
+        self.assertIn("Keep fable out of workflows", self.guard(sid="u5")["hookSpecificOutput"]["additionalContext"])
+        self.config(ultracode=True, roles={"premium": "opus high", "critic": "opus xhigh"})  # all workflow models
+        self.assertNotIn("out of workflows", self.guard(sid="u6")["hookSpecificOutput"]["additionalContext"])
         self.state("u2", week=60, pace=30, tokens=1000)
         ctx = self.guard(sid="u2")["hookSpecificOutput"]["additionalContext"]
         self.assertIn("under 5 agents", ctx)
@@ -411,9 +415,11 @@ class RolesTests(Base):
         lib = self.lib()
         self.assertEqual({name: lib.role(name) for name in lib.ROLES},
                          {"main": ("opus", "high"), "scout": ("sonnet", "low"), "mechanical": ("opus", "medium"),
-                          "judge": ("opus", "high"), "critic": ("fable", "high"), "review_fallback": ("opus", "high")})
+                          "judge": ("opus", "high"), "critic": ("fable", "high"), "review_fallback": ("opus", "high"),
+                          "premium": ("fable", "high")})
         self.assertEqual(lib.role("nope"), ("opus", "high"))  # an unknown role gets main's
         self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
+        self.assertEqual(lib.config()["catch_up_pct"], 20)
         self.assertIs(lib.config()["ultracode"], False)
 
     def test_codex_moves_only_the_critic_to_gpt(self):
@@ -423,6 +429,18 @@ class RolesTests(Base):
         lib = self.lib(codex=True, roles={"critic": "opus xhigh"})  # the user's own critic wins
         self.assertEqual(lib.role("critic"), ("opus", "xhigh"))
         self.assertEqual(self.lib(codex=True, roles={"critic": "medium"}).role("critic"), ("codex", "medium"))
+        self.assertEqual(self.lib(codex=True).role("premium"), ("fable", "high"))  # catch-up's model is Claude's
+
+    def test_premium_and_catch_up_are_the_users_to_change(self):
+        lib = self.lib(roles={"premium": "opus xhigh"}, catch_up_pct="30")
+        self.assertEqual(lib.role("premium"), ("opus", "xhigh"))
+        self.assertEqual(lib.config()["catch_up_pct"], 30)
+        self.assertEqual(self.lib(catch_up_pct="lots").config()["catch_up_pct"], 20)
+
+    def test_bump_is_one_effort_step_up(self):
+        lib = self.lib()
+        self.assertEqual([lib.bump(e) for e in ("low", "medium", "high", "xhigh")], ["medium", "high", "xhigh", "xhigh"])
+        self.assertEqual(lib.bump("max"), "max")  # outside EFFORTS: left as is
 
     def test_user_roles_merge_one_at_a_time(self):
         lib = self.lib(roles={"critic": "opus high"}, critic_week_skip_pct=60, ultracode=True)
@@ -437,7 +455,7 @@ class RolesTests(Base):
         self.assertEqual({name: lib.role(name) for name in lib.ROLES},
                          {"critic": ("opus", "high"), "judge": ("sonnet", "high"), "scout": ("sonnet", "low"),
                           "main": ("haiku", "high"), "mechanical": ("opus", "medium"),
-                          "review_fallback": ("opus", "high")})
+                          "review_fallback": ("opus", "high"), "premium": ("fable", "high")})
         self.assertEqual(lib.config()["critic_week_skip_pct"], 50)
         self.assertIs(lib.config()["ultracode"], False)
         self.assertEqual(self.lib(roles="fable max").role("critic"), ("fable", "high"))

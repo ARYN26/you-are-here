@@ -19,8 +19,8 @@ deleted unless protected. --plan then goes on, and the next phase builds on that
 
 The quality profile (config.json "ultracode": true) starts builds with --model/--effort from roles.main (a user
 --model replaces only the model). Before a plan phase's first build (no PR, no phase branch on origin) it runs one
-read-only `/yah:resume <label> critique` on roles.critic, or on roles.judge once the critic model's own weekly pool
-is at critic_week_skip_pct. Its answer goes to runs/<stem>-<label>-critique.md, and the next build prompt ends
+read-only `/yah:resume <label> critique` on roles.critic, or on roles.judge once the critic model's bar is at
+critic_week_skip_pct: its own weekly pool if Claude Code sends one, else the weekly bar. Its answer goes to runs/<stem>-<label>-critique.md, and the next build prompt ends
 with critique=<path>. Once a phase's PR is open and green, before auto-merge or exit 0, it runs one read-only
 `/yah:resume <label> judge` on the same model. A `judge block <n>` saves its answer to runs/<stem>-<label>-judge.md
 and runs one `fix-findings findings=<path>` slice, which the iteration cap does not hold back; then the loop goes on
@@ -30,6 +30,9 @@ no Claude bar and $0 logged. run.py writes its brief to runs/<stem>-<name>-<mode
 section and the plan's Decisions, or the PR's diff from gh), since GPT has no plan tools, gh or network there. A
 codex call that fails marks codex down for the rest of the run and reruns that review on roles.review_fallback;
 a brief that cannot be built (no plan section, no diff) sends only that one review to roles.review_fallback.
+Catch-up: while the week is catch_up_pct or more points under pace, each build runs one effort step higher on 1.5 x
+the budget, and with a codex critic each critique runs on roles.premium (Fable high); the judge stays GPT. Each
+iteration line names the build's model: `iteration 1: $1.25, 38 turns, opus xhigh, progress, HEAD ...`.
 
 TARGET is P<n> (a plan phase), #<pr> (a bare PR number works too, since shells treat # as a
 comment) or empty for the current phase, which is pinned at start and passed as P<n>. Each iteration
@@ -110,9 +113,9 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import where  # noqa: E402
-from statusline import week_pace  # noqa: E402
+from statusline import to_epoch, week_pace  # noqa: E402
 from phasemap import HEAD, is_fence  # noqa: E402
-from yahlib import (NO_WINDOW, config, data_dir, find_git, find_tool, end_run, hold_run, num,  # noqa: E402
+from yahlib import (NO_WINDOW, bump, config, data_dir, find_git, find_tool, end_run, hold_run, num,  # noqa: E402
                     project_key, read_branch, read_json, run, run_pid_path, run_state, utf8_stdout, write_run)
 
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
@@ -212,18 +215,24 @@ def command(path, args):
     return [path, *args]
 
 
+CATCH_UP_BUDGET = 1.5  # x --max-budget-usd for a build in catch-up
+
+
 def claude_argv(r, prompt=None, role=None):
     """A build session's argv, or with `role` (model, effort) a read-only critique or judge running `prompt`.
     critique=<path> or findings=<path> goes last: the skill reads the path to the end of the prompt."""
     prompt = prompt or " ".join(x for x in ("/yah:resume", r.target or r.label, r.mode, r.base_arg and "base=" + r.base_arg,
                                             r.critique and "critique=" + r.critique,
                                             r.mode == "fix-findings" and "findings=" + r.findings) if x)
-    argv = [r.claude, "-p", prompt, "--permission-mode", "auto", "--permission-prompts", "none",
-            "--disallowedTools", *r.deny, *(READ_ONLY if role else []), "--max-budget-usd", "{:g}".format(r.budget),
-            "--output-format", "stream-json", "--verbose", "--settings", guard_settings()]
-    # the quality profile (config ultracode) runs roles.main; a user --model replaces only its model
+    # the quality profile (config ultracode) runs roles.main; a user --model replaces only its model. In catch-up
+    # a build runs one effort step higher on CATCH_UP_BUDGET x the budget: the pool it spends is lost at the reset
     model, effort = role or (r.cfg["roles"]["main"].split() if r.cfg["ultracode"] else (None, None))
     model = model if role else r.model or model
+    lift = not role and effort and r.catch_up
+    effort, budget = (bump(effort), r.budget * CATCH_UP_BUDGET) if lift else (effort, r.budget)
+    argv = [r.claude, "-p", prompt, "--permission-mode", "auto", "--permission-prompts", "none",
+            "--disallowedTools", *r.deny, *(READ_ONLY if role else []), "--max-budget-usd", "{:g}".format(budget),
+            "--output-format", "stream-json", "--verbose", "--settings", guard_settings()]
     # the critique or findings file sits in runs/, outside the repo: let the build read it without a prompt
     names_file = not role and r.log is not None and (r.critique or r.mode == "fix-findings")
     return (argv + (["--model", model] if model else []) + (["--effort", effort] if effort else [])
@@ -414,16 +423,48 @@ def fresh_limits(now):
 
 
 def week_usage(r):
-    """(used %, pace %) from the stream's rate_limit_event, else from a limits.json under 6 h old."""
+    """(used %, pace %, reset epoch) from the stream's latest rate_limit_event, else from a limits.json under 6 h
+    old; the epoch may be None. A reading whose reset time has passed is last week's: None, like no reading."""
     now = time.time()
     if r.week:
-        return r.week[0], week_pace(r.week[1], now)
-    lim = fresh_limits(now)
-    wk = lim.get("seven_day") or {}
-    if wk.get("used_pct") is None:
+        used, reset, pace = r.week[0], r.week[1], None
+    else:
+        lim = fresh_limits(now)
+        wk = lim.get("seven_day") or {}
+        if wk.get("used_pct") is None:
+            return None
+        used, reset, pace = num(wk["used_pct"], 0), wk.get("resets_at"), lim.get("pace_pct")
+    at = to_epoch(reset) if reset else None
+    if at is not None and at <= now:
         return None
-    pace = week_pace(wk.get("resets_at"), now)
-    return num(wk["used_pct"], 0), lim.get("pace_pct") if pace is None else pace
+    return used, (pace if at is None else week_pace(reset, now)), at
+
+
+def pace_state(r):
+    """The week's reading for this turn, at the top of evaluate and again after a checks wait, so every critique,
+    build, judge and stop rule sees a fresh one: r.used, r.pace, r.gap (pace - used) and r.hours_left (None when
+    unknown). With the quality profile on, r.catch_up is pace - used >= catch_up_pct; each flip is told once. With it
+    off, catch-up is never computed."""
+    usage = week_usage(r)
+    r.used, pace, at = usage or (None, None, None)
+    r.pace = None if pace is None else num(pace, None)
+    r.gap = None if r.used is None or r.pace is None else r.pace - r.used
+    r.hours_left = None if at is None else max(0.0, (at - time.time()) / 3600)
+    if not r.cfg["ultracode"]:
+        return
+    gap = r.gap
+    on = gap is not None and gap >= r.cfg["catch_up_pct"]
+    if on == r.catch_up:
+        return
+    r.catch_up = on
+    if not on:
+        tell(r, "catch-up off: " + ("pace unknown" if gap is None else f"{gap:.0f} pts under pace"))
+        return
+    effort = r.cfg["roles"]["main"].split()[1]
+    crit = r.cfg["roles"]["critic"].split()[0] == "codex"
+    tell(r, f"catch-up on: {gap:.0f} pts under pace ({r.used:.0f}% used, {r.pace:.0f}% of the week gone"
+         f"{to_reset(r)}): builds at {bump(effort)} with a ${r.budget * CATCH_UP_BUDGET:g} budget, critique "
+         + ("on " + r.cfg["roles"]["premium"] if crit else "unchanged"))
 
 
 def needs_you(r):
@@ -449,6 +490,7 @@ def evaluate(r, wait=True):
     """The stop rules, first match wins: (exit code, reason), or (None, "") to run again.
     Also sets r.mode for the next iteration."""
     r.mode, r.checks, r.view = "build", "", None
+    pace_state(r)
     if r.pr and r.gh:
         view = r.view = pr_view(r)
         state = r.pr_state = str((view or {}).get("state") or "").upper()
@@ -460,6 +502,7 @@ def evaluate(r, wait=True):
             return 6, f"PR #{r.pr} is {state.lower()}."
         if state == "OPEN":
             r.checks, cr = checks(r, wait), changes_requested(view)
+            pace_state(r)  # checks can wait run_checks_wait_minutes: the stop rules read the week after it
             phase_done = r.target.startswith("#") or r.phase is None or r.phase.get("status") == "closed"
             if r.checks in ("pass", "none") and not cr and phase_done and not r.findings:
                 return 0, f"PR #{r.pr} is open and green. The merge is yours."
@@ -479,14 +522,13 @@ def evaluate(r, wait=True):
     code, reason = over_appetite(r)
     if code:
         return code, reason
-    usage = week_usage(r)
-    if usage is None:
+    if r.used is None:
         if not r.pace_logged:
             say("[yah] pace unknown: no rate-limit event yet and no fresh limits.json")
             log(r, "pace unknown")
             r.pace_logged = True
         return None, ""
-    used, pace = usage
+    used, pace = r.used, r.pace
     stop, slack = r.cfg["run_week_stop_pct"], r.cfg["pace_slack"]
     if used >= stop:
         return 7, f"weekly usage {used:.0f}% is at or over run_week_stop_pct ({stop:g}%)."
@@ -496,6 +538,11 @@ def evaluate(r, wait=True):
 
 
 # ---------------------------------------------------------------- auto-merge (config auto_merge, off by default)
+
+def to_reset(r):
+    """`, 7h to reset` for a catch-up message, or nothing when the reset time is unknown."""
+    return "" if r.hours_left is None else f", {r.hours_left:.0f}h to reset"
+
 
 def tell(r, line):
     say("[yah] " + line)
@@ -716,11 +763,18 @@ def iterate(r):
         r.findings = ""  # one slice; the loop goes on as usual
     say(f"[yah] iteration {r.n}/{r.cap}: {argv[2]}")
     it = session(r, argv, f"{r.total}", r.n)
+    it["ran"] = ran_as(argv)
     m = re.match(r"pr-open\s+#?(\d+)", it["tag"], re.I)
     if m:
         r.pr = int(m.group(1))
     r.cost += it["cost"]
     return it
+
+
+def ran_as(argv):
+    """The model and effort a session's argv names, e.g. `opus xhigh`; `default` with no --model."""
+    flag = lambda f: argv[argv.index(f) + 1] if f in argv else None  # noqa: E731
+    return " ".join(x for x in (flag("--model") or "default", flag("--effort")) if x)
 
 
 def session(r, argv, name, n=0):
@@ -778,20 +832,26 @@ def pool_used(r, model):
     return max(hits) if hits else None
 
 
-def review_role(r):
-    """(model, effort, why) for a critique or judge: roles.critic, or roles.judge once the critic model's own
-    weekly bar is at critic_week_skip_pct. A bar that cannot be read counts as under. A codex critic is GPT, at
-    config codex_effort with no Claude bar; with codex off, or down after a failed call, roles.review_fallback."""
+def review_role(r, mode):
+    """(model, effort, why) for a `mode` (critique or judge) review. A codex critic is GPT, at config codex_effort
+    with no Claude bar; with codex off, or down after a failed call, roles.review_fallback. In catch-up its
+    critique, never its judge, runs on roles.premium: the judge gates auto-merge and stays the other model family.
+    A Claude critic runs as roles.critic, or roles.judge once its bar is at critic_week_skip_pct: its model's own
+    weekly pool when Claude Code sends one, else the weekly bar; with neither it runs ("bar unknown")."""
     model, effort = r.cfg["roles"]["critic"].split()
     if model == "codex":
+        if mode == "critique" and r.catch_up:
+            model, effort = r.cfg["roles"]["premium"].split()
+            return model, effort, f"catch-up: {r.gap:.0f} pts under pace"
         if r.cfg["codex"] and not r.codex_down:
             return model, r.cfg["codex_effort"], "GPT, no Claude bar"
         model, effort = r.cfg["roles"]["review_fallback"].split()
         return model, effort, ("codex down" if r.cfg["codex"] else "codex off") + ": roles.review_fallback"
-    used, skip = pool_used(r, model), r.cfg["critic_week_skip_pct"]
+    pool, skip = pool_used(r, model), r.cfg["critic_week_skip_pct"]
+    used = r.used if pool is None else pool
     if used is None:
         return model, effort, "bar unknown"
-    why = f"{model} bar {used:.0f}%"
+    why = f"{model} bar {used:.0f}%" if pool is not None else f"week {used:.0f}%"
     if used < skip:
         return model, effort, why
     model, effort = r.cfg["roles"]["judge"].split()
@@ -1013,7 +1073,7 @@ def review(r, target, mode, name, verdict):
     match, that path). A failed codex call marks codex down for the rest of the run and reruns on
     roles.review_fallback; a brief that cannot be built (a plan with no spec file, gh pr diff failing) sends only
     that review there. An error or another tag is logged as skipped: (None, "")."""
-    model, effort, why = review_role(r)
+    model, effort, why = review_role(r, mode)
     it = None
     if model == "codex":
         say(f"[yah] {mode} {name}: codex.py review on {model} {effort} ({why})")
@@ -1025,7 +1085,7 @@ def review(r, target, mode, name, verdict):
         elif it["is_error"]:
             r.codex_down = True
             tell(r, f"{mode} {name}: {model} {effort} failed, codex is off for the rest of this run: {it['error']}")
-            model, effort, why = review_role(r)
+            model, effort, why = review_role(r, mode)
             it = None
     if it is None:
         argv = claude_argv(r, f"/yah:resume {target} {mode}", (model, effort))
@@ -1261,7 +1321,7 @@ def dry_run(r):
         code, reason = 5, "run refused: " + no_base(r)
     if goes_on(r, code):
         reason += " With --plan, a done phase goes on to the next open one."
-    c, usage = r.cfg, week_usage(r)
+    c = r.cfg
     phase = f"phase {r.label}" if r.label else "no plan phase"
     say("[yah] dry run: nothing is spawned")
     say(f"repo    {r.top}  branch {r.branch}  project {r.key}")
@@ -1281,27 +1341,31 @@ def dry_run(r):
     say(f"deny    {len(r.deny)} patterns")
     for p in r.deny:
         say(f"          {p}")
-    say(f"caps    {r.cap} iterations, ${r.budget:g} per iteration, {c['run_iteration_minutes']:g} min per "
+    lift = f" (${r.budget * CATCH_UP_BUDGET:g} per build in catch-up)" if r.catch_up else ""
+    say(f"caps    {r.cap} iterations, ${r.budget:g} per iteration{lift}, {c['run_iteration_minutes']:g} min per "
         f"iteration, {c['run_total_hours']:g} h total, checks wait {c['run_checks_wait_minutes']:g} min, "
         f"week stop {c['run_week_stop_pct']:g}% or pace + {c['pace_slack']:g}")
     cost, hours = appetite(r.plan_file)
     say("bet     no appetite (no `appetite:` line in the plan's ## Bet): no limit" if cost is None and hours is None
         else "bet     appetite " + " and ".join(x for x in (cost and f"${cost:g}", hours and f"{hours:g}h") if x)
         + f", spent ${r.before[0]:.2f} and {r.before[1]:.1f}h in earlier runs")
-    say("week    pace unknown" if usage is None else f"week    {usage[0]:.0f}% used"
-        + ("" if usage[1] is None else f", pace {num(usage[1], 0):.0f}%"))
+    say("week    pace unknown" if r.used is None else f"week    {r.used:.0f}% used"
+        + ("" if r.pace is None else f", pace {r.pace:.0f}%")
+        + (f", catch-up ({r.gap:.0f} pts under{to_reset(r)})" if r.catch_up else ""))
     am = "on" if c["auto_merge"] else "off"
     if c["auto_merge"] and code == 0 and r.pr_state == "OPEN":  # open and green: what it would do, never doing it
         ok, why = mergeable(r, r.view or {})
         am += f": would merge PR #{r.pr} (merge commit)" if ok else f": would not merge PR #{r.pr}: {why}"
     say(f"merge   auto-merge {am}")
     if c["ultracode"]:
-        model, effort, why = review_role(r)
-        say(f"critic  would critique {r.label} on {model} {effort} ({why}) before its first build"
-            if code is None and wants_critique(r) else
-            f"critic  would judge PR #{r.pr} on {model} {effort} ({why}) before it stops or merges"
-            if code == 0 and wants_judge(r) else
-            "critic  no critique (a PR or a branch on origin, or no plan phase) and no judge (no open, green PR)")
+        if code is None and wants_critique(r):
+            model, effort, why = review_role(r, "critique")
+            say(f"critic  would critique {r.label} on {model} {effort} ({why}) before its first build")
+        elif code == 0 and wants_judge(r):
+            model, effort, why = review_role(r, "judge")
+            say(f"critic  would judge PR #{r.pr} on {model} {effort} ({why}) before it stops or merges")
+        else:
+            say("critic  no critique (a PR or a branch on origin, or no plan phase) and no judge (no open, green PR)")
     say(f"now     would stop, exit {code}: {reason}" if code is not None else
         f"now     would run iteration 1 in MODE {r.mode}" + (f" (checks {r.checks})" if r.checks else ""))
     return 0
@@ -1387,7 +1451,7 @@ def main():
         budget=cfg["run_budget_usd"] if a.budget is None else a.budget,
         pr=int(target[1:]) if target[:1] == "#" else None, label=target if target[:1] == "P" else None,
         phase=None, phases=[], plan_key=None, next="", head="", mode="build", checks="", url="", waiting=False,
-        week=None, pace_logged=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
+        week=None, pace_logged=False, used=None, pace=None, gap=None, hours_left=None, catch_up=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
         chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="",
         pools={}, critiqued=set(), critique="", judged=set(), findings="", review_cost=0.0, reviews=0,
         codex_down=False, spec="", plan_file=None, before=(0.0, 0.0))
@@ -1454,8 +1518,8 @@ def main():
             refresh(r)
             r.stalls = r.stalls + 1 if (r.head, r.next) == before else 0
             it = r.last
-            line = "iteration {}: ${:.2f}, {} turns, {}, HEAD {}, NEXT {}".format(
-                it["n"], it["cost"], it["turns"], it["tag"] or "no YAH-RESULT", r.head, r.next[:80] or "-")
+            line = "iteration {}: ${:.2f}, {} turns, {}, {}, HEAD {}, NEXT {}".format(
+                it["n"], it["cost"], it["turns"], it["ran"], it["tag"] or "no YAH-RESULT", r.head, r.next[:80] or "-")
             tell(r, line)
     except KeyboardInterrupt:
         code, reason = 130, "interrupted."

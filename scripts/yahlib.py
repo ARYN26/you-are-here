@@ -16,15 +16,16 @@ NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 TIERS = {"pro": (100_000, 120_000, 160_000), "max5": (120_000, 150_000, 200_000),
          "max20": (150_000, 200_000, 260_000), "api": (80_000, 100_000, 150_000)}
 # role -> "model effort". config.json "roles" overrides one role at a time: {"roles": {"critic": "opus high"}}.
-# review_fallback runs a yah run critique or judge whose codex (GPT) call failed.
+# review_fallback runs a yah run critique or judge whose codex (GPT) call failed. premium is the model
+# catch-up spends (a codex critic's critique while the week is under pace) and workflows keep out.
 ROLES = {"main": "opus high", "scout": "sonnet low", "mechanical": "opus medium", "judge": "opus high",
-         "critic": "fable high", "review_fallback": "opus high"}
+         "critic": "fable high", "review_fallback": "opus high", "premium": "fable high"}
 EFFORTS = ("low", "medium", "high", "xhigh")  # max is refused everywhere
 DEFAULTS = {"tier": "max5", "pace_slack": 15, "premium_models": ["fable", "mythos"], "recent_days": 14,
             "brain_dir": "docs/brain", "recall_max_chars": 10000,
             "run_iterations": 8, "run_iteration_minutes": 45, "run_total_hours": 6,
             "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "ultracode": False, "auto_merge": False,
-            "roles": {}, "critic_week_skip_pct": 50, "codex": False, "codex_model": "gpt-6.1-sol",
+            "roles": {}, "critic_week_skip_pct": 50, "catch_up_pct": 20, "codex": False, "codex_model": "gpt-6.1-sol",
             "codex_effort": "high", "codex_timeout_minutes": 15}
 # tier -> --max-budget-usd per `yah run` iteration, unless run_budget_usd is set.
 RUN_BUDGET = {"pro": 5, "max5": 10, "max20": 15, "api": 5}
@@ -88,7 +89,8 @@ def config():
         cfg["pace_slack"] = num(cfg["pace_slack"], 15)
         cfg["recent_days"] = num(cfg["recent_days"], 14)
         for key in ("recall_max_chars", "run_iterations", "run_iteration_minutes", "run_total_hours",
-                    "run_checks_wait_minutes", "run_week_stop_pct", "critic_week_skip_pct", "codex_timeout_minutes"):
+                    "run_checks_wait_minutes", "run_week_stop_pct", "critic_week_skip_pct", "catch_up_pct",
+                    "codex_timeout_minutes"):
             cfg[key] = num(cfg[key], DEFAULTS[key])
         cfg["run_budget_usd"] = num(cfg.get("run_budget_usd"), RUN_BUDGET.get(cfg["tier"], RUN_BUDGET["max5"]))
         cfg["brain_dir"] = str(cfg["brain_dir"] or DEFAULTS["brain_dir"]).strip("/\\")
@@ -120,6 +122,11 @@ def role_text(value, default):
     if len(words) > 1 and words[1] in EFFORTS:
         effort = words[1]
     return f"{model} {effort}"
+
+
+def bump(effort):
+    """The next effort step up: high -> xhigh. xhigh stays xhigh; an effort outside EFFORTS comes back as is."""
+    return EFFORTS[min(EFFORTS.index(effort) + 1, len(EFFORTS) - 1)] if effort in EFFORTS else effort
 
 
 def role(name):

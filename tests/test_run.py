@@ -86,6 +86,9 @@ if role == "gh":
         print(json.dumps(step(ref if ref in script else "view")))
     elif args[:2] in (["pr", "checks"], ["pr", "diff"]):
         c = step("required" if "--required" in args else args[1])
+        for path, text in c.get("write", []):  # e.g. another session's limits.json while checks are pending
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
         sys.stdout.write(c.get("out", ""))
         sys.stderr.write(c.get("err", ""))
         sys.exit(c.get("rc", 0))
@@ -404,7 +407,7 @@ class RunTests(unittest.TestCase):
         out = self.run_yah(self.repo(), code=0)
         self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
         self.assertIn("  Bash npm test -- --run", out)
-        self.assertRegex(out, r"iteration 1: \$0\.25, 3 turns, pr-open #12, HEAD [0-9a-f]{7}, NEXT Start P3\.")
+        self.assertRegex(out, r"iteration 1: \$0\.25, 3 turns, default, pr-open #12, HEAD [0-9a-f]{7}, NEXT Start P3\.")
         self.assertIn(GREEN, out)
         log = self.run_logs()[0]
         self.assertIn("iteration 1: $0.25", log.read_text("utf-8"))
@@ -423,6 +426,16 @@ class RunTests(unittest.TestCase):
         out = self.run_yah(self.repo(), "#12", code=0)
         self.assertIn("checks pending", out)
         self.assertEqual(len([a for a in self.calls("gh") if "--required" in a]), 3)
+        self.assertEqual(self.calls("claude"), [])
+
+    def test_the_weekly_stop_reads_the_week_after_a_checks_wait(self):
+        # 79% before the wait, 81% once another session wrote limits.json: the stop sees 81, not the cached 79
+        now = time.time()
+        self.week(79, 7)
+        lim = {"ts": now, "seven_day": {"used_pct": 81, "resets_at": now + 7 * 3600}}
+        self.script(view=[view()], required=[{"rc": 8, "write": [[str(self.data / "limits.json"), json.dumps(lim)]]},
+                                             {"rc": 1, "out": "ci\tfail\t1m\turl\n"}])
+        self.assertIn("weekly usage 81% is at or over", self.run_yah(self.repo(), "#12", code=7))
         self.assertEqual(self.calls("claude"), [])
 
     def test_no_required_checks_falls_back_and_no_checks_pass(self):
@@ -1051,6 +1064,74 @@ class RunTests(unittest.TestCase):
         log = runs.read_text("utf-8")
         self.assertIn("critique P2: codex high (GPT, no Claude bar), $0.00, critique-done, ", log)
         self.assertIn("judge P2: codex high (GPT, no Claude bar), $0.00, judge block 1, ", log)
+
+    def week(self, used, hours_left, **pools):
+        """limits.json with this week's reading; 7 h left is pace 96 (95.8), 40 h is 76 (76.2): off a rounding edge."""
+        now = time.time()
+        self.data.mkdir(exist_ok=True)
+        self.data.joinpath("limits.json").write_text(json.dumps(
+            {"ts": now, "seven_day": {"used_pct": used, "resets_at": now + hours_left * 3600},
+             "pools": {k: {"used_pct": v, "resets_at": now + 86400} for k, v in pools.items()}}), encoding="utf-8")
+
+    def test_catch_up_builds_harder_and_puts_fable_on_the_critique(self):
+        repo, env = self.codex()
+        green = {"required": [{"rc": 0}], "diff": [{"out": "diff --git a/pay.py b/pay.py\n+cents = 0\n"}],
+                 "view-12": [view()], "codex": [{"answer": "YAH-RESULT: judge pass"}],
+                 "critique": [{"tag": "critique-done"}]}
+        self.week(40, 7)  # 56 points under pace; the build's own event takes it to 79%: 17 under, so off
+        self.script(claude=[{"commit": True, "close": True, "tag": "pr-open #12",
+                             "rate": {"utilization": 0.79, "resetsAt": time.time() + 7 * 3600}}], **green)
+        self.assertIn(GREEN, self.run_yah(repo, "P2", env=env, code=0))
+        critique, build = self.calls("claude")
+        self.assertEqual([self.flag(critique, f) for f in ("--model", "--effort", "--max-budget-usd")],
+                         ["fable", "high", "10"])
+        self.assertEqual([self.flag(build, f) for f in ("--model", "--effort", "--max-budget-usd")],
+                         ["opus", "xhigh", "15"])
+        self.assertEqual(len(self.calls("codex")), 1)  # the judge stays GPT
+        log = self.run_logs()[-1].read_text("utf-8")
+        for want in ("catch-up on: 56 pts under pace (40% used, 96% of the week gone, 7h to reset): builds at xhigh "
+                     "with a $15 budget, critique on fable high",
+                     "critique P2: fable high (catch-up: 56 pts under pace), $0.25, critique-done",
+                     "catch-up off: 17 pts under pace",
+                     "judge P2: codex high (GPT, no Claude bar), $0.00, judge pass",
+                     " turns, opus xhigh, pr-open #12, HEAD "):  # the iteration line names the build's model
+            self.assertIn(want, log)
+        for name, used, hours in (("6 under", 70, 40), ("no reading", None, None)):
+            with self.subTest(name):
+                self.clear_run_logs()
+                if used is None:
+                    self.data.joinpath("limits.json").unlink()
+                else:
+                    self.week(used, hours)
+                self.script(claude=[{"tag": "needs-human"}], codex=[{"answer": "YAH-RESULT: critique-done"}])
+                self.run_yah(repo, "P2", env=env, code=2)
+                build = self.calls("claude")[-1]
+                self.assertEqual(len(self.calls("claude")), 1)  # the critique ran on codex
+                self.assertEqual([self.flag(build, f) for f in ("--effort", "--max-budget-usd")], ["high", "10"])
+                log = self.run_logs()[-1].read_text("utf-8")
+                self.assertNotIn("catch-up", log)
+                self.assertIn(" turns, opus high, needs-human, HEAD ", log)
+
+    def test_a_claude_critic_reads_the_weekly_bar_when_no_pool_is_sent(self):
+        self.config(ultracode=True)
+        repo = self.repo()
+        self.script()
+        for (used, pools), why in (((55, {}), "opus high (week 55%, at or over 50%: roles.judge)"),
+                                   ((40, {}), "fable high (week 40%)"),
+                                   ((55, {"seven_day_fable": 12}), "fable high (fable bar 12%)")):
+            with self.subTest(why):
+                self.week(used, 7, **pools)
+                out = self.run_yah(repo, "--dry-run", code=0)
+                self.assertIn(f"critic  would critique P2 on {why} before its first build", out)
+        self.assertIn("week    55% used, pace 96%, catch-up (41 pts under, 7h to reset)", out)  # the last case
+        self.assertIn("caps    8 iterations, $10 per iteration ($15 per build in catch-up), ", out)
+
+    def test_a_reading_past_its_reset_is_no_reading(self):
+        repo = self.repo()
+        self.week(90, -1)  # last week's 90% would stop the run with exit 7
+        self.script(claude=[{"tag": "needs-human"}])
+        self.run_yah(repo, code=2)
+        self.assertIn("pace unknown", self.run_logs()[-1].read_text("utf-8"))
 
     def test_a_failed_codex_review_falls_back_once_and_codex_stays_off(self):
         repo, env = self.codex()

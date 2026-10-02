@@ -16,14 +16,14 @@
 - Never switch model mid-session: it rewrites the whole prompt cache. Changing effort does not.
 
 ## Models and agents
-- Use Fable only through /yah:deep, for a single hard, self-contained question. With the quality profile on, yah run also uses it once per phase as critic and judge, unless codex is on. Never put it in a workflow.
+- Use Fable only through /yah:deep, for a single hard, self-contained question. With the quality profile on, yah run also uses it once per phase: as critic and judge with codex off, or as the critic when the week is under pace (catch-up). Never put it in a workflow.
 - Send rote lookups (where X is, what a file, PR or log says) to the scout agent.
 - Run browser and screenshot work in a subagent, never in the main thread.
 - Use parallel agent workflows only for genuinely parallel work. Size them to the work: one agent per independent unit. Keep reports short.
 
 ## GPT (codex on, setup.py --codex)
 - Send multi-source web research to /yah:gpt research, as a self-contained question. A single lookup stays in Claude.
-- With the quality profile on, GPT critiques and judges yah run's phases, unless config roles.critic names a Claude model. If codex fails, that review reruns on roles.review_fallback.
+- With the quality profile on, GPT critiques and judges yah run's phases, unless config roles.critic names a Claude model; when the week is under pace, Fable takes the critique and GPT keeps the judge. If codex fails, that review reruns on roles.review_fallback.
 - On UI work: /yah:gpt mockup before building, then /yah:gpt critique --url on the running page (375 and 1440 wide). Fix what holds up, and critique once more.
 - A GPT finding is a claim: prove it by reading the code or running a test before fixing it.
 - Never enable the Codex plugin's review gate (`--enable-review-gate`): it loops and burns both plans.
