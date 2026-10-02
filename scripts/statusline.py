@@ -193,7 +193,8 @@ def main():
     if week is not None:
         c = ""
         if pace is not None:
-            c = RED if week > pace + 20 else AMBER if week > pace + 10 else ""
+            c = (RED if week > pace + 20 else AMBER if week > pace + 10
+                 else GREEN if pace - week >= cfg["catch_up_pct"] else "")  # green: catch-up, spend freely
         parts.append(color(f"wk {week:.0f}%" + (f" (pace {pace}%)" if pace is not None else ""), c))
     pools = {}  # any extra pool (e.g. a per-model weekly bar), saved always, shown once it matters
     for key, val in rl.items():

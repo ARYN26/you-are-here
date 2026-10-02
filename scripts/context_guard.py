@@ -4,6 +4,7 @@
   context >= wrap_now    "wrap now"
   premium main model     once per session (config.json premium_models)
   weekly % more than pace_slack points ahead of the week's elapsed share: once a day
+  weekly % catch_up_pct or more points behind it: once a day, its own flag (spend freely; never in yah run's sessions)
   ultracode on (config.json, set by setup.py --ultracode): workflow sizing rules from config roles, once per session
   codex on (config.json, set by setup.py --codex): what goes to GPT, once per session
   a newer yah installed while this session runs the old copy: once per session, until reload
@@ -139,15 +140,29 @@ def main():
         to_user.append("yah was updated: run /reload-plugins (or /exit and restart) to load it.")
 
     week, pace = state.get("week"), state.get("pace")
-    if week is not None and pace is not None and week > pace + cfg["pace_slack"] and daily.get("pace") != today:
-        daily["pace"] = today
+    known = week is not None and pace is not None
+    if known and week > pace + cfg["pace_slack"]:
+        if daily.get("pace") != today:
+            daily["pace"] = today
+            write_json(daily_path, daily)
+            to_claude.append(f"[yah] Weekly usage is {week:.0f}% with {pace}% of the week gone. " + (
+                "Keep workflows under 5 agents with low effort for mechanical stages; for work that is not parallel, "
+                "suggest /effort high for the rest of this session. Keep sessions short." if ultra else
+                "Prefer effort high over xhigh, avoid large parallel agent fan-outs unless the work is genuinely "
+                "parallel, and keep sessions short."))
+            to_user.append(f"Weekly {week:.0f}% vs {pace}% of the week gone: run lean today.")
+    # yah run's own sessions (YAH_PROTECTED) already catch up through the run, so they neither get nor spend it
+    elif (known and pace - week >= cfg["catch_up_pct"] and daily.get("catch_up") != today
+          and event == "UserPromptSubmit" and not os.environ.get("YAH_PROTECTED")):
+        daily["catch_up"] = today
         write_json(daily_path, daily)
-        to_claude.append(f"[yah] Weekly usage is {week:.0f}% with {pace}% of the week gone. " + (
-            "Keep workflows under 5 agents with low effort for mechanical stages; for work that is not parallel, "
-            "suggest /effort high for the rest of this session. Keep sessions short." if ultra else
-            "Prefer effort high over xhigh, avoid large parallel agent fan-outs unless the work is genuinely "
-            "parallel, and keep sessions short."))
-        to_user.append(f"Weekly {week:.0f}% vs {pace}% of the week gone: run lean today.")
+        # on Pro, Fable takes extra-usage credits, which the reset does not waste; Claude cannot set its own effort
+        tips = ([] if cfg["tier"] == "pro" else ["/yah:deep for any hard question"]) + [
+            "suggest /effort xhigh for work that is not parallel"] + (["workflows up to the size guideline"] if ultra else [])
+        tips = tips[0] if len(tips) == 1 else ", ".join(tips[:-1]) + (", and " if len(tips) > 2 else " and ") + tips[-1]
+        to_claude.append(f"[yah] Weekly usage is {week:.0f}% with {pace}% of the week gone: {pace - week:.0f} points "
+                         f"under pace, and what is unspent at the reset is lost. Today: {tips}.")
+        to_user.append(f"Weekly {week:.0f}% vs {pace}% of the week gone: under pace, spend freely today.")
 
     write_json(flags_path, flags)
     out = {}
