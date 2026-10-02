@@ -4,6 +4,7 @@
             [--model M] [--plugin-dir DIR] [--detach]
     yah run --stop [--cwd DIR | --project NAME]
     yah run --appetite-hint PHASES
+    yah run --spend [DAYS]
 
 --plan goes on past exit 0: once a phase's PR is open and green (or merged) and the phase is closed, it
 pins the next open phase and runs that, until none is left ("plan done", exit 0). The iteration cap is per
@@ -67,7 +68,9 @@ plan holds its whole spend even after older logs are pruned. One run at a time p
 lock on runs/plan-<hash>.lock), so each run reads the whole spend of the one before it; a second is refused
 (exit 5). A log with no plan line (runs before this) counts for
 no plan. --appetite-hint PHASES prints `$<X> and <H>h` for a plan that size: the median cost and time per finished
-phase over runs/*.log, else $7 and 0.6h a phase.
+phase over runs/*.log, else $7 and 0.6h a phase. --spend [DAYS] (default 7) prints the last DAYS days of run spend
+by day, builds and reviews apart and by model, with sessions in catch-up and stop codes, then usage-log.csv's
+weekly trend. Both are read-only: no lock, no plan, and allowed inside a run's own session.
 
 Logs go to <data dir>/runs/. The driver writes nothing inside the repo. Each run holds a lock on
 runs/<project>-<hash>.pid (<project>-<hash>@<worktree>.pid in a linked worktree), a JSON file with its pid, target, log and,
@@ -107,6 +110,8 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -120,6 +125,7 @@ from yahlib import (NO_WINDOW, bump, config, data_dir, find_git, find_tool, end_
 
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
 KEEP_RUNS = 20
+KEEP_LOG_DAYS = 31  # past KEEP_RUNS, prune keeps a run's .log this long (not its sessions' files) for --spend
 DETACH_WAIT_S = 60  # how long --detach waits for the background run to take its lock
 STOP_WAIT_S = 15  # how long --stop waits for the ended run to let go of its lock
 STOPPED = "ended by yah run --stop."
@@ -144,6 +150,16 @@ PLAN_LINE = re.compile(r"^\S+ \S+ plan (.+) \| before \$(\d+(?:\.\d+)?) and (\d+
 SESSION = re.compile(r"^\S+ \S+ (?:iteration \d+: \$(\d+(?:\.\d+)?), \d+ turns|"
                      r"(?:critique|judge) \S+: \S+ \S+ \([^)]*\), \$(\d+(?:\.\d+)?), )")
 PHASE_DONE = re.compile(r"^\S+ \S+ (?:P\d+ done: PR |stop, exit [08]: )")
+# --spend: an iteration line names its model after its turns (`opus xhigh, pr-open #12`); lines from before
+# P1 have only the tag there, so the model is `?`. RAN takes a model only in ran_as's shape and never a tag's
+# first word, since an old tag can hold a comma (`blocked dirty tree, user edits`)
+BUILD = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ iteration \d+: \$(\d+(?:\.\d+)?), \d+ turns, (.*?), HEAD ")
+RAN = re.compile(r"(?!(?:progress|phase-done|pr-open|needs-human|blocked|no)\b)([^\s,]+)"
+                 r"(?: (?:low|medium|high|xhigh|max))?, ")
+REVIEW = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ (?:critique|judge) \S+: (\S+) \S+ \([^)]*\), \$(\d+(?:\.\d+)?), ")
+STOP = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ stop, exit (-?\d+): ")
+CATCH_UP = re.compile(r"^\S+ \S+ catch-up (on|off): ")
+DAY = re.compile(r"^\d{4}-\d\d-\d\d$")
 NO_TAG = "session ended without a YAH-RESULT line; is the yah plugin loaded? (--plugin-dir)"
 NO_BASE = ("cannot tell which branch {} targets: no base in the plan, no open PR for {}, no origin/HEAD and no "
            "prod in config.json, so it cannot be protected. Set base in the plan (`| base <branch>` on the STATE.md "
@@ -1025,6 +1041,76 @@ def appetite_hint(runs, phases):
     return f"${math.ceil(cost * phases - 1e-9)} and {math.ceil(hours * phases * 10 - 1e-9) / 10:g}h"
 
 
+def spend(runs, usage, days, today=None):
+    """--spend: the run spend of the `days` days up to `today` (local dates, as the logs stamp them), one row per
+    day with any session or stop: builds and reviews by model, sessions in catch-up, stop codes. Each log is read
+    whole, so a session inherits catch-up from an earlier day's `catch-up on:`. Then usage-log.csv's rows in range."""
+    today = today or time.strftime("%Y-%m-%d")
+    end = date.fromisoformat(today)  # calendar arithmetic: no DST or negative-epoch trouble for a large `days`
+    first = (end - timedelta(days=min(days - 1, end.toordinal() - 1))).isoformat()
+    keep = lambda d: first <= d <= today  # noqa: E731
+    rows, unstopped = {}, 0
+    for path in sorted(Path(runs).glob("*.log")):
+        try:
+            lines = path.read_text("utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        on = stopped = active = False
+        for ln in lines:
+            if m := CATCH_UP.match(ln):
+                on = m[1] == "on"
+                continue
+            b, v, s = BUILD.match(ln), REVIEW.match(ln), STOP.match(ln)
+            stopped = stopped or bool(s)
+            m = b or v or s
+            if not m or not keep(m[1]):
+                continue
+            row = rows.setdefault(m[1], dict(build=[0.0, Counter()], review=[0.0, Counter()], catch=0,
+                                             stops=Counter()))
+            if s:
+                row["stops"][int(s[2])] += 1
+                continue
+            active = True
+            role, cost, model = (row["build"], b[2], (ran := RAN.match(b[3])) and ran[1] or "?") if b \
+                else (row["review"], v[3], v[2])
+            role[0] += float(cost)
+            role[1][model] += 1
+            row["catch"] += on
+        unstopped += active and not stopped
+
+    def cell(role):
+        by = sorted(role[1].items(), key=lambda x: (-x[1], x[0]))
+        return f"${role[0]:.2f} ({', '.join(f'{n} {m}' for m, n in by)})" if by else "-"
+
+    def total(key):
+        return [sum(r[key][0] for r in rows.values()), sum((r[key][1] for r in rows.values()), Counter())]
+
+    table = [["day", "builds", "reviews", "catch-up", "stops"]]
+    for d in sorted(rows):
+        row = rows[d]
+        table.append([d, cell(row["build"]), cell(row["review"]), str(row["catch"]),
+                      ", ".join(f"{c}: {n}" for c, n in sorted(row["stops"].items())) or "-"])
+    span = f"in the last {days} days" if days > 1 else "today"
+    if rows:
+        n = sum(sum(r["stops"].values()) for r in rows.values())
+        table.append(["total", cell(total("build")), cell(total("review")), str(sum(r["catch"] for r in rows.values())),
+                      f"{n} run{'s' * (n != 1)}" + (f", {unstopped} with no stop line" if unstopped else "")])
+        widths = [max(len(r[i]) for r in table) for i in range(5)]
+        out = ["  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip() for r in table]
+    else:
+        out = [f"no yah run sessions {span}"]
+    if days > KEEP_LOG_DAYS:
+        out.append(f"(past the newest {KEEP_RUNS} runs, logs are pruned after {KEEP_LOG_DAYS} days)")
+    try:
+        csv = Path(usage).read_text("utf-8", errors="replace").splitlines()
+    except OSError:  # none yet
+        csv = []
+    pct = lambda x: x + "%" if x else "?"  # noqa: E731
+    trend = [f"{c[0]}  wk {pct(c[3])}  pace {pct(c[4])}" for c in (ln.split(",") for ln in csv)
+             if len(c) >= 5 and DAY.match(c[0]) and keep(c[0])]
+    return "\n".join(out + [""] + (trend or [f"no weekly readings in usage-log.csv {span}"]))
+
+
 def review_brief(r, mode):
     """(brief, error) for a codex critique or judge: GPT reads the repo, but gets no plan tool, gh or network,
     so run.py hands it the phase's plan section or the PR's diff."""
@@ -1140,12 +1226,14 @@ def log(r, line):
 
 def prune(runs):
     """Keep the KEEP_RUNS newest runs, plus the newest run on each plan (its spend chain): each .log, its --detach
-    .out and its per-iteration .jsonl files."""
+    .out and its per-iteration .jsonl and .md files. Past those, a .log alone stays KEEP_LOG_DAYS for --spend."""
     try:
         logs = sorted(runs.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
         keep = {p for _, p in newest_by_plan(runs).values()}  # each plan's spend chain (exit 9) stays
+        cutoff = time.time() - KEEP_LOG_DAYS * 86400
         for old in [p for p in logs[KEEP_RUNS:] if p not in keep]:
-            for f in [old, old.with_suffix(".out"), *runs.glob(old.stem + "-*.jsonl"), *runs.glob(old.stem + "-*.md")]:
+            for f in [*[old] * (old.stat().st_mtime < cutoff), old.with_suffix(".out"),
+                      *runs.glob(old.stem + "-*.jsonl"), *runs.glob(old.stem + "-*.md")]:
                 f.unlink(missing_ok=True)
     except Exception:
         pass
@@ -1390,11 +1478,18 @@ def main():
                     "return once it has started")
     ap.add_argument("--appetite-hint", type=int, metavar="PHASES", help="print a `$<X> and <H>h` appetite for a "
                     "plan of PHASES phases, from past runs")
+    ap.add_argument("--spend", type=int, nargs="?", const=7, metavar="DAYS", help="print the run spend of the last "
+                    "DAYS days (default 7) by day and role, then the weekly trend")
     ap.add_argument("--stop", action="store_true", help="end the run going in this checkout, and every process "
                     "under it")
     a = ap.parse_args()
     if a.appetite_hint is not None:  # read-only, so a session may ask too
         say(appetite_hint(data_dir() / "runs", max(1, a.appetite_hint)))
+        return 0
+    if a.spend is not None:  # read-only too
+        if a.spend < 1:
+            ap.error("--spend DAYS must be 1 or more")
+        say(spend(data_dir() / "runs", data_dir() / "usage-log.csv", a.spend))
         return 0
     if os.environ.get("YAH_PROTECTED") and not a.dry_run:  # set only in a run's own claude sessions
         return refuse("inside a yah run session. A run starts or stops from your own terminal or session.")

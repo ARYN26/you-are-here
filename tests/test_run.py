@@ -667,6 +667,20 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.calls("claude"), [])
         self.assertIn("$14 and 1.2h", self.run_yah(repo, "--appetite-hint", "2", code=0))  # no run finished a phase
 
+    def test_spend_is_read_only_and_runs_inside_a_session(self):
+        runs, today = self.data / "runs", time.strftime("%Y-%m-%d")
+        runs.mkdir(parents=True)
+        (runs / "shop-1.log").write_text(f"{today} 10:00:00 iteration 1: $0.25, 3 turns, opus high, pr-open #12, "
+                                         f"HEAD abc1234, NEXT -\n{today} 10:01:00 stop, exit 0: PR #12 is open.\n",
+                                         encoding="utf-8")
+        env = dict(self.env, YAH_PROTECTED="main")  # a run's own session: no repo, no plan, no lock
+        out = self.run_yah(self.tmp, "--spend", env=env, code=0)
+        self.assertRegex(out, rf"{today} +\$0\.25 \(1 opus\) +- +0 +0: 1")
+        self.assertRegex(out, r"total +\$0\.25 \(1 opus\) +- +0 +1 run\r?\n")
+        self.assertIn("no weekly readings in usage-log.csv in the last 7 days", out)
+        self.assertEqual(sorted(p.name for p in runs.iterdir()), ["shop-1.log"])
+        self.assertIn("--spend DAYS must be 1 or more", self.run_yah(self.tmp, "--spend", "0", env=env, code=2))
+
     def test_one_run_per_plan_and_short_runs_keep_their_hours(self):
         repo = self.repo()
         plan = repo / "docs" / "plans" / "checkout.md"
@@ -1313,6 +1327,43 @@ class HelperTests(unittest.TestCase):
         wt = yahlib.run_pid_path("shop", str(tmp / "wt 2"), str(tmp / "a" / "shop")).name
         self.assertEqual(wt, main[:-4] + "@wt_2.pid")
 
+    def test_spend_by_day_and_role(self):
+        tmp = Path(tempfile.mkdtemp(prefix="yah-spend-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "a.log").write_text(
+            "2026-09-27 23:50:00 plan /p.md | before $0.00 and 0.000000h\n"
+            "2026-09-27 23:55:00 catch-up on: 30 pts under pace (60% used, 90% of the week gone): builds at xhigh\n"
+            "2026-09-27 23:58:00 iteration 1: $1.00, 5 turns, opus xhigh, progress, HEAD abc1234, NEXT a\n"
+            "2026-09-28 00:10:00 iteration 2: $2.50, 9 turns, opus xhigh, pr-open #3, HEAD abc1235, NEXT b, HEAD c\n"
+            "2026-09-28 00:20:00 judge P1: codex high (GPT, no Claude bar), $0.00, judge pass, a-P1-judge.md\n"
+            "2026-09-28 00:30:00 catch-up off: 10 pts under pace\n"
+            "2026-09-28 00:40:00 critique P2: fable high (bar unknown), $1.25, critique-done, a-P2-critique.md\n"
+            "2026-09-28 00:45:00 critique P3: fable high failed, codex is off for the rest of this run: x\n"
+            "2026-09-28 01:00:00 stop, exit 7: weekly usage 80% Cost $3.50 over 2 iterations.\n", encoding="utf-8")
+        (tmp / "b.log").write_text(  # from before P1: no model on the iteration line, so `?`, comma or not
+            "2026-09-29 10:00:00 iteration 1: $4.00, 20 turns, pr-open #4, HEAD abc1236, NEXT -\n"
+            "2026-09-29 10:02:00 iteration 2: $0.00, 1 turns, blocked dirty tree, user edits, HEAD a, NEXT -\n"
+            "2026-09-29 10:05:00 iteration 3: $0.65, 3 turns, opus h\n"  # cut off mid-write
+            "2026-09-29 10:10:00 judge P4: opus high (fable bar 60%, at or over 50%: roles.judge), $0.40, judge pass\n"
+            "2026-09-29 10:20:00 stop, exit 0: PR #4 is open and green.\n", encoding="utf-8")
+        (tmp / "c.log").write_text(  # still going: no stop line
+            "2026-09-29 11:00:00 iteration 1: $1.10, 4 turns, opus high, progress, HEAD abc1237, NEXT x\n",
+            encoding="utf-8")
+        csv = tmp / "usage-log.csv"
+        csv.write_text("date,time,five_hour_pct,week_pct,week_pace_pct,model\n2026-09-26,10:00,5,40,30,opus\n"
+                       "2026-09-28,10:00,5,45,40,opus\n2026-09-29,10:00,,,,opus\nnot,a,row\n", encoding="utf-8")
+        self.assertEqual(self.mod.spend(tmp, csv, 2, "2026-09-29").splitlines(), [  # the 27th's catch-up counts
+            "day         builds               reviews                           catch-up  stops",
+            "2026-09-28  $2.50 (1 opus)       $1.25 (1 codex, 1 fable)          2         7: 1",
+            "2026-09-29  $5.10 (2 ?, 1 opus)  $0.40 (1 opus)                    0         0: 1",
+            "total       $7.60 (2 ?, 2 opus)  $1.65 (1 codex, 1 fable, 1 opus)  2         2 runs, 1 with no stop line",
+            "", "2026-09-28  wk 45%  pace 40%", "2026-09-29  wk ?  pace ?"])
+        one = self.mod.spend(tmp, csv, 1, "2026-09-29")
+        self.assertNotIn("2026-09-28", one)
+        self.assertRegex(one, r"total +\$5\.10 \(2 \?, 1 opus\) +\$0\.40 \(1 opus\) +0 +1 run, 1 with no stop line")
+        self.assertEqual(self.mod.spend(tmp / "none", tmp / "none.csv", 1, "2026-09-29"),
+                         "no yah run sessions today\n\nno weekly readings in usage-log.csv today")
+
     def test_targets_and_prod_branch(self):
         pt = self.mod.parse_target
         self.assertEqual([pt(""), pt("p2"), pt("#12"), pt("12"), pt("x")], ["", "P2", "#12", "#12", None])
@@ -1461,6 +1512,18 @@ class HelperTests(unittest.TestCase):
             self.assertIn("plan-new", left)  # its spend chain: exit 9 would forget the plan's spend without it
             self.assertNotIn("plan-old", left)
             self.assertEqual(len(left), keep + 1)
+            # past KEEP_RUNS, a log within KEEP_LOG_DAYS stays for --spend; its session files go
+            young = runs / "young.log"
+            young.write_text("2026-09-29 09:00:00 iteration 1: $1.00, 5 turns, progress, HEAD a, NEXT -\n",
+                             encoding="utf-8")
+            (runs / "young-1.jsonl").write_text("{}\n", encoding="utf-8")
+            os.utime(young, (time.time() - 86400, time.time() - 86400))
+            for p in runs.glob("other-*.log"):
+                os.utime(p, None)  # now: all newer than young
+            self.mod.prune(runs)
+            self.assertTrue(young.exists())
+            self.assertFalse((runs / "young-1.jsonl").exists())
+            self.assertIn("are pruned after", self.mod.spend(runs, runs / "none.csv", self.mod.KEEP_LOG_DAYS + 1))
 
 
 if __name__ == "__main__":
