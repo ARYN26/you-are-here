@@ -22,6 +22,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
+MERGE_ALLOW = ["Bash(python3 *scripts/run.py* --merge)", "Bash(python *scripts/run.py* --merge)",
+               "Bash(py -3 *scripts/run.py* --merge)"]  # setup.py --auto-merge's allow rules
 GREEN, AMBER, RED, RST = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 WEEK = 7 * 86400
 FOOTER = ("This is the current state. Do not read docs to orient; /yah:where shows the full view. "
@@ -2003,12 +2005,14 @@ class SetupTests(Base):
                 self.assertIn("automerge  on:", out)
                 self.assertNotIn("statusLine", out)
                 self.assertEqual(self.read_config(), {**cfg, "auto_merge": True})
-                self.assertEqual(self.settings(), self.SETTINGS)
+                self.assertEqual(self.settings(), {**self.SETTINGS, "permissions": {"allow": ["Bash(ls)"] + MERGE_ALLOW}})
                 out = self.setup_py("--auto-merge", "--yes")[0]
                 self.assertIn("automerge  unchanged (on)", out)
+                self.assertIn("allow      unchanged", out)
                 out, err, rc = self.setup_py("--uninstall")
                 self.assertEqual(rc, 0, err)
                 self.assertIn("automerge  removed" if prior is None else "automerge  restored", out)
+                self.assertIn("allow      removed", out)
                 self.assertEqual(self.read_config(), cfg)
                 self.assertEqual(self.settings(), self.SETTINGS)
 
@@ -2017,6 +2021,47 @@ class SetupTests(Base):
         self.config(auto_merge=False)  # the user turns it off by hand
         self.assertNotIn("automerge", self.setup_py("--uninstall")[0])
         self.assertEqual(self.read_config(), {"auto_merge": False})
+
+    def test_auto_merge_allow_rules_match_the_quoted_skill_path_and_nothing_else(self):
+        self.config(auto_merge=True)  # already on, as before this rule existed: a re-run still adds them
+        self.settings({"permissions": {"allow": [MERGE_ALLOW[1]]}})  # one the user already had
+        out, err, rc = self.setup_py("--auto-merge")
+        self.assertEqual(rc, 0, err)
+        rules = self.settings()["permissions"]["allow"]
+        self.assertEqual(sorted(rules), sorted(MERGE_ALLOW))
+
+        def allowed(cmd):  # Claude Code's Bash rule: the whole command, * matching any run of characters
+            return any(re.fullmatch(".*".join(map(re.escape, r[5:-1].split("*"))), cmd, re.S) for r in rules)
+        skill = f'"{(ROOT / "skills" / "merge").as_posix()}/../../scripts/run.py"'  # PY "${CLAUDE_SKILL_DIR}/…"
+        for py in ("python", "python3", "py -3"):
+            self.assertTrue(allowed(f"{py} {skill} --merge"), py)
+            self.assertTrue(allowed(f"{py} scripts/run.py --merge"), py)
+            for other in ("--stop", "--plan", "--merge --plan", "--merge; gh pr merge 1", "--merge && rm -rf x"):
+                self.assertFalse(allowed(f"{py} {skill} {other}"), other)
+        self.assertFalse(allowed(f"node {skill} --merge"))
+        self.setup_py("--uninstall")
+        self.assertEqual(self.settings(), {"permissions": {"allow": [MERGE_ALLOW[1]]}})  # theirs stays
+
+    def test_auto_merge_uninstall_drops_the_permissions_it_created(self):
+        self.settings({"model": "opus"})
+        self.setup_py("--auto-merge")
+        self.assertEqual(self.settings()["permissions"], {"allow": MERGE_ALLOW})
+        self.settings({"model": "opus", "permissions": {"allow": MERGE_ALLOW[:2], "deny": ["Bash(rm *)"]}})
+        out = self.setup_py("--uninstall")[0]
+        self.assertIn(f"allow      removed: {', '.join(MERGE_ALLOW[:2])}", out)  # the one removed by hand is gone
+        self.assertEqual(self.settings(), {"model": "opus", "permissions": {"deny": ["Bash(rm *)"]}})
+        self.settings({"model": "opus", "permissions": {"allow": MERGE_ALLOW}})
+        self.setup_py("--auto-merge")
+        self.setup_py("--uninstall")
+        self.assertEqual(self.settings(), {"model": "opus", "permissions": {"allow": MERGE_ALLOW}})  # never ours
+
+    def test_auto_merge_leaves_a_permissions_value_it_cannot_read(self):
+        self.settings({"permissions": ["Bash(ls)"]})
+        out, err, rc = self.setup_py("--auto-merge")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("left as is", out)
+        self.assertEqual(self.settings(), {"permissions": ["Bash(ls)"]})
+        self.assertIs(self.read_config()["auto_merge"], True)
 
     def test_launcher_block(self):
         rc_file = self.home / ".bashrc"

@@ -12,10 +12,11 @@
     setup.py --uninstall                           undo all of the above
 
 Merge-only: settings.json is backed up first and only its statusLine key changes (never model,
-effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode, and
-autoUpdate on yah's extraKnownMarketplaces entry with --auto-update. --auto-merge sets only auto_merge
-in config.json (--ultracode sets ultracode there too, --codex sets codex once a signed-in codex answers a
-smoke call); those four run on their own and never touch the statusLine. What it changed goes into setup-state.json in the data dir, so --uninstall can put things back.
+effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode,
+autoUpdate on yah's extraKnownMarketplaces entry with --auto-update, and three `run.py --merge` rules in
+permissions.allow with --auto-merge. --auto-merge sets auto_merge in config.json (--ultracode sets ultracode
+there too, --codex sets codex once a signed-in codex answers a smoke call); those four run on their own and
+never touch the statusLine. What it changed goes into setup-state.json in the data dir, so --uninstall can put things back.
 --dry-run writes nothing. Re-running is safe.
 """
 import argparse
@@ -362,6 +363,8 @@ def ultracode(settings, sp, state, state_file, dry, say):
 
 
 UPDATE_OFF = ("DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+# /yah:merge runs PY "…/scripts/run.py" --merge: the path ends in a quote, so a * follows run.py; none follows --merge
+MERGE_ALLOW = tuple(f"Bash({py} *scripts/run.py* --merge)" for py in ("python3", "python", "py -3"))
 
 
 def marketplace_name():
@@ -414,21 +417,40 @@ def auto_update(settings, sp, state, state_file, dry, say):
         say(f"WARNING    {', '.join(off)} turns plugin auto-update off. Set FORCE_AUTOUPDATE_PLUGINS=1 to keep it on.")
 
 
-def auto_merge(state, state_file, dry, say):
+def auto_merge(settings, sp, state, state_file, dry, say):
     """Opt-in: `yah run` merges a phase PR it opened once every check passed (a merge commit, then it
-    retargets stacked PRs, then deletes the head branch). Only the driver merges, never the model. The old
-    value goes into setup-state.json so --uninstall can put it back."""
+    retargets stacked PRs, then deletes the head branch). Only the driver merges, never the model. MERGE_ALLOW
+    goes into settings.json's permissions.allow, so auto mode lets /yah:merge run `run.py --merge`. The old
+    value and the rules setup added go into setup-state.json so --uninstall can put them back."""
     cp = data_dir() / "config.json"
     cfg = load_obj(cp)
     if cfg.get("auto_merge") is True:
         say("automerge  unchanged (on)")
+    else:
+        # it was off, so config.json holds the user's latest choice: record that, not an older run's
+        state["autoMerge"] = {"added": "auto_merge" not in cfg, "prev": cfg.get("auto_merge")}
+        cfg["auto_merge"] = True
+        save_json(cp, cfg, dry)
+        save_json(state_file, state, dry)
+        say(f"automerge  on: `yah run` merges a green phase PR it opened, then retargets and deletes its branch  "
+            f"({cp})")
+    perms = settings.get("permissions", {})
+    allow = perms.get("allow", []) if isinstance(perms, dict) else None
+    if not isinstance(allow, list):
+        say(f"allow      permissions in {sp} is not an object with an allow list, so it was left as is")
         return
-    # it was off, so config.json holds the user's latest choice: record that, not an older run's
-    state["autoMerge"] = {"added": "auto_merge" not in cfg, "prev": cfg.get("auto_merge")}
-    cfg["auto_merge"] = True
-    save_json(cp, cfg, dry)
+    new = [x for x in MERGE_ALLOW if x not in allow]
+    if not new:
+        say("allow      unchanged (run.py --merge)")
+        return
+    backup(sp, dry, say)
+    # only the rules added here: one the user already had stays after --uninstall
+    had = state.get("mergeAllow") if isinstance(state.get("mergeAllow"), list) else []
+    state["mergeAllow"] = list(dict.fromkeys(had + new))
+    settings["permissions"] = {**perms, "allow": allow + new}
+    save_json(sp, settings, dry)
     save_json(state_file, state, dry)
-    say(f"automerge  on: `yah run` merges a green phase PR it opened, then retargets and deletes its branch  ({cp})")
+    say(f"allow      {', '.join(new)}: /yah:merge runs without a prompt  ({sp})")
 
 
 def codex_on(state, state_file, dry, say):
@@ -496,6 +518,18 @@ def uninstall(sdir, state, state_file, dry, say):
             settings.pop("extraKnownMarketplaces")
         save_json(sp, settings, dry)
         say(f"autoupdate restored for {au['name']}")
+    ma, perms = state.get("mergeAllow"), settings.get("permissions")
+    allow = perms.get("allow") if isinstance(perms, dict) else None
+    gone = [x for x in ma if x in allow] if isinstance(ma, list) and isinstance(allow, list) else []
+    if gone:
+        backup(sp, dry, say)
+        perms["allow"] = [x for x in allow if x not in gone]
+        if not perms["allow"]:
+            perms.pop("allow")
+        if not perms:
+            settings.pop("permissions")
+        save_json(sp, settings, dry)
+        say(f"allow      removed: {', '.join(gone)}")
     prev = state.get("ultracode")
     if isinstance(prev, dict):
         backup(sp, dry, say)
@@ -579,7 +613,7 @@ def main():
         if a.auto_update:
             auto_update(load_obj(sp), sp, state, state_file, a.dry_run, say)
         if a.auto_merge:
-            auto_merge(state, state_file, a.dry_run, say)
+            auto_merge(load_obj(sp), sp, state, state_file, a.dry_run, say)
         if a.ultracode:
             ultracode(load_obj(sp), sp, state, state_file, a.dry_run, say)
         return codex_on(state, state_file, a.dry_run, say) if a.codex else 0
