@@ -916,7 +916,10 @@ class RunTests(unittest.TestCase):
                 self.assertIn(f"Stopped at {why}." if merged and why else f"nothing to merge: {why}." if why
                               else "[yah] merged P2 PR #12, P3 PR #13.", out)
         for name, state, why in (("an open phase", open_p2, "P2's PR #12: the phase is not closed"),
-                                 ("a phase with no PR", STACK.replace(" | branch p3 | PR #13", ""), "P3 has no PR yet")):
+                                 ("a phase with no PR", STACK.replace(" | branch p3 | PR #13", ""), "P3 has no PR yet"),
+                                 ("an open branch with no PR", STACK.replace("[x] P3 Emails | branch p3 | PR #13",
+                                                                             "[~] P3 Emails | branch p3"),
+                                  "P3 has no PR yet")):
             with self.subTest(name):
                 (repo / "STATE.md").write_text(state, encoding="utf-8")
                 self.stack()
@@ -959,6 +962,56 @@ class RunTests(unittest.TestCase):
         self.run_yah(repo, "--merge", code=8)
         self.assertEqual(self.merged(), ["11", "12", "13"])
         self.assertEqual(self.calls("claude"), [])  # --merge never starts a judge
+
+    def test_plan_sweeps_an_earlier_runs_green_prs_before_its_first_session(self):
+        open_p3 = "- [ ] P3 Emails | branch p3 | base p2"
+        state = STACK.replace("- [x] P3 Emails | branch p3 | PR #13", open_p3)
+        self.config(auto_merge=True)
+        self.stack(**{"view-12": [view(headRefName="p2", baseRefName="p1", headRefOid="2222222bb"),  # P3's base
+                                  view(headRefName="p2", headRefOid="2222222bb"),  # the sweep, after #11 retargeted it
+                                  view(headRefName="p2", headRefOid="2222222bb"),
+                                  view("MERGED", headRefName="p2")],  # P3's base again, once the sweep merged it
+                      "stacked-p2": [],
+                      "claude": [{"commit": True, "tag": "pr-open #13", "replace": [[open_p3, open_p3.replace(
+                          "- [ ]", "- [x]") + " | PR #13"]]}]})
+        out = self.run_yah(self.repo("p2", state=state), "--plan", code=0)
+        self.assertEqual(self.prompts(), ["/yah:resume P3 build base=main"])
+        self.assertEqual(self.merged(), ["11", "12", "13"])
+        self.assertIn("[yah] retargeted PR #12 from p1 to main", out)
+        self.assertIn("plan done: P1 PR #11 merged by yah, P2 PR #12 merged by yah, P3 PR #13 merged by yah.", out)
+        with self.subTest("a merge step failed: no session"):
+            self.stack(merge=[{"rc": 1, "err": "GraphQL: Base branch was modified\n"}])
+            out = self.run_yah(self.repo("p2", "failed", state=state), "--plan", code=2)
+            self.assertIn("stop (exit 2): auto-merge of PR #11 failed: GraphQL: Base branch was modified", out)
+            self.assertEqual(self.calls("claude"), [])
+
+    def test_plan_merges_a_stack_it_built_bottom_up_before_plan_done(self):
+        p1, p2 = "- [~] P1 Cart API | branch p1 | base main", "- [ ] P2 Payment form | branch p2 | base p1"
+        state = STACK.replace("- [x] P1 Cart API | branch p1 | base main | PR #11", p1) \
+            .replace("- [x] P2 Payment form | branch p2 | PR #12", p2).replace("- [x] P3 Emails | branch p3 | PR #13\n", "")
+        sessions = [{"commit": True, "tag": f"pr-open #{n}", "replace": [[line, f"- [x]{line[5:]} | PR #{n}"]]}
+                    for n, line in ((11, p1), (12, p2))]
+        on_p1 = [view(headRefName="p2", baseRefName="p1", headRefOid="2222222bb")] * 2  # evaluate, auto-merge
+        self.config(auto_merge=True)
+        # #11: a commit lands after its checks, so auto-merge skips it and P2 stacks on it; #12 then targets p1.
+        self.stack(**{"view-11": [view(headRefName="p1", headRefOid="1111111aa"),
+                                  view(headRefName="p1", headRefOid="1111111ff")],
+                      "view-12": on_p1 + [view(headRefName="p2", headRefOid="2222222bb")], "claude": sessions})
+        out = self.run_yah(self.repo("p1", state=state), "--plan", code=0)
+        self.assertEqual(self.prompts(), ["/yah:resume P1 build", "/yah:resume P2 build"])
+        self.assertIn("PR #12: auto-merge skipped: it targets p1, another phase's branch.", out)
+        self.assertEqual([a[2:] for a in self.merges()], [["11", "--merge", "--match-head-commit", "1111111ff"],
+                                                          ["12", "--merge", "--match-head-commit", "2222222bb"]])
+        self.assertIn("[yah] retargeted PR #12 from p1 to main", out)
+        self.assertIn("plan done: P1 PR #11 merged by yah, P2 PR #12 merged by yah.", out)
+        self.assertNotIn("The merges are yours", out)
+        with self.subTest("the sweep stops: the merges are yours, and why"):
+            blocked = view(headRefName="p1", headRefOid="1111111aa", mergeStateStatus="BLOCKED")
+            self.stack(**{"view-11": [blocked], "view-12": on_p1, "claude": sessions})
+            out = self.run_yah(self.repo("p1", "blocked", state=state), "--plan", code=0)
+            self.assertIn("plan done: P1 PR #11 green, P2 PR #12 green. The merges are yours: P1's PR #11: merge "
+                          "state BLOCKED.", out)
+            self.assertEqual(self.merges(), [])
 
     # ------------------------------------------------------------ argv and --dry-run
 

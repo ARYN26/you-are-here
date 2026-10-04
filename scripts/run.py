@@ -16,7 +16,10 @@ Auto-merge is off unless config.json has "auto_merge": true. Then the driver, ne
 open, green PR of a closed plan phase when every rule holds (a check ran and all passed, MERGEABLE, merge
 state CLEAN or HAS_HOOKS, not a draft, no newer CHANGES_REQUESTED, authored by the gh user): a merge commit
 pinned to the head it saw, then the open PRs on its head retargeted to its base, then the head branch
-deleted unless protected. --plan then goes on, and the next phase builds on that base.
+deleted unless protected. --plan then goes on, and the next phase builds on that base. --plan also sweeps the
+stack: before its first session, and again before "plan done", it merges the closed phases' green PRs from the
+bottom up (an earlier run's too) and stops at the first that cannot merge. --merge runs only that sweep, now,
+auto_merge on or off, and exits 8 when it merged one.
 
 The quality profile (config.json "ultracode": true) starts builds with --model/--effort from roles.main (a user
 --model replaces only the model). Before a plan phase's first build (no PR, no phase branch on origin) it runs one
@@ -676,22 +679,25 @@ def auto_merge(r, reason):
     return 8, f"PR #{r.pr} merged by yah (merge commit)."
 
 
-def sweep(r):
+def sweep(r, below=None):
     """Merge the plan's green phase PRs from the bottom of the stack up: past merged ones, each open one whose phase
     is closed, when mergeable() allows on a read taken after its checks passed on that head and, with the profile
     on, a judge passed that head. merge() retargets the PR stacked on it, so the next one then targets the base.
-    Stops at the first that cannot merge. (merged, code, why): the (label, PR) merged, in order; code 2 when a
-    merge step failed, else None; why it stopped ("" past the last phase)."""
+    Stops at the first that cannot merge, or at phase `below`. (merged, code, why): the (label, PR) merged, in
+    order; code 2 when a merge step failed, else None; why it stopped ("" past the last phase or at `below`)."""
     merged, judged = [], None
     for ph in r.phases:
         label, n = ph.get("label") or "?", pr_number(ph)
+        if below and label == below:
+            break
         ref = str(n) if n is not None else ph.get("branch") or ""
         if not ref:
             return merged, None, f"{label} has no PR yet"
         seen = pr_view(r, ref, PR_JSON + ",number") if r.gh else None
         n = n or (seen or {}).get("number")
-        if not (seen and n):
-            return merged, None, f"gh could not read {label}'s PR"
+        if not (seen and n):  # an open phase's branch with no PR on it yet reads as nothing too
+            return merged, None, f"gh could not read {label}'s PR" if pr_number(ph) or ph.get("status") == "closed" \
+                else f"{label} has no PR yet"
         if str(seen.get("state") or "").upper() == "MERGED":
             continue
         if ph.get("status") != "closed":
@@ -713,6 +719,32 @@ def sweep(r):
             return merged, code, why
         merged.append((label, n))
     return merged, None, ""
+
+
+def swept(r, merged):
+    """r.done, the phases this run finished, with the sweep's merges marked: green ones become merged by yah, an
+    earlier run's are added."""
+    got = {n for _, n in merged}
+    r.done = [(label, n, "merged by yah" if n in got else how) for label, n, how in r.done]
+    r.done += [(label, n, "merged by yah") for label, n in merged if n not in {d[1] for d in r.done}]
+
+
+def sweep_start(r):
+    """--plan with auto_merge on, before the first session: merge the green PRs an earlier run left below the run's
+    phase, from the bottom up, then read the plan again so the phase's base follows where they merged. The run's
+    own phase is the loop's to judge and merge. (2, why) when a merge step failed, else (None, "")."""
+    merged, code, why = sweep(r, r.label)
+    if code is not None:
+        return code, why
+    if why:
+        log(r, f"sweep stopped: {why}")
+    if merged:
+        swept(r, merged)
+        s = where.collect(r.top, use_gh=bool(r.gh)) or {}
+        refresh(r, s)
+        r.base, r.base_from = pr_base(r, s)
+        guard(r, [r.base_arg])
+    return None, ""
 
 
 def merge_now(r, pidf):
@@ -1369,12 +1401,19 @@ def advance(r, code, reason):
         return 2, f"{needs_you(r)} ({r.label}'s PR #{r.pr} is {'merged' if merged else 'open and green'}.)"
     r.done.append((r.label, r.pr, "merged by yah" if code == 8 else "merged" if merged else "green"))
     s = where.collect(r.top, use_gh=bool(r.gh)) or {}
-    done = [d[0] for d in r.done]
-    nxt = next((p for p in plan_phases(r, s)
-                if p.get("status") != "closed" and p.get("label") not in done), None)
+    done, phases = [d[0] for d in r.done], plan_phases(r, s)
+    nxt = next((p for p in phases if p.get("status") != "closed" and p.get("label") not in done), None)
+    failed, why = None, ""
+    if nxt is None and r.cfg["auto_merge"] and any(d[2] == "green" for d in r.done):
+        r.phases = phases  # a stack built in this run: its PRs merge bottom-up once the top one is green
+        merged, failed, why = sweep(r)
+        swept(r, merged)
     parts = ", ".join(f"{label} PR #{pr} {how}" for label, pr, how in r.done)
+    if failed is not None:
+        return failed, f"{why} So far: {parts}."
     if nxt is None:
-        return 0, f"plan done: {parts}." + (" The merges are yours." if any(d[2] == "green" for d in r.done) else "")
+        left = any(d[2] == "green" for d in r.done)
+        return 0, f"plan done: {parts}." + (f" The merges are yours{': ' + why if why else ''}." if left else "")
     human = {h.get("id") for h in (s.get("state") or {}).get("human") or [] if isinstance(h, dict)}
     if nxt.get("id") in human:
         return 2, f"needs you: {nxt['label']} ({nxt.get('title')}) is marked (you). So far: {parts}."
@@ -1684,10 +1723,13 @@ def main():
         log(r, f"plan {plan_id(r.plan_file)} | before ${r.before[0]:.2f} and {r.before[1]:.6f}h")
     prune(runs)
     try:
-        while True:
+        # An earlier run's green PRs first, under this run's locks: the phase's base follows where they merge.
+        code, reason = sweep_start(r) if a.plan and r.cfg["auto_merge"] else (None, "")
+        while code is None:
             code, reason = evaluate(r)
             if code == 0 and wants_judge(r):
                 judge(r)
+                code = None
                 continue  # a block: one fix-findings slice; a pass or a skip: the PR read again, then exit 0 or a merge
             if code == 0 and r.cfg["auto_merge"]:
                 code, reason = auto_merge(r, reason)
