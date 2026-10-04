@@ -158,6 +158,8 @@ RAN = re.compile(r"(?!(?:progress|phase-done|pr-open|needs-human|blocked|no)\b)(
                  r"(?: (?:low|medium|high|xhigh|max))?, ")
 REVIEW = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ (?:critique|judge) \S+: (\S+) \S+ \([^)]*\), \$(\d+(?:\.\d+)?), ")
 STOP = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ stop, exit (-?\d+): ")
+# a judge's verdict on the head it read, apart from its REVIEW line so the sweep can read it back
+VERDICT = re.compile(r"^\S+ \S+ judge (pass|block) PR #(\d+) head (\S+)$")
 CATCH_UP = re.compile(r"^\S+ \S+ catch-up (on|off): ")
 DAY = re.compile(r"^\d{4}-\d\d-\d\d$")
 NO_TAG = "session ended without a YAH-RESULT line; is the yah plugin loaded? (--plugin-dir)"
@@ -292,14 +294,15 @@ def pr_view(r, ref=None, fields=PR_JSON):
     return view if isinstance(view, dict) else None
 
 
-def checks(r, wait):
-    """pass, none (gh reports no checks), fail, pending or unknown. Pending (gh exit 8) is polled up to
-    run_checks_wait_minutes. The stop rules treat none as green; auto-merge wants pass."""
+def checks(r, wait, n=None):
+    """pass, none (gh reports no checks), fail, pending or unknown for PR n (default the run's). Pending (gh exit 8)
+    is polled up to run_checks_wait_minutes. The stop rules treat none as green; auto-merge wants pass."""
+    n = n or r.pr
     deadline = time.monotonic() + r.cfg["run_checks_wait_minutes"] * 60
     while True:
-        rc, out, err = gh(r, "pr", "checks", str(r.pr), "--required")
+        rc, out, err = gh(r, "pr", "checks", str(n), "--required")
         if rc not in (0, 8) and "no required checks" in (out + err).lower():
-            rc, out, err = gh(r, "pr", "checks", str(r.pr))
+            rc, out, err = gh(r, "pr", "checks", str(n))
         if rc is not None and "no checks reported" in (out + err).lower():
             return "none"
         if rc == 0:
@@ -309,7 +312,7 @@ def checks(r, wait):
         if not wait or time.monotonic() >= deadline:
             return "pending"
         if not r.waiting:
-            say(f"[yah] PR #{r.pr}: checks pending, waiting up to {r.cfg['run_checks_wait_minutes']:g} min")
+            say(f"[yah] PR #{n}: checks pending, waiting up to {r.cfg['run_checks_wait_minutes']:g} min")
             r.waiting = True
         time.sleep(POLL_S)
 
@@ -565,29 +568,29 @@ def tell(r, line):
     log(r, line)
 
 
-def fresh_view(r):
-    """The PR re-read once its checks passed: evaluate's view can predate a checks wait of up to
+def fresh_view(r, n=None):
+    """PR n (default the run's) re-read once its checks passed: evaluate's view can predate a checks wait of up to
     run_checks_wait_minutes, and GitHub says mergeable UNKNOWN until it has worked it out."""
-    view = pr_view(r)
+    view = pr_view(r, n)
     for wait in (2, 4, 8):  # GitHub settles in seconds
         if "UNKNOWN" not in ((view or {}).get("mergeable"), (view or {}).get("mergeStateStatus")):
             break
         time.sleep(min(wait, POLL_S))
-        view = pr_view(r)
+        view = pr_view(r, n)
     return view
 
 
-def mergeable(r, view):
-    """(ok, reason): may the driver merge the run's PR? Every rule must hold; view is a gh pr view of it."""
-    ph = r.phase
+def mergeable(r, ph, n, view, checks):
+    """(ok, reason): may the driver merge PR n, phase ph's PR? Every rule must hold; view is a gh pr view of it and
+    checks what checks() said of it."""
     if str(view.get("state") or "").upper() != "OPEN":
-        return False, f"PR #{r.pr} is {str(view.get('state') or 'unknown').lower()}, not open"
+        return False, f"PR #{n} is {str(view.get('state') or 'unknown').lower()}, not open"
     if ph is None:
-        return False, f"PR #{r.pr} is not a plan phase's PR"
-    if pr_number(ph) != r.pr and not (ph.get("branch") and view.get("headRefName") == ph["branch"]):
-        return False, f"PR #{r.pr} is not {r.label}'s PR in the plan"
-    if r.checks != "pass":
-        return False, "no checks ran" if r.checks == "none" else f"checks {r.checks or 'unknown'}"
+        return False, f"PR #{n} is not a plan phase's PR"
+    if pr_number(ph) != n and not (ph.get("branch") and view.get("headRefName") == ph["branch"]):
+        return False, f"PR #{n} is not {ph.get('label')}'s PR in the plan"
+    if checks != "pass":
+        return False, "no checks ran" if checks == "none" else f"checks {checks or 'unknown'}"
     if view.get("isDraft") is not False:
         return False, "it is a draft"
     if view.get("mergeable") != "MERGEABLE":
@@ -599,7 +602,8 @@ def mergeable(r, view):
     if not (view.get("headRefName") and view.get("baseRefName") and view.get("headRefOid")):
         return False, "gh did not name its head, base and head commit"
     # A stacked PR merges into the phase below it, open or merged, and so never reaches the plan's base.
-    stack = ({p.get("branch") for p in r.phases if p.get("label") != r.label} | {(r.prev or {}).get("branch")}) - {"", None}
+    stack = ({p.get("branch") for p in r.phases if p.get("label") != ph.get("label")}
+             | {(r.prev or {}).get("branch")}) - {"", None}
     if view["baseRefName"] in stack:
         return False, f"it targets {view['baseRefName']}, another phase's branch"
     if not r.login and r.gh:  # cached once known
@@ -613,29 +617,29 @@ def mergeable(r, view):
     return True, ""
 
 
-def merge(r, view):
-    """Merge commit pinned to the head gh showed, then retarget the open PRs on the head to the base, then
+def merge(r, n, view):
+    """PR n: a merge commit pinned to the head gh showed, then retarget the open PRs on the head to the base, then
     delete the head branch unless protected. (None, "") once merged, else (2, reason). Never squash, rebase,
     --admin, --auto or --delete-branch: GitHub closes a PR whose base branch is deleted, so retarget comes first."""
     head, base, oid = view["headRefName"], view["baseRefName"], view["headRefOid"]
-    rc, out, err = gh(r, "pr", "merge", str(r.pr), "--merge", "--match-head-commit", oid, timeout=60)
+    rc, out, err = gh(r, "pr", "merge", str(n), "--merge", "--match-head-commit", oid, timeout=60)
     if rc is None:
-        return 2, f"gh pr merge {r.pr} did not answer in 60 s; check whether PR #{r.pr} merged."
+        return 2, f"gh pr merge {n} did not answer in 60 s; check whether PR #{n} merged."
     if rc != 0:
-        return 2, f"auto-merge of PR #{r.pr} failed: {brief(err or out, 300) or f'gh exit {rc}'}"
-    tell(r, f"merged PR #{r.pr} into {base} (merge commit of {oid[:7]})")
+        return 2, f"auto-merge of PR #{n} failed: {brief(err or out, 300) or f'gh exit {rc}'}"
+    tell(r, f"merged PR #{n} into {base} (merge commit of {oid[:7]})")
     rc, out, err = gh(r, "pr", "list", "--base", head, "--state", "open", "--json", "number")
     try:
         stacked = [int(p["number"]) for p in json.loads(out)] if rc == 0 else None
     except (ValueError, TypeError, KeyError):
         stacked = None
     if stacked is None:
-        return 2, (f"PR #{r.pr} merged, but the open PRs based on {head} could not be listed "
+        return 2, (f"PR #{n} merged, but the open PRs based on {head} could not be listed "
                    f"({brief(err, 200) or 'gh failed'}). Head branch {head} kept.")
     for m in stacked:
         rc, out, err = gh(r, "pr", "edit", str(m), "--base", base)
         if rc != 0:
-            return 2, (f"PR #{r.pr} merged, but #{m} could not be retargeted from {head} to {base} "
+            return 2, (f"PR #{n} merged, but #{m} could not be retargeted from {head} to {base} "
                        f"({brief(err or out, 200) or 'gh failed'}). Head branch {head} kept.")
         tell(r, f"retargeted PR #{m} from {head} to {base}")
     if head in r.protected:  # protected() always holds main, master and PROD
@@ -654,18 +658,18 @@ def auto_merge(r, reason):
     if stopped(r.last):
         ok, why = False, "the last session stopped: " + needs_you(r)
     elif r.phase is None or r.checks != "pass":  # a fresh read changes neither: skip its wait
-        ok, why = mergeable(r, r.view or {})
+        ok, why = mergeable(r, r.phase, r.pr, r.view or {}, r.checks)
     else:
         seen = (r.view or {}).get("headRefOid")
         r.view = fresh_view(r) or {}
-        ok, why = mergeable(r, r.view)
+        ok, why = mergeable(r, r.phase, r.pr, r.view, r.checks)
         if ok and r.view.get("headRefOid") != seen:
             ok, why = False, "a new commit landed after its checks passed"
     if not ok:
         if r.chain:  # advance's own reason replaces this one
             tell(r, f"PR #{r.pr}: auto-merge skipped: {why}.")
         return 0, f"{reason} Auto-merge skipped: {why}."
-    code, why = merge(r, r.view)
+    code, why = merge(r, r.pr, r.view)
     if code is not None:
         return code, why
     r.pr_state, r.base = "MERGED", r.view["baseRefName"]
@@ -1014,6 +1018,26 @@ def plan_spend(runs, plan):
     return s["before"][0] + s["cost"], s["before"][1] + s["hours"]
 
 
+def run_key(key):
+    """The project key as it starts its run logs' names: <run_key>-YYYYmmdd-HHMMSS.log."""
+    return re.sub(r"[^\w.-]", "_", key)
+
+
+def verdicts(runs, key):
+    """{(PR number, head commit): "pass" or "block"}: the last judge verdict on each head in this project's run
+    logs, oldest log first. A pruned log drops out, so its PR reads as unjudged."""
+    name = re.compile(re.escape(run_key(key)) + r"-\d{8}-\d{6}\.log")
+    seen = {}
+    for p in sorted(x for x in Path(runs).glob("*.log") if name.fullmatch(x.name)):
+        try:
+            lines = p.read_text("utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for m in filter(None, map(VERDICT.match, lines)):
+            seen[(int(m[2]), m[3])] = m[1]
+    return seen
+
+
 def plan_lock(runs, plan):
     """runs/plan-<hash>.lock: one run per plan file across checkouts and worktrees, so a run's `before` is the whole
     spend of the runs before it, never a copy a concurrent run on the plan also starts from."""
@@ -1204,8 +1228,11 @@ def judge(r):
     """/yah:resume <target> judge on an open, green PR. A block sets r.findings, so evaluate asks for one
     fix-findings slice before exit 0 or a merge; a pass or a skip lets them happen."""
     r.judged.add(r.pr)
+    head = (r.view or {}).get("headRefOid")  # evaluate read it just before: the head the judge reads
     m, path = review(r, r.target or r.label or f"#{r.pr}", "judge", r.label or f"PR{r.pr}",
                      r"judge\s+(pass|block)\b.*")
+    if m and head:
+        log(r, f"judge {m.group(1).lower()} PR #{r.pr} head {head}")
     if m and m.group(1).lower() == "block":
         # The PR was green, so how the last build ended (an error, no tag, a stall) stopped nothing; left in
         # place, evaluate would stop on it now instead of running the fix slice.
@@ -1442,7 +1469,7 @@ def dry_run(r):
         + (f", catch-up ({r.gap:.0f} pts under{to_reset(r)})" if r.catch_up else ""))
     am = "on" if c["auto_merge"] else "off"
     if c["auto_merge"] and code == 0 and r.pr_state == "OPEN":  # open and green: what it would do, never doing it
-        ok, why = mergeable(r, r.view or {})
+        ok, why = mergeable(r, r.phase, r.pr, r.view or {}, r.checks)
         am += f": would merge PR #{r.pr} (merge commit)" if ok else f": would not merge PR #{r.pr}: {why}"
     say(f"merge   auto-merge {am}")
     if c["ultracode"]:
@@ -1567,7 +1594,7 @@ def main():
     runs = data_dir() / "runs"
     runs.mkdir(parents=True, exist_ok=True)
     child = os.environ.pop("YAH_RUN_DETACHED", "")  # popped, so no claude session it starts inherits it
-    stem = Path(child) if child else runs / "{}-{}".format(re.sub(r"[^\w.-]", "_", key), time.strftime("%Y%m%d-%H%M%S"))
+    stem = Path(child) if child else runs / "{}-{}".format(run_key(key), time.strftime("%Y%m%d-%H%M%S"))
     if a.detach and not child:
         return detach(r, pidf, stem)
     r.log = Path(f"{stem}.log")

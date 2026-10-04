@@ -955,8 +955,10 @@ class RunTests(unittest.TestCase):
                 self.script(view=[view()], required=[{"rc": 0}], judge=[step])
                 self.assertIn(GREEN, self.run_yah(repo, "P2", code=0))
                 self.assertEqual(self.prompts(), ["/yah:resume P2 judge"])
-                self.assertIn("judge P2: opus high (fable bar 60%, at or over 50%: roles.judge), $0.25, " + text,
-                              self.run_logs()[-1].read_text("utf-8"))
+                log = self.run_logs()[-1].read_text("utf-8")
+                self.assertIn("judge P2: opus high (fable bar 60%, at or over 50%: roles.judge), $0.25, " + text, log)
+                # only a verdict is kept for the sweep, with the head evaluate read before the judge
+                (self.assertIn if name == "pass" else self.assertNotIn)("judge pass PR #12 head abc1234def\n", log)
         # auto-merge waits for the judge and its one fix slice
         self.auto({"ultracode": True}, **{"view-12": [view()], "judge": [{"tag": "judge block 2"}],
                                           "fix-findings": [{"tag": "pr-open #12"}]})
@@ -966,6 +968,7 @@ class RunTests(unittest.TestCase):
         self.assertRegex(prompts[1], r"^/yah:resume P2 fix-findings findings=.+-P2-judge\.md$")
         self.assertEqual(len(prompts), 2)
         self.assertEqual(len(self.merges()), 1)
+        self.assertIn("judge block PR #12 head abc1234def\n", self.run_logs()[-1].read_text("utf-8"))
 
     def test_a_judge_block_after_a_build_that_errored_still_runs_its_fix_slice(self):
         # the build opened the PR and closed the phase, then ended in an error: the green PR outranks that ending
@@ -1436,11 +1439,14 @@ class HelperTests(unittest.TestCase):
                  (r(phases=[{"label": "P1", "branch": "checkout/cart"}]), view(baseRefName="checkout/cart"),
                   "it targets checkout/cart, another phase's branch"),
                  (r(prev={"label": "P1", "branch": "p1"}), view(baseRefName="p1"), "another phase's branch"),
+                 # the sweep passes another phase than the run's: the stack rule leaves out that one, not r.label's
+                 (r(label="P1", phases=[{"label": "P1", "branch": "checkout/cart"}]),
+                  view(baseRefName="checkout/cart"), "it targets checkout/cart, another phase's branch"),
                  (r(login=""), view(), "gh api user did not say who you are"),
                  (r(), view(author={"login": "mallory"}), "its author mallory is not you (aryan)")]
         for i, (run, v, why) in enumerate(cases):
             with self.subTest(i=i, why=why):
-                ok, reason = self.mod.mergeable(run, v)
+                ok, reason = self.mod.mergeable(run, run.phase, run.pr, v, run.checks)
                 self.assertEqual(ok, not why, reason)
                 self.assertIn(why, reason)
 
@@ -1472,6 +1478,7 @@ class HelperTests(unittest.TestCase):
                                "2026-09-29 10:10:00 critique P1: codex high (GPT, no Claude bar), $0.50, critique-done, x.md",
                                "2026-09-29 10:20:00 iteration 1: $1.25, 38 turns, progress, HEAD a, NEXT -",
                                "2026-09-29 10:25:00 critique P2: codex high failed, codex is off: $9 boom",
+                               "2026-09-29 10:28:00 judge pass PR #1 head abc1234",  # no cost, no phase
                                "2026-09-29 10:30:00 P1 done: PR #1 open and green. Next: P2 on main",
                                "2026-09-29 11:00:00 iteration 1: $2.25, 40 turns, pr-open #2, HEAD b, NEXT -",
                                "2026-09-29 11:00:00 stop, exit 0: plan done: P1 PR #1 green, P2 PR #2 green. "
@@ -1496,6 +1503,23 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(self.mod.appetite_hint(runs, 2), "$5 and 1h")
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(self.mod.appetite_hint(Path(d), 2), "$14 and 1.2h")  # no run finished a phase
+
+    def test_verdicts_are_the_last_judge_on_each_head_in_this_projects_logs(self):
+        with tempfile.TemporaryDirectory() as d:
+            runs = Path(d)
+            logs = {"shop-20260929-100000": ["2026-09-29 10:00:00 judge block PR #12 head aaa",
+                                             "2026-09-29 10:05:00 judge P2: opus high (x), $0.50, judge pass, y.md",
+                                             "2026-09-29 10:10:00 judge pass PR #13 head ccc"],
+                    "shop-20260930-090000": ["2026-09-30 09:00:00 judge pass PR #12 head bbb",
+                                             "2026-09-30 09:10:00 judge block PR #13 head ccc"],
+                    "shop-staging-20260930-100000": ["2026-09-30 10:00:00 judge pass PR #12 head aaa"],
+                    "shop-20260930-110000-P2-judge": ["judge pass PR #14 head ddd"]}
+            for name, lines in logs.items():
+                (runs / f"{name}.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self.assertEqual(self.mod.verdicts(runs, "shop"),
+                             {(12, "aaa"): "block", (12, "bbb"): "pass", (13, "ccc"): "block"})
+            self.assertEqual(self.mod.verdicts(runs, "shop-staging"), {(12, "aaa"): "pass"})
+            self.assertEqual(self.mod.verdicts(runs / "missing", "shop"), {})
 
     def test_prune_keeps_the_newest_log_on_each_plan(self):
         with tempfile.TemporaryDirectory() as d:
