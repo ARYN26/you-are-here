@@ -676,6 +676,63 @@ def auto_merge(r, reason):
     return 8, f"PR #{r.pr} merged by yah (merge commit)."
 
 
+def sweep(r):
+    """Merge the plan's green phase PRs from the bottom of the stack up: past merged ones, each open one whose phase
+    is closed, when mergeable() allows on a read taken after its checks passed on that head and, with the profile
+    on, a judge passed that head. merge() retargets the PR stacked on it, so the next one then targets the base.
+    Stops at the first that cannot merge. (merged, code, why): the (label, PR) merged, in order; code 2 when a
+    merge step failed, else None; why it stopped ("" past the last phase)."""
+    merged, judged = [], None
+    for ph in r.phases:
+        label, n = ph.get("label") or "?", pr_number(ph)
+        ref = str(n) if n is not None else ph.get("branch") or ""
+        if not ref:
+            return merged, None, f"{label} has no PR yet"
+        seen = pr_view(r, ref, PR_JSON + ",number") if r.gh else None
+        n = n or (seen or {}).get("number")
+        if not (seen and n):
+            return merged, None, f"gh could not read {label}'s PR"
+        if str(seen.get("state") or "").upper() == "MERGED":
+            continue
+        if ph.get("status") != "closed":
+            return merged, None, f"{label}'s PR #{n}: the phase is not closed"
+        c = checks(r, False, n)
+        view = (fresh_view(r, n) or {}) if c == "pass" else seen  # a fresh read changes no failed check
+        ok, why = mergeable(r, ph, n, view, c)
+        if ok and view.get("headRefOid") != seen.get("headRefOid"):
+            ok, why = False, "a new commit landed after its checks passed"
+        if ok and r.cfg["ultracode"]:  # --merge never starts a judge: a --plan run judges it first
+            judged = verdicts(data_dir() / "runs", r.key) if judged is None else judged
+            said, oid = judged.get((n, view["headRefOid"])), view["headRefOid"][:7]
+            if said != "pass":
+                ok, why = False, f"the judge blocked its head {oid}" if said else f"no judge pass on its head {oid}"
+        if not ok:
+            return merged, None, f"{label}'s PR #{n}: {why}"
+        code, why = merge(r, n, view)
+        if code is not None:
+            return merged, code, why
+        merged.append((label, n))
+    return merged, None, ""
+
+
+def merge_now(r, pidf):
+    """--merge: the sweep alone, in the foreground, auto_merge on or off: asking is the consent. Exit 8 when it
+    merged a PR, 2 when a merge step failed, else 0."""
+    st = run_state(pidf)
+    if st and st.get("alive"):
+        return refuse(busy(st))
+    merged, code, why = sweep(r)
+    if code is not None:
+        say(f"[yah] {why}")
+        return code
+    if not merged:
+        say(f"[yah] nothing to merge: {why or 'every phase PR is merged'}.")
+        return 0
+    say("[yah] merged {}.".format(", ".join(f"{label} PR #{n}" for label, n in merged))
+        + (f" Stopped at {why}." if why else ""))
+    return 8
+
+
 # ---------------------------------------------------------------- one iteration
 
 def descendants(pid):
@@ -1509,6 +1566,8 @@ def main():
                     "DAYS days (default 7) by day and role, then the weekly trend")
     ap.add_argument("--stop", action="store_true", help="end the run going in this checkout, and every process "
                     "under it")
+    ap.add_argument("--merge", action="store_true", help="merge the plan's open, green phase PRs now, from the "
+                    "bottom of the stack up, then stop (exit 8 when one merged)")
     a = ap.parse_args()
     if a.appetite_hint is not None:  # read-only, so a session may ask too
         say(appetite_hint(data_dir() / "runs", max(1, a.appetite_hint)))
@@ -1523,6 +1582,9 @@ def main():
     if a.stop and (a.target or a.plan or a.detach or a.dry_run or a.iterations is not None or a.budget is not None
                    or a.model or a.plugin_dir):
         return refuse("--stop takes only --cwd or --project.")
+    if a.merge and (a.target or a.plan or a.detach or a.dry_run or a.stop or a.iterations is not None
+                    or a.budget is not None or a.model or a.plugin_dir):
+        return refuse("--merge takes only --cwd or --project.")
     cfg = config()
     target = parse_target(a.target)
     if target is None:
@@ -1556,6 +1618,13 @@ def main():
     s = where.collect(str(top), use_gh=bool(gh_path)) or {}
     prod = (s.get("prod_branches") or [""])[0]  # the first branch config.json's prod text names in this repo
     fence = protected(trunks | set(s.get("protected") or []), prod)
+    if a.merge:  # no session runs, so any branch will do and claude is not needed
+        if not gh_path:
+            return refuse("gh (the GitHub CLI) not found. --merge needs it to read and merge the PRs.")
+        r = SimpleNamespace(cfg=cfg, top=str(top), key=key, gh=gh_path, protected=fence, phases=[], plan_key=None,
+                            spec="", prev=None, login="", waiting=False, log=None)
+        r.phases = plan_phases(r, s)
+        return merge_now(r, pidf)
     if not target and not a.plan and branch in fence:  # --plan pins its phase from the plan, like P<n>
         return refuse(f"you are on {branch}, a trunk or the PROD branch. Check out the phase branch first, "
                       "or pass P<n> and resume creates it from base.")

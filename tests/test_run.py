@@ -46,6 +46,17 @@ STATE = """# Shop
 CLOSED = STATE.replace("- [~] P2 Payment form | branch checkout/payment | base main",
                        "- [x] P2 Payment form | branch checkout/payment | base main | PR #12")
 MERGE_OK = "PR #12 merged by yah (merge commit)."
+# three closed phases, each PR stacked on the one below
+STACK = """# Shop
+
+## Plan: Checkout rewrite (docs/plans/checkout.md)
+- [x] P1 Cart API | branch p1 | base main | PR #11
+- [x] P2 Payment form | branch p2 | PR #12
+- [x] P3 Emails | branch p3 | PR #13
+
+## 2026-09-23
+- Next: Merge the stack.
+"""
 
 FAKE = r'''
 import json, os, re, subprocess, sys, time
@@ -74,8 +85,9 @@ def emit(ev):
 
 
 if role == "gh":
-    if args[:2] == ["pr", "list"]:  # --base: the PRs stacked on a merged head
-        print(json.dumps(script.get("stacked" if "--base" in args else "list", [])))
+    if args[:2] == ["pr", "list"]:  # --base: the PRs stacked on a merged head; stacked-<head> scripts one head
+        head = "stacked-" + args[args.index("--base") + 1] if "--base" in args else ""
+        print(json.dumps(script.get(head, script.get("stacked", [])) if head else script.get("list", [])))
     elif args[:2] in (["pr", "merge"], ["pr", "edit"]) or args[:1] == ["api"]:
         c = step("user" if "user" in args else args[1] if args[0] == "pr" else "delete")
         sys.stdout.write(c.get("out", ""))
@@ -84,8 +96,9 @@ if role == "gh":
     elif args[:2] == ["pr", "view"]:  # view-<ref> scripts one PR; view scripts the rest
         ref = "view-" + (args[2] if len(args) > 2 else "")
         print(json.dumps(step(ref if ref in script else "view")))
-    elif args[:2] in (["pr", "checks"], ["pr", "diff"]):
-        c = step("required" if "--required" in args else args[1])
+    elif args[:2] in (["pr", "checks"], ["pr", "diff"]):  # required-<n> scripts one PR's checks
+        key = "required" if "--required" in args else args[1]
+        c = step(key + "-" + args[2] if key + "-" + args[2] in script else key)
         for path, text in c.get("write", []):  # e.g. another session's limits.json while checks are pending
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
@@ -231,13 +244,13 @@ class RunTests(unittest.TestCase):
             self.assertEqual(p.returncode, code, out)
         for argv in self.calls("claude"):
             self.assert_safe(argv)
-        self.assert_merge_safe(out)
+        self.assert_merge_safe(out, "--merge" in args)
         return out
 
-    def assert_merge_safe(self, out):
+    def assert_merge_safe(self, out, asked=False):
         """Every run: a merge is a merge commit pinned to a head, nothing squashes, rebases, forces or deletes the
         branch with the merge, the ref DELETE comes after the merge and every retarget, and auto_merge off asks gh
-        nothing new and prints nothing new."""
+        nothing new and prints nothing new, unless --merge asked."""
         calls = self.calls("gh")
         for a in calls:
             for bad in ("--squash", "--rebase", "--delete-branch", "--admin", "--auto"):
@@ -254,7 +267,7 @@ class RunTests(unittest.TestCase):
                 self.assertIn("merge", kinds[:i], calls)
                 self.assertNotIn("retarget", kinds[i + 1:nxt], calls)
         cfg = self.data / "config.json"
-        if not (cfg.exists() and json.loads(cfg.read_text("utf-8")).get("auto_merge") is True):
+        if not asked and not (cfg.exists() and json.loads(cfg.read_text("utf-8")).get("auto_merge") is True):
             self.assertFalse(self.merge_calls(), calls)
             self.assertNotIn("Auto-merge", out)
             self.assertNotIn("merged by yah", out)
@@ -306,7 +319,7 @@ class RunTests(unittest.TestCase):
         self.script(list=[], view=[view()], required=[{"rc": 0}])
         repo = self.repo()
         inside = dict(self.env, YAH_PROTECTED="main,master")
-        for args in ([], ["--plan"], ["--detach"], ["--plan", "--detach"], ["P2"], ["--stop"]):
+        for args in ([], ["--plan"], ["--detach"], ["--plan", "--detach"], ["P2"], ["--stop"], ["--merge"]):
             with self.subTest(args=args):
                 out = self.run_yah(repo, *args, env=inside, code=5)
                 self.assertIn("[yah] run refused: inside a yah run session", out)
@@ -350,7 +363,7 @@ class RunTests(unittest.TestCase):
         pidf = self.pidf(repo)
         fd = yahlib.hold_run(pidf, {"pid": 4242, "target": "P2", "log": "old.log"})
         try:
-            for args in ([], ["--detach"]):
+            for args in ([], ["--detach"], ["--merge"]):
                 with self.subTest(args=args):
                     out = self.run_yah(repo, *args, code=5)
                     self.assertIn("already going in this checkout: pid 4242, P2, since ?, log old.log", out)
@@ -846,6 +859,106 @@ class RunTests(unittest.TestCase):
                 self.assertIn(f"kept {head}: a protected branch is never deleted", out)
                 self.assertEqual([a[:2] for a in self.merge_calls()],
                                  [["api", "user"], ["pr", "merge"], ["pr", "list"]])
+
+    # ------------------------------------------------------------ --merge: the stack sweep
+
+    def stack(self, **script):
+        """A green stack: gh user aryan, checks passing, PR #12 on p1 and #13 on p2 until the merge below retargets
+        each; what sweep reads of #12 and #13 comes after that retarget, so they target main."""
+        self.script(**dict({"list": [], "required": [{"rc": 0}], "user": [{"out": "aryan\n"}],
+                            "view-11": [view(headRefName="p1", headRefOid="1111111aa")],
+                            "view-12": [view(headRefName="p2", headRefOid="2222222bb")],
+                            "view-13": [view(headRefName="p3", headRefOid="3333333cc")],
+                            "stacked-p1": [{"number": 12}], "stacked-p2": [{"number": 13}]}, **script))
+
+    def merged(self):
+        return [a[2] for a in self.merges()]
+
+    def test_merge_sweeps_a_green_stack_bottom_up_on_any_branch(self):
+        repo = self.repo("main", state=STACK)  # auto_merge off: asking is the consent
+        self.stack()
+        out = self.run_yah(repo, "--merge", code=8)
+        calls = []
+        for n, head, oid, up in (("11", "p1", "1111111aa", ["12"]), ("12", "p2", "2222222bb", ["13"]),
+                                 ("13", "p3", "3333333cc", [])):
+            calls += [["pr", "merge", n, "--merge", "--match-head-commit", oid],
+                      ["pr", "list", "--base", head, "--state", "open", "--json", "number"],
+                      *[["pr", "edit", m, "--base", "main"] for m in up],
+                      ["api", "-X", "DELETE", "repos/{owner}/{repo}/git/refs/heads/" + head]]
+        self.assertEqual(self.merge_calls(), [["api", "user", "--jq", ".login"]] + calls)
+        for line in ("merged PR #11 into main (merge commit of 1111111)", "retargeted PR #12 from p1 to main",
+                     "merged PR #13 into main (merge commit of 3333333)", "merged P1 PR #11, P2 PR #12, P3 PR #13."):
+            self.assertIn("[yah] " + line, out)
+        self.assertEqual(self.calls("claude"), [])
+        self.assertFalse((self.data / "runs").exists())  # no run: no log, no pid file
+        self.assertIn("--merge takes only --cwd or --project.", self.run_yah(repo, "--merge", "P2", code=5))
+
+    def test_merge_stops_at_the_first_phase_that_cannot_merge(self):
+        repo = self.repo(state=STACK)
+        open_p2 = STACK.replace("- [x] P2", "- [~] P2")
+        cases = [("red checks", {"required-12": [{"rc": 1}]}, ["11"], "P2's PR #12: checks fail"),
+                 ("pending checks", {"required-13": [{"rc": 8}]}, ["11", "12"], "P3's PR #13: checks pending"),
+                 ("a new head", {"view-12": [view(headRefName="p2", headRefOid="2222222bb"),
+                                             view(headRefName="p2", headRefOid="9999999ff")]},
+                  ["11"], "P2's PR #12: a new commit landed after its checks passed"),
+                 ("another author", {"view-11": [view(headRefName="p1", author={"login": "mallory"})]}, [],
+                  "P1's PR #11: its author mallory is not you (aryan)"),
+                 ("still stacked", {"view-12": [view(headRefName="p2", baseRefName="p1")], "stacked-p1": []}, ["11"],
+                  "P2's PR #12: it targets p1, another phase's branch"),
+                 ("merged below", {"view-11": [view("MERGED", headRefName="p1")]}, ["12", "13"], ""),
+                 ("a closed PR", {"view-12": [view("CLOSED", headRefName="p2")]}, ["11"],
+                  "P2's PR #12: PR #12 is closed, not open")]
+        for name, script, merged, why in cases:
+            with self.subTest(name):
+                self.stack(**script)
+                out = self.run_yah(repo, "--merge", code=8 if merged else 0)
+                self.assertEqual(self.merged(), merged)
+                self.assertIn(f"Stopped at {why}." if merged and why else f"nothing to merge: {why}." if why
+                              else "[yah] merged P2 PR #12, P3 PR #13.", out)
+        for name, state, why in (("an open phase", open_p2, "P2's PR #12: the phase is not closed"),
+                                 ("a phase with no PR", STACK.replace(" | branch p3 | PR #13", ""), "P3 has no PR yet")):
+            with self.subTest(name):
+                (repo / "STATE.md").write_text(state, encoding="utf-8")
+                self.stack()
+                self.assertIn(f"Stopped at {why}.", self.run_yah(repo, "--merge", code=8))
+                self.assertEqual(self.merged(), ["11"] if name == "an open phase" else ["11", "12"])
+        with self.subTest("nothing to merge"):
+            (repo / "STATE.md").write_text(STACK.replace("- [x] P1", "- [~] P1"), encoding="utf-8")
+            self.stack()
+            self.assertIn("[yah] nothing to merge: P1's PR #11: the phase is not closed.",
+                          self.run_yah(repo, "--merge", code=0))
+            self.assertEqual(self.merged(), [])
+        with self.subTest("a merge step failed"):
+            (repo / "STATE.md").write_text(STACK, encoding="utf-8")
+            self.stack(merge=[{}, {"rc": 1, "err": "GraphQL: Base branch was modified\n"}])
+            out = self.run_yah(repo, "--merge", code=2)
+            self.assertIn("[yah] auto-merge of PR #12 failed: GraphQL: Base branch was modified", out)
+            self.assertNotIn("merge of PR #13", out)
+
+    def test_merge_with_the_profile_on_wants_a_judge_pass_on_each_head(self):
+        repo = self.repo(state=STACK)
+        self.config(ultracode=True)
+        runs = self.data / "runs"
+        runs.mkdir()
+        (runs / "shop-20260929-100000.log").write_text(
+            "2026-09-29 10:00:00 judge pass PR #11 head 1111111aa\n"
+            "2026-09-29 10:05:00 judge pass PR #12 head 0000000ee\n"  # an older head of #12
+            "2026-09-29 10:10:00 judge pass PR #13 head 3333333cc\n", encoding="utf-8")
+        (runs / "other-20260929-100000.log").write_text("2026-09-29 10:00:00 judge pass PR #12 head 2222222bb\n",
+                                                         encoding="utf-8")  # another project's log
+        self.stack()
+        self.assertIn("Stopped at P2's PR #12: no judge pass on its head 2222222.", self.run_yah(repo, "--merge", code=8))
+        self.assertEqual(self.merged(), ["11"])
+        with open(runs / "shop-20260930-100000.log", "w", encoding="utf-8") as f:
+            f.write("2026-09-30 10:00:00 judge block PR #12 head 2222222bb\n")
+        self.stack()
+        self.assertIn("Stopped at P2's PR #12: the judge blocked its head 2222222.", self.run_yah(repo, "--merge", code=8))
+        with open(runs / "shop-20260930-100000.log", "a", encoding="utf-8") as f:
+            f.write("2026-09-30 11:00:00 judge pass PR #12 head 2222222bb\n")  # judged again: the last verdict wins
+        self.stack()
+        self.run_yah(repo, "--merge", code=8)
+        self.assertEqual(self.merged(), ["11", "12", "13"])
+        self.assertEqual(self.calls("claude"), [])  # --merge never starts a judge
 
     # ------------------------------------------------------------ argv and --dry-run
 
