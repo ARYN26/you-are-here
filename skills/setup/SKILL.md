@@ -36,7 +36,7 @@ Offer: "Turn on auto-update for yah? Claude Code leaves it off for plugins from 
 
 ## 3d. Auto-merge (optional)
 
-Offer: "Let `yah run` merge its own PRs? It is off by default, and you merge every PR. With it on, only the `yah run` driver merges, never the model, and only a green PR you authored for a plan phase: at least one check ran and all passed, GitHub says it is mergeable with a clean merge state, it is not a draft, and no change request is newer than its last commit. It makes a merge commit pinned to the commit it checked (never a squash), then retargets any PR stacked on it, then deletes the merged branch, never a protected one. A run that merges ends with exit 8; with `--plan` it goes on to the next phase." On yes, run `setup.py --auto-merge` and show the output. It sets only `auto_merge` in config.json. `--uninstall` restores the previous value.
+Offer: "Let `yah run` merge its own PRs? It is off by default, and you merge every PR. With it on, only the `yah run` driver merges, never the model, and only a green PR you authored for a plan phase: at least one check ran and all passed, GitHub says it is mergeable with a clean merge state, it is not a draft, and no change request is newer than its last commit. It makes a merge commit pinned to the commit it checked (never a squash), then retargets any PR stacked on it, then deletes the merged branch, never a protected one. A run that merges ends with exit 8; with `--plan` it goes on to the next phase." On yes, run `setup.py --auto-merge` and show the output. It sets `auto_merge` in config.json and adds the three `run.py --merge` allow rules to settings.json, so auto mode lets `/yah:merge` run. `--uninstall` restores the previous value and removes the rules it added.
 
 ## 3e. GPT (optional)
 

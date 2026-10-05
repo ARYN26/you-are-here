@@ -50,7 +50,8 @@ def body(name):
 class DescriptionTests(unittest.TestCase):
     def test_files_found(self):
         self.assertEqual({p.parent.name for p in SKILLS},
-                         {"auto", "deep", "gpt", "phases", "resume", "setup", "start", "tree", "where", "wrap"})
+                         {"auto", "deep", "gpt", "merge", "phases", "resume", "setup", "start", "tree",
+                          "where", "wrap"})
         self.assertEqual({p.stem for p in AGENTS}, {"deep", "gpt", "scout"})
 
     def test_each_description_short(self):
@@ -62,7 +63,7 @@ class DescriptionTests(unittest.TestCase):
 
     def test_model_visible_total(self):
         visible = [f for f in SKILLS + AGENTS if model_visible(f)]
-        self.assertEqual(len(visible), 9)  # 6 skills + 3 agents; auto, resume, setup and tree are user-only
+        self.assertEqual(len(visible), 9)  # 6 skills + 3 agents; auto, merge, resume, setup and tree are user-only
         total = sum(len(parse(f)[0]["description"]) for f in visible)
         self.assertLessEqual(total, MAX_VISIBLE)
 
@@ -335,6 +336,16 @@ class AutoTests(unittest.TestCase):
         self.assertNotIn("run.py --stop*", tools)  # never matched `run.py" --stop`
         self.assertNotIn("Bash(python *scripts/run.py*)", tools)  # never a foreground run: it holds the session
 
+    def test_merge_now_runs_what_yah_merge_runs(self):
+        # a user-only skill cannot be called with the Skill tool, so the row runs run.py --merge itself
+        row = self.rows()[self.row("NEXT waits on the user")]
+        self.assertIn('Merge now: run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --merge` in a Bash call of its own', row)
+        self.assertIn("(what `/yah:merge` runs)", row)
+        self.assertIn("exit 8: read the table again", row)
+        self.assertIn("never retrying", row)
+        self.assertEqual(parse(ROOT / "skills/merge/SKILL.md")[0]["allowed-tools"].split(", "),
+                         [t for t in self.meta["allowed-tools"].split(", ") if t.endswith(" --merge)")])
+
     def test_an_ended_run_is_asked_about_before_the_run_starts_again(self):
         rows, ended, stopped = self.rows(), self.row("The RUN line says the run `ended` with exit 1"), \
             self.row("The RUN line says the run `ended` with exit 130")
@@ -447,6 +458,7 @@ class AutoTests(unittest.TestCase):
         self.assertIn('Merged, and NEXT names nothing after it: use the "No plan and no NEXT" row', rows[waits])
         self.assertIn("a merge that already happened", rows[empty])
         self.assertIn("ask: wait, or stack", rows[waits])
+        self.assertIn("for a plan phase's PR, merge now too", rows[waits])
         self.assertIn("the waiting PR's branch as its base", rows[waits])
         self.assertIn("Tiny: cut a new branch from that base", rows[waits])  # never commit onto the waiting PR
         self.assertIn("**plan it** (section 3)", rows[waits])
@@ -463,7 +475,9 @@ class AutoTests(unittest.TestCase):
     def test_deep_on_every_tier_and_merges_stay_the_users(self):
         self.assertIn("every plan tier", self.body)
         self.assertIn("Never merge a PR yourself", self.body)
-        self.assertIn("Only the run driver merges, and only when `auto_merge` is on", self.body)
+        self.assertIn("Never merge a PR yourself (no `gh pr merge`)", self.body)
+        self.assertIn("Only the run driver merges: `run.py --merge` when the user asks for it (`/yah:merge`", self.body)
+        self.assertIn("an unattended run only when `auto_merge` is on", self.body)
 
     def test_q1_asks_the_aim_once_right_before_the_pick(self):
         rows, aim, empty = self.rows(), self.row("No AIM"), self.row("No plan and no NEXT")
@@ -506,6 +520,30 @@ class AutoTests(unittest.TestCase):
     def test_wrap_and_phases_keep_the_aim_line(self):
         self.assertIn("never move, reword or delete it", body("wrap"))
         self.assertIn("never move or rewrite it", body("phases"))
+
+
+class MergeTests(unittest.TestCase):
+    """/yah:merge runs `run.py --merge` and reports what merged; the driver merges, never the model."""
+
+    def setUp(self):
+        self.meta, self.body = parse(ROOT / "skills/merge/SKILL.md")
+
+    def test_user_only(self):
+        self.assertEqual(self.meta.get("disable-model-invocation"), "true")  # a model never merges on its own prompting
+
+    def test_allowed_tools_are_the_rules_setup_installs(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import setup
+        # the skill quotes the path: `PY ".../run.py" --merge`, and the rule ends at --merge
+        self.assertEqual(self.meta["allowed-tools"].split(", "), list(setup.MERGE_ALLOW))
+        self.assertIn('PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --merge\n', self.body)
+        self.assertIn("Add nothing after `--merge`, not even `--cwd` or `--project`", self.body)
+
+    def test_reports_the_output_and_never_merges_another_way(self):
+        for s in ("Show the output verbatim in a code block", "Exit 8", "Exit 0", "Exit 5 (`run refused`) or 2",
+                  "Never run `gh pr merge` yourself", "never retry in another form",
+                  "never start a run or a judge", "`yah run --merge`", "works with `auto_merge` off"):
+            self.assertIn(s, self.body)
 
 
 class BeadsTests(unittest.TestCase):
@@ -733,6 +771,20 @@ class DocsTests(unittest.TestCase):
                 self.assertIn(words, crit)
                 self.assertIn(words, run_py)
         self.assertIn("(#critic-and-judge-quality-profile)", self.section("## Quality profile"))
+
+    def test_merge_now_section_matches_run_py(self):
+        runs = self.section("## Hands-free runs")
+        self.assertIn("#### Merge now: `/yah:merge`", runs)
+        self.assertIn("(#merge-now-yahmerge)", self.section("## What you get"))
+        run_py = (ROOT / "scripts/run.py").read_text("utf-8")
+        # the lines it quotes are the ones run.py prints and logs
+        for words in ("nothing to merge: ", "sweep stopped: ", "merged ", "judge pass PR #"):
+            with self.subTest(w=words):
+                self.assertIn(words, runs)
+        for words in ("nothing to merge: ", "sweep stopped: ", '"[yah] merged ', 'f"judge {', '} PR #{r.pr} head {'):
+            self.assertIn(words, run_py)
+        self.assertIn("`--merge` is refused beside a live run too", runs)
+        self.assertIn("With `--merge`: at least one PR merged", runs)
 
     def test_manifests(self):
         plugin = json.loads((ROOT / ".claude-plugin/plugin.json").read_text("utf-8"))
