@@ -654,20 +654,29 @@ def merge(r, n, view):
     return None, ""
 
 
+def ready(r, ph, n, view, checks):
+    """(view, ok, why): mergeable() on a read of PR n taken after its checks passed, since the wait for them can be
+    long: a review, a draft or a new commit that lands meanwhile stops the merge. view is the read the checks were
+    judged on; with checks not passing it is judged as is, since a fresh read changes no failed check."""
+    if checks != "pass":
+        return (view, *mergeable(r, ph, n, view, checks))
+    fresh = fresh_view(r, n) or {}
+    ok, why = mergeable(r, ph, n, fresh, checks)
+    if ok and fresh.get("headRefOid") != view.get("headRefOid"):
+        ok, why = False, "a new commit landed after its checks passed"
+    return fresh, ok, why
+
+
 def auto_merge(r, reason):
     """evaluate said open and green (exit 0) and auto_merge is on: merge when mergeable() allows. (code, reason):
     8 once merged (--plan goes on from its base; /yah:resume fetches it), 2 when a merge step failed, else 0
     with the skip reason."""
     if stopped(r.last):
         ok, why = False, "the last session stopped: " + needs_you(r)
-    elif r.phase is None or r.checks != "pass":  # a fresh read changes neither: skip its wait
-        ok, why = mergeable(r, r.phase, r.pr, r.view or {}, r.checks)
+    elif r.phase is None:  # a fresh read changes nothing: skip its wait
+        ok, why = mergeable(r, None, r.pr, r.view or {}, r.checks)
     else:
-        seen = (r.view or {}).get("headRefOid")
-        r.view = fresh_view(r) or {}
-        ok, why = mergeable(r, r.phase, r.pr, r.view, r.checks)
-        if ok and r.view.get("headRefOid") != seen:
-            ok, why = False, "a new commit landed after its checks passed"
+        r.view, ok, why = ready(r, r.phase, r.pr, r.view or {}, r.checks)
     if not ok:
         if r.chain:  # advance's own reason replaces this one
             tell(r, f"PR #{r.pr}: auto-merge skipped: {why}.")
@@ -693,7 +702,7 @@ def sweep(r, below=None):
         ref = str(n) if n is not None else ph.get("branch") or ""
         if not ref:
             return merged, None, f"{label} has no PR yet"
-        seen = pr_view(r, ref, PR_JSON + ",number") if r.gh else None
+        seen = pr_view(r, ref, "number,state,headRefName,headRefOid") if r.gh else None
         n = n or (seen or {}).get("number")
         if not (seen and n):  # an open phase's branch with no PR on it yet reads as nothing too
             return merged, None, f"gh could not read {label}'s PR" if pr_number(ph) or ph.get("status") == "closed" \
@@ -702,11 +711,7 @@ def sweep(r, below=None):
             continue
         if ph.get("status") != "closed":
             return merged, None, f"{label}'s PR #{n}: the phase is not closed"
-        c = checks(r, False, n)
-        view = (fresh_view(r, n) or {}) if c == "pass" else seen  # a fresh read changes no failed check
-        ok, why = mergeable(r, ph, n, view, c)
-        if ok and view.get("headRefOid") != seen.get("headRefOid"):
-            ok, why = False, "a new commit landed after its checks passed"
+        view, ok, why = ready(r, ph, n, seen, checks(r, False, n))
         if ok and r.cfg["ultracode"]:  # --merge never starts a judge: a --plan run judges it first
             judged = verdicts(data_dir() / "runs", r.key) if judged is None else judged
             said, oid = judged.get((n, view["headRefOid"])), view["headRefOid"][:7]
@@ -747,12 +752,9 @@ def sweep_start(r):
     return None, ""
 
 
-def merge_now(r, pidf):
-    """--merge: the sweep alone, in the foreground, auto_merge on or off: asking is the consent. Exit 8 when it
-    merged a PR, 2 when a merge step failed, else 0."""
-    st = run_state(pidf)
-    if st and st.get("alive"):
-        return refuse(busy(st))
+def merge_now(r):
+    """--merge: the sweep alone, in the foreground, auto_merge on or off: asking is the consent. main refuses it
+    beside a live run. Exit 8 when it merged a PR, 2 when a merge step failed, else 0."""
     merged, code, why = sweep(r)
     if code is not None:
         say(f"[yah] {why}")
@@ -1618,11 +1620,11 @@ def main():
         return 0
     if os.environ.get("YAH_PROTECTED") and not a.dry_run:  # set only in a run's own claude sessions
         return refuse("inside a yah run session. A run starts or stops from your own terminal or session.")
-    if a.stop and (a.target or a.plan or a.detach or a.dry_run or a.iterations is not None or a.budget is not None
-                   or a.model or a.plugin_dir):
+    others = (a.target or a.plan or a.detach or a.dry_run or a.iterations is not None or a.budget is not None
+              or a.model or a.plugin_dir)
+    if a.stop and others:
         return refuse("--stop takes only --cwd or --project.")
-    if a.merge and (a.target or a.plan or a.detach or a.dry_run or a.stop or a.iterations is not None
-                    or a.budget is not None or a.model or a.plugin_dir):
+    if a.merge and (others or a.stop):
         return refuse("--merge takes only --cwd or --project.")
     cfg = config()
     target = parse_target(a.target)
@@ -1647,6 +1649,9 @@ def main():
     pidf = run_pid_path(key, str(top), main_root)
     if a.stop:
         return stop_run(pidf)
+    st = run_state(pidf) if a.merge else None
+    if st and st.get("alive"):
+        return refuse(busy(st))
     pcfg = cfg["projects"].get(key) if isinstance(cfg["projects"].get(key), dict) else {}
     trunks = pcfg.get("trunks") or []
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
@@ -1663,7 +1668,7 @@ def main():
         r = SimpleNamespace(cfg=cfg, top=str(top), key=key, gh=gh_path, protected=fence, phases=[], plan_key=None,
                             spec="", prev=None, login="", waiting=False, log=None)
         r.phases = plan_phases(r, s)
-        return merge_now(r, pidf)
+        return merge_now(r)
     if not target and not a.plan and branch in fence:  # --plan pins its phase from the plan, like P<n>
         return refuse(f"you are on {branch}, a trunk or the PROD branch. Check out the phase branch first, "
                       "or pass P<n> and resume creates it from base.")
