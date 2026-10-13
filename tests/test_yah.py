@@ -280,27 +280,42 @@ class GuardTests(Base):
         self.data.mkdir(exist_ok=True)
         (self.data / f"state-{sid}.json").write_text(json.dumps(kv), encoding="utf-8")
 
+    SOON, NOW = "yah wraps after this step; /clear after.", "yah is wrapping now; /clear after."
+
     def test_fires_once_per_threshold_and_rearms(self):
         r = self.guard(160_000)
-        self.assertIn("wrap after this step", r["systemMessage"])
+        self.assertEqual(r["systemMessage"], "Context 160k: " + self.SOON)
         self.assertEqual(r["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
         self.assertTrue(r["hookSpecificOutput"]["additionalContext"].startswith("[yah] Context is 160k"))
         self.assertIn("/yah:wrap", r["hookSpecificOutput"]["additionalContext"])
         self.assertIsNone(self.guard(160_000))
-        self.assertIn("wrap now", self.guard(210_000)["systemMessage"])
+        self.assertIn(self.NOW, self.guard(210_000)["systemMessage"])
         self.assertIsNone(self.guard(210_000))
         self.assertIsNone(self.guard(100_000))  # below amber: re-arms
-        self.assertIn("wrap after this step", self.guard(160_000)["systemMessage"])
+        self.assertIn(self.SOON, self.guard(160_000)["systemMessage"])
+
+    def test_the_model_wraps_unasked_and_the_user_only_clears(self):
+        for tokens, user in ((160_000, self.SOON), (210_000, self.NOW)):
+            with self.subTest(tokens=tokens):
+                r = self.guard(tokens, sid=f"w{tokens}")
+                self.assertEqual(r["systemMessage"], f"Context {tokens // 1000}k: {user}")
+                ctx = r["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("run /yah:wrap yourself without being asked", ctx)
+                # the user no longer types /yah:wrap: the old texts told them to
+                for old in ("wrap now (/yah:wrap, then /clear)", "wrap after this step.", "/yah:wrap"):
+                    self.assertNotIn(old, r["systemMessage"])
+        self.assertIn("or to close the session when wrap started the run",
+                      self.guard(210_000, sid="w2")["hookSpecificOutput"]["additionalContext"])
 
     def test_tier_sets_thresholds(self):
         self.config(tier="pro")
-        self.assertIn("wrap after this step", self.guard(125_000)["systemMessage"])
-        self.assertIn("wrap now", self.guard(165_000)["systemMessage"])
+        self.assertIn(self.SOON, self.guard(125_000)["systemMessage"])
+        self.assertIn(self.NOW, self.guard(165_000)["systemMessage"])
 
     def test_skips_wrap_and_session_commands(self):
         for prompt in ("/yah:wrap", "/yah:wrap phase done", "/clear", "/compact", "/exit"):
             self.assertIsNone(self.guard(210_000, prompt=prompt))
-        self.assertIn("wrap now", self.guard(210_000)["systemMessage"])
+        self.assertIn(self.NOW, self.guard(210_000)["systemMessage"])
 
     def test_premium_nudge_once(self):
         self.state("g2", premium="FABLE", tokens=1000)
@@ -466,7 +481,7 @@ class GuardTests(Base):
         self.assertIsNone(self.guard(sid="o3", scripts=new))
         (self.cfg / "plugins" / "installed_plugins.json").write_text("[]", encoding="utf-8")
         r = self.guard(210_000, sid="o4", scripts=old)  # unreadable: no notice, other nudges intact
-        self.assertEqual(r["systemMessage"], "Context 210k: wrap now (/yah:wrap, then /clear).")
+        self.assertEqual(r["systemMessage"], "Context 210k: " + self.NOW)
 
     def test_auto_merge_notice_once_ever_to_the_user_only(self):
         daily = self.data / "guard-daily.json"
@@ -484,7 +499,7 @@ class GuardTests(Base):
         self.assertNotIn("auto-merge", r["systemMessage"])
         daily.unlink()  # beside the model's nudges, the notice still goes to the user alone
         r = self.guard(210_000, sid="n4", notice=True)
-        self.assertTrue(r["systemMessage"].startswith("Context 210k: wrap now (/yah:wrap, then /clear). " + self.NOTICE))
+        self.assertTrue(r["systemMessage"].startswith(f"Context 210k: {self.NOW} {self.NOTICE}"))
         self.assertTrue(r["hookSpecificOutput"]["additionalContext"].startswith("[yah] Context is 210k"))
         self.assertNotIn("merge", r["hookSpecificOutput"]["additionalContext"])  # never to the model
 

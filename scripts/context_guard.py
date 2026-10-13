@@ -1,7 +1,7 @@
 """context_guard.py: UserPromptSubmit hook (and PostToolUse inside `yah run`). Nudges, never blocks. Each nudge fires once:
 
-  context >= wrap_soon   "finish this step, then /yah:wrap"
-  context >= wrap_now    "wrap now"
+  context >= wrap_soon   the model runs /yah:wrap after this step, unasked; the user gets "/clear after"
+  context >= wrap_now    the model runs /yah:wrap now, unasked; the user gets "/clear after"
   premium main model     once per session (config.json premium_models)
   weekly % more than pace_slack points ahead of the week's elapsed share: once a day
   weekly % catch_up_pct or more points behind it: once a day, its own flag (spend freely; never in yah run's sessions)
@@ -117,13 +117,15 @@ def main():
     if tokens >= cfg["wrap_now"] and not flags.get("now"):
         flags["now"] = flags["soon"] = True
         to_claude.append(f"[yah] Context is {k}k tokens. Wrap now: answer this prompt briefly, then run /yah:wrap "
-                         "and tell the user to /clear. Every further turn re-reads all of this context.")
-        to_user.append(f"Context {k}k: wrap now (/yah:wrap, then /clear).")
+                         "yourself without being asked, and tell the user to /clear (or to close the session when "
+                         "wrap started the run). Every further turn re-reads all of this context.")
+        to_user.append(f"Context {k}k: yah is wrapping now; /clear after.")
     elif tokens >= cfg["wrap_soon"] and not flags.get("soon"):
         flags["soon"] = True
-        to_claude.append(f"[yah] Context is {k}k tokens. Finish the current step, then run /yah:wrap and tell the "
-                         "user it is safe to /clear. Do not start a new task in this session.")
-        to_user.append(f"Context {k}k: wrap after this step.")
+        to_claude.append(f"[yah] Context is {k}k tokens. Finish the current step, then run /yah:wrap yourself "
+                         "without being asked, and tell the user it is safe to /clear. Do not start a new task in "
+                         "this session.")
+        to_user.append(f"Context {k}k: yah wraps after this step; /clear after.")
 
     tag = state.get("premium")
     if tag and not flags.get("premium"):

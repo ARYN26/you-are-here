@@ -426,9 +426,38 @@ class AutoTests(unittest.TestCase):
         for code in ("1, 2, 3, 4 or 7", "`died`"):
             self.assertIn(code, rows[ended])
         self.assertIn("rerun it, `yah:deep` on why it stopped, or go on here by hand", rows[ended])
-        self.assertIn("offer waiting in place of deep", rows[ended])  # exit 7: a rerun stops again at once
+        self.assertIn("offer waiting in place of deep", rows[ended])  # exit 7 with `here`: a rerun stops at once
         self.assertIn("never restart it unasked", rows[stopped])
         self.assertNotIn("**Start the run", rows[stopped])
+        # hands-off: a dead run, and a week stop that has lifted, start again with no question
+        died = self.row("The RUN line says the run `died`")
+        week = self.row("The RUN line says the run `ended` with exit 7")
+        self.assertLess(self.row("NEXT starts with `NEEDS-HUMAN:`"), died)
+        self.assertLess(died, ended)
+        self.assertLess(week, ended)  # the first match wins: the asking row is left for `here`
+        for i in (died, week):
+            self.assertIn("and the task is not `here`", rows[i].split(" | ")[0])
+            self.assertIn("**start the run** without asking", rows[i])
+            self.assertNotIn("ask:", rows[i].lower())
+        self.assertIn('scripts/run.py" --plan --dry-run` and read its `now` line', rows[week])
+        self.assertIn("no longer says `would stop, exit 7`", rows[week])
+        self.assertIn("would stop, exit {code}", (ROOT / "scripts/run.py").read_text("utf-8"))  # the line it reads
+        self.assertIn("when the stop lifts, and that the next `yah <project>` after that restarts the run, then stop",
+                      rows[week])
+        self.assertIn("reaches this row only with the task `here`", rows[ended])
+        # exits 3 and 4 come after the run's own diagnosis: say so, then ask, never a blind rerun unasked
+        self.assertIn("Exits 3 and 4: when the reason says `A diagnosis was tried`", rows[ended])
+        self.assertIn("read-only diagnosis and a rebuild after it", rows[ended])
+        self.assertNotIn("without asking", rows[ended])
+        # the [yah] block clips the RUN line to 120 characters, which drops "A diagnosis was tried: <file>."
+        read = rows[ended].index("first read `run.reason` in `where.py --json --no-gh`: the `[yah]` block clips it")
+        self.assertLess(read, rows[ended].index("Say its exit, reason and last log line"))
+        # a dead run's dirty tree is likely its cut-off session's edits: start the run's step 1 still asks
+        self.assertIn("Its step 1 still asks first about a dirty tree", rows[died])
+        self.assertIn("If the tree is dirty, say what is uncommitted and ask first", self.body)
+        # a kill or a closed terminal ends a run with exit 130 (run.py's signal handlers), never `died`
+        self.assertNotIn("killed process", rows[died])
+        self.assertIn("(Ctrl-C, `yah run --stop`, a kill or a closed terminal)", rows[stopped])
 
     def test_an_appetite_stop_asks_continue_shrink_or_drop(self):
         rows, spent = self.rows(), self.row("The RUN line says the run `ended` with exit 9")
@@ -777,11 +806,37 @@ class BeadsTests(unittest.TestCase):
 
     def test_resume_critique_is_read_only_and_the_build_folds_it_in(self):
         meta, text = parse(ROOT / "skills" / "resume" / "SKILL.md")
-        self.assertIn("|critique|judge]", meta["argument-hint"])
+        self.assertIn("|critique|judge|", meta["argument-hint"])
         self.assertIn("[critique=<path>]", meta["argument-hint"])
         for s in ("ends here and changes nothing", "at most 300 words", "`YAH-RESULT: critique-done`",
                   "the path runs to the end", "a `Decided:` log line", "never write NEEDS-HUMAN because of it"):
             self.assertIn(s, text)
+
+    def test_resume_diagnose_is_read_only(self):
+        meta, text = parse(ROOT / "skills" / "resume" / "SKILL.md")
+        self.assertIn("|judge|diagnose]", meta["argument-hint"])
+        self.assertTrue(meta["argument-hint"].endswith("[log=<path>]"))  # it comes last, like critique=
+        self.assertIn("`critique=<path>`, `findings=<path>` or `log=<path>` comes last", text)
+        diag = text[text.index("**diagnose**"):text.index("## 2.")]
+        self.assertGreater(text.index("**diagnose**"), text.index("**critique**"))  # beside it, in step 1
+        for s in ("changes nothing", "no branch switch, edit, commit or wrap", "`log=<path>`", "last 80 lines",
+                  "`Tried:`, `Done:` and `Decided:` log lines", "at most 300 words", "why the phase is stuck",
+                  "different approach", "first concrete step", "Never write NEEDS-HUMAN for a technical approach",
+                  "a decision only the user can make, say so in the answer", "`YAH-RESULT: diagnose-done`"):
+            self.assertIn(s, diag, s)
+        for s in ("git switch", "git commit", "git push", "/yah:wrap"):  # read-only: nothing it could run to change
+            self.assertNotIn(s, diag, s)
+        self.assertIn("- `YAH-RESULT: diagnose-done` in diagnose mode", text)
+        # yah run hands a diagnosis to whatever slice comes next (fix-checks and address-review too): the rule
+        # sits above the mode bullets, not inside build's
+        slice_ = text[text.index("## 3. One bounded slice"):text.index("- **build:**")]
+        rule = "In every mode below, with `critique=<path>`, read that file first and fold it in"
+        self.assertIn(rule, slice_)
+        self.assertIn("never write NEEDS-HUMAN because of it", slice_)  # a critique's rule still holds
+        self.assertIn("A diagnosis is read the same way: take its new approach over the `Tried:` ones", slice_)
+        self.assertEqual(text.count("critique=<path>`, read"), 1)
+        modes = text[text.index("- **build:**"):text.index("`<n>` is TARGET's number")]
+        self.assertNotIn("critique=", modes)
 
     def test_resume_judge_is_read_only_and_fix_findings_fixes_what_it_proved(self):
         meta, text = parse(ROOT / "skills" / "resume" / "SKILL.md")
@@ -927,6 +982,36 @@ class SetupSkillTests(unittest.TestCase):
         self.assertNotIn("On yes, change nothing", section)
         self.assertIn("Step 3d is the one opt-out: auto-merge is on by default, so there a no turns it off.",
                       setup)  # the yes-to-change rule's exception
+
+    def test_yes_to_all_after_the_tier_and_the_extras_still_asked(self):
+        setup = body("setup")
+        heads = [ln for ln in setup.splitlines() if ln.startswith("## ")]
+        self.assertEqual(heads[:2], ["## 0. Yes to all (recommended)", "## 1. Tier"])
+        step = setup[setup.index("## 0. Yes to all"):setup.index("## 1. Tier")]
+        # the tier, then the preview (it writes nothing), so the yes sees any statusLine it replaces; then the offer
+        order = [step.index(w) for w in ("Ask the tier first (step 1).", "Then run step 2's preview and show it",
+                                         "any statusLine it would replace before they answer",
+                                         '"Recommended: yes to all? It applies that preview')]
+        self.assertEqual(order, sorted(order))
+        yes = step[step.index("- Yes:"):step.index("- No:")]
+        for want in ("that one answer is the yes for steps 3, 3c, 4 and 5", "without asking again",
+                     "show each output: step 3's apply", "`setup.py --auto-update` (3c)",
+                     "Skip 3d: auto-merge keeps its current value", "the launcher as step 4 says",
+                     "`setup.py --install-rules` (5)",
+                     "ask only the optional extras, each its own question", "the quality profile (3b, `max20` only)",
+                     "GPT (3e, only when `codex` is on PATH)"):
+            self.assertIn(want, yes, want)
+        for extra in ("--ultracode", "--codex", "--auto-merge"):  # never applied by the yes to all: an opt-out stands
+            self.assertNotIn(extra, step)
+        self.assertIn("leaves auto-merge as it is (on unless you turned it off)", step)
+        self.assertNotIn("keeps auto-merge on", step)
+        self.assertIn("- No: go on from step 3 one step at a time, each with its own question.", step)
+        self.assertIn("each one needs the user's explicit yes. A yes to all (step 0) is that yes for each step it "
+                      "covers.", setup)
+        # the setup.py commands the steps run are unchanged
+        for cmd in ("`setup.py --tier <tier> --dry-run`", "`setup.py --tier <tier> --yes`", "`setup.py --auto-update`",
+                    "`setup.py --install-launcher <rcfile>`", "`setup.py --install-rules`"):
+            self.assertIn(cmd, setup, cmd)
 
 
 class DocsTests(unittest.TestCase):
@@ -1075,6 +1160,66 @@ class DocsTests(unittest.TestCase):
         for words in ('"merged by yah"', '"plan done"'):  # the stop lines it quotes are the ones run.py writes
             self.assertIn(words.strip('"'), run_py)
             self.assertIn(words, merge if words == '"merged by yah"' else runs)
+
+    def test_a_stuck_phase_gets_a_diagnosis_first(self):
+        runs = self.section("## Hands-free runs")
+        diag = runs[runs.index("#### Diagnosis: a stuck phase"):runs.index("#### Whole plans")]
+        for want in ("stop stalled (exit 3)", "at the iteration cap (exit 4), but only when the plan's `## Bet` has an "
+                     "`appetite:` line", "The `run_total_hours` stop never gets one",
+                     "`/yah:resume P2 diagnose log=<run log>`", "`git commit` and `git push` denied",
+                     "`--add-dir` on the runs folder", "at most 300 words", "why the phase is stuck",
+                     "a different approach from every `Tried:` line", "`YAH-RESULT: diagnose-done`",
+                     "GPT through `codex.py` when [codex](#claude--gpt) is on and not down", "else `roles.judge`",
+                     "Never Fable", "`runs/<run>-P2-diagnose.md`", "as `critique=<path>`", "The stall count resets",
+                     "the cap grows by half the run's starting cap (at least 1)", "skipped but still counts",
+                     "`run_retries` diagnoses per run (default 1; 0 keeps the old stops)",
+                     '"A diagnosis was tried: <file>."', '"A diagnosis was tried and skipped."',
+                     "counts toward the appetite and `yah run --spend`",
+                     "handed to the next slice (a build, `fix-checks` or `address-review`; a judge's `fix-findings` "
+                     "slice leaves it to the one after)", "a cap reached before the phase ran a session",
+                     "less time left than the diagnosis may take", "The `run_total_hours` stop never says it."):
+            self.assertIn(want, diag, want)
+        rows = {ln.split(" | ")[0]: ln for ln in runs.splitlines() if ln.startswith("| ")}
+        self.assertIn("one read-only [diagnosis](#diagnosis-a-stuck-phase) and a rebuild", rows["| 3"])
+        self.assertIn("`run_retries`, default 1", rows["| 3"])
+        self.assertIn("has an appetite first gets one read-only [diagnosis]", rows["| 4"])
+        self.assertIn("`run_total_hours` never gets one", rows["| 4"])
+        caps = rows["| `run_retries`"]
+        self.assertTrue(caps.startswith("| `run_retries` | 1 | "))
+        self.assertIn("0 keeps the old stops", caps)
+        self.assertIn("A stall, or the cap with an appetite, first gets a read-only `diagnose` session", runs)
+        self.assertIn("(critiques, judges and diagnoses)", runs)
+        self.assertGreaterEqual(self.readme.count("(#diagnosis-a-stuck-phase)"), 7)
+
+    def test_autopilot_restarts_a_dead_or_week_stopped_run(self):
+        check_in = self.section("## Autopilot")
+        for want in ("the next `yah shop` acts on it without your typing a command",
+                     "A run that died starts again with no question",
+                     "starts again once a `--dry-run` says the week no longer stops it",
+                     "says when the stop lifts and stops", "has usually had one read-only [diagnosis]",
+                     "It never restarts unasked a run you stopped (exit 130) or one that spent its appetite (exit 9).",
+                     "a kill or a closed terminal ends a run as stopped (exit 130), not died"):
+            self.assertIn(want, check_in, want)
+        runs = self.section("## Hands-free runs")
+        self.assertIn("a run that died with no exit code it marks stopped (exit 130)", runs)
+        self.assertIn("killed the run (SIGTERM) or closed its terminal (SIGHUP)", runs)
+        self.assertNotIn("or for a run that stopped offers a rerun", self.readme)
+        auto = next(ln for ln in self.readme.splitlines() if ln.startswith("| `/yah:auto` |"))
+        self.assertIn("It starts a run that died again without asking", auto)
+        self.assertNotIn("for one that ended offers a rerun", auto)
+
+    def test_the_wrap_nudge_and_setups_yes_to_all(self):
+        for want in ('"yah wraps after this step; /clear after"', '"yah is wrapping now; /clear after"',
+                     "Claude runs `/yah:wrap` itself, unasked", "You type nothing: the context guard has Claude run "
+                     "`/yah:wrap` itself"):
+            self.assertIn(want, self.readme, want)
+        self.assertNotIn("wrap now (/yah:wrap, then /clear)", self.readme)
+        install = self.section("## Install")
+        for want in ("It asks your tier and shows a dry run, which writes nothing and names any statusLine it would "
+                     "replace. Then it offers **yes to all** (recommended)", "That one yes covers each of those steps",
+                     "Only the extras then get their own question", "Say no to go step by step instead",
+                     "[auto-merge](#auto-merge-on-by-default) left as it is (on unless you turned it off)"):
+            self.assertIn(want, install, want)
 
 
 if __name__ == "__main__":

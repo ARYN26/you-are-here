@@ -6,9 +6,15 @@ disable-model-invocation: true
 
 # Setup
 
-Every step changes a file outside this repo, so each one needs the user's explicit yes. If they say no, skip that step and go on. Step 3d is the one opt-out: auto-merge is on by default, so there a no turns it off.
+Every step changes a file outside this repo, so each one needs the user's explicit yes. A yes to all (step 0) is that yes for each step it covers. If they say no to a step, skip it and go on. Step 3d is the one opt-out: auto-merge is on by default, so there a no turns it off.
 
 Run setup with Bash as `PY "${CLAUDE_SKILL_DIR}/../../scripts/setup.py" <flags>`. `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
+
+## 0. Yes to all (recommended)
+
+Ask the tier first (step 1). Then run step 2's preview and show it: it writes nothing, and the user sees any statusLine it would replace before they answer. Then offer: "Recommended: yes to all? It applies that preview, turns on auto-update, leaves auto-merge as it is (on unless you turned it off), adds the `yah` launcher and appends the working rules to your user CLAUDE.md (a few hundred tokens on every turn). `--uninstall` undoes all of it."
+- Yes: that one answer is the yes for steps 3, 3c, 4 and 5, so run them in order without asking again, and show each output: step 3's apply, `setup.py --auto-update` (3c), the launcher as step 4 says, and `setup.py --install-rules` (5). Skip 3d: auto-merge keeps its current value. Then ask only the optional extras, each its own question: the quality profile (3b, `max20` only) and GPT (3e, only when `codex` is on PATH). Then step 6.
+- No: go on from step 3 one step at a time, each with its own question.
 
 ## 1. Tier
 

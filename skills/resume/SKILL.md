@@ -1,7 +1,7 @@
 ---
 name: resume
 description: Headless step for yah run - one bounded slice of a phase, then wrap and a YAH-RESULT line.
-argument-hint: "[P<n>|#<pr>] [build|fix-checks|address-review|fix-findings|critique|judge] [base=<branch>] [critique=<path>] [findings=<path>]"
+argument-hint: "[P<n>|#<pr>] [build|fix-checks|address-review|fix-findings|critique|judge|diagnose] [base=<branch>] [critique=<path>] [findings=<path>] [log=<path>]"
 disable-model-invocation: true
 allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*), Bash(py -3 *scripts/where.py*), Bash(python3 *scripts/brain.py*), Bash(python *scripts/brain.py*), Bash(py -3 *scripts/brain.py*)
 ---
@@ -9,7 +9,7 @@ allowed-tools: Bash(python3 *scripts/where.py*), Bash(python *scripts/where.py*)
 # Resume
 
 Arguments: $ARGUMENTS
-TARGET is a word like `P3` or `#12` (none means the current phase). MODE is `build` (default), `fix-checks`, `address-review`, `fix-findings`, `critique` or `judge`. `base=<branch>` means yah run worked out the phase's base because the plan does not hold it: the phase below merged, or this phase stacks on it. `critique=<path>` or `findings=<path>` comes last, and the path runs to the end of the arguments.
+TARGET is a word like `P3` or `#12` (none means the current phase). MODE is `build` (default), `fix-checks`, `address-review`, `fix-findings`, `critique`, `judge` or `diagnose`. `base=<branch>` means yah run worked out the phase's base because the plan does not hold it: the phase below merged, or this phase stacks on it. `critique=<path>`, `findings=<path>` or `log=<path>` comes last, and the path runs to the end of the arguments.
 
 No one is watching. Never ask a question or wait for an answer. A decision that needs the user becomes NEXT = `NEEDS-HUMAN: <one question>`, then you stop. Where /yah:wrap says to ask, offer or tell the user, put it in your final message instead.
 
@@ -38,6 +38,8 @@ If NEXT starts with `NEEDS-HUMAN:`, print `YAH-RESULT: needs-human` and stop. Ch
 
 **critique** (yah run, once before a phase's first build) ends here and changes nothing: no branch switch, edit, commit or wrap. Read the code the phase will touch, then write at most 300 words: what will break, what is missing, and the order to build in. End with `YAH-RESULT: critique-done`.
 
+**diagnose** (yah run, when a phase stalled or hit its cap) ends here and changes nothing: no branch switch, edit, commit or wrap. Read the run log at the `log=<path>` file (its last 80 lines or so), the phase's `Tried:`, `Done:` and `Decided:` log lines, NEXT and the code the phase touches. Then write at most 300 words: why the phase is stuck, with the evidence, and a different approach from every `Tried:` line, with its first concrete step. Never write NEEDS-HUMAN for a technical approach. Only when the stall is a decision only the user can make, say so in the answer. End with `YAH-RESULT: diagnose-done`.
+
 ## 2. Get on the phase branch
 
 The branch is the PR's `headRefName`, else the phase `branch`, else the current `git.branch` if it is not forbidden, not `base` and not another phase's `branch` (yah run leaves the finished phase's branch checked out). With none of these, write NEXT = `NEEDS-HUMAN: Which branch should <label> use?` via /yah:wrap and stop.
@@ -50,7 +52,9 @@ The branch is the PR's `headRefName`, else the phase `branch`, else the current 
 ## 3. One bounded slice
 
 Do the smallest step toward NEXT that can be tested and committed on its own. No other phases, no unrelated cleanup.
-- **build:** work toward NEXT. With `critique=<path>`, read that file first and fold it in; each change it makes to the plan is a `Decided:` log line when you wrap. It is a reviewer's advice: never write NEEDS-HUMAN because of it.
+
+In every mode below, with `critique=<path>`, read that file first and fold it in; each change it makes to the plan is a `Decided:` log line when you wrap. It is a reviewer's advice: never write NEEDS-HUMAN because of it. A diagnosis is read the same way: take its new approach over the `Tried:` ones, from its first step, unless it names a decision only the user can make (that one is NEEDS-HUMAN).
+- **build:** work toward NEXT.
 - **fix-checks:** `gh pr checks <n>`, then `gh run view <id> --log-failed` for each failing run (the id is in the check's `/actions/runs/<id>` link). Fix the cause. Never skip, disable or weaken a check or test to make it pass. A failure outside the code (secrets, quota, infra) is NEEDS-HUMAN.
 - **address-review:** `gh pr view <n> --comments`, then `gh api repos/{owner}/{repo}/pulls/<n>/comments` for the inline comments. Make the requested changes. A request that needs a product decision is NEEDS-HUMAN.
 - **fix-findings:** read the judge's findings in the `findings=<path>` file. Each is a claim, whether Claude or GPT wrote it: prove it by reading the code or running a test before you fix it. Fix each proven one and add a regression test where one fits; each fix is a `Done:` or `Decided:` log line when you wrap. A finding you show is wrong is a `Decided:` line with the proof. A finding that needs a product decision is NEEDS-HUMAN.
@@ -78,6 +82,7 @@ Then follow /yah:wrap. It rewrites NEXT, writes at most one brain note, and comm
 
 After wrap's finish block, the last line of your final message is exactly the first of these that applies:
 - `YAH-RESULT: critique-done` in critique mode
+- `YAH-RESULT: diagnose-done` in diagnose mode
 - `YAH-RESULT: judge pass` or `YAH-RESULT: judge block <count>` in judge mode
 - `YAH-RESULT: blocked push denied` when a push or merge was denied
 - `YAH-RESULT: needs-human` when NEXT starts with `NEEDS-HUMAN:`
