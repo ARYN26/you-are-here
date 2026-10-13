@@ -24,9 +24,9 @@ EFFORTS = ("low", "medium", "high", "xhigh")  # max is refused everywhere
 DEFAULTS = {"tier": "max5", "pace_slack": 15, "premium_models": ["fable", "mythos"], "recent_days": 14,
             "brain_dir": "docs/brain", "recall_max_chars": 10000,
             "run_iterations": 8, "run_iteration_minutes": 45, "run_total_hours": 6,
-            "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "ultracode": False, "auto_merge": True,
-            "roles": {}, "critic_week_skip_pct": 50, "catch_up_pct": 20, "codex": False, "codex_model": "gpt-6.1-sol",
-            "codex_effort": "high", "codex_timeout_minutes": 15}
+            "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "run_retries": 1, "ultracode": False,
+            "auto_merge": True, "roles": {}, "critic_week_skip_pct": 50, "catch_up_pct": 20, "codex": False,
+            "codex_model": "gpt-6.1-sol", "codex_effort": "high", "codex_timeout_minutes": 15}
 # tier -> --max-budget-usd per `yah run` iteration, unless run_budget_usd is set.
 RUN_BUDGET = {"pro": 5, "max5": 10, "max20": 15, "api": 5}
 _config = None
@@ -103,6 +103,9 @@ def config():
                     "run_checks_wait_minutes", "run_week_stop_pct", "critic_week_skip_pct", "catch_up_pct",
                     "codex_timeout_minutes"):
             cfg[key] = num(cfg[key], DEFAULTS[key])
+        # diagnoses a phase gets before a stall or the cap stops a yah run; 0 keeps those stops, junk is the default
+        retries = num(cfg["run_retries"], -1)
+        cfg["run_retries"] = int(retries) if 0 <= retries < float("inf") else DEFAULTS["run_retries"]
         if cfg["catch_up_pct"] <= 0:  # 0 or less would call a week on or over pace catch-up
             cfg["catch_up_pct"] = DEFAULTS["catch_up_pct"]
         cfg["run_budget_usd"] = num(cfg.get("run_budget_usd"), RUN_BUDGET.get(cfg["tier"], RUN_BUDGET["max5"]))

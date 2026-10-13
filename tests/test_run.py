@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -504,20 +505,336 @@ class RunTests(unittest.TestCase):
         time.sleep(1)
         self.assertEqual(beat.stat().st_size, size, "the detached child outlived the kill")
 
-    def test_stall_stops_with_exit_3(self):
-        self.script(claude=[{"tag": "progress"}])
-        self.assertIn("unchanged for 2 iterations", self.run_yah(self.repo(), code=3))
-        self.assertEqual(len(self.calls("claude")), 2)
+    def bet(self, repo, appetite="$20 and 5h"):
+        """The plan file STATE.md names, with an appetite in its ## Bet."""
+        plan = repo / "docs" / "plans" / "checkout.md"
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text(f"# Checkout\n\n## Bet\n- appetite: {appetite}\n\n### P2 Payment form\n", encoding="utf-8")
 
-    def test_caps_stop_with_exit_4(self):
+    def test_a_stall_gets_one_read_only_diagnosis(self):
         repo = self.repo()
-        self.script(claude=[{"commit": True}])
-        self.assertIn("cap of 2 iterations", self.run_yah(repo, "--iterations", "2", code=4))
-        self.assertEqual(len(self.calls("claude")), 2)
-        self.config(run_total_hours=0.0006)
-        self.script(claude=[{"commit": True, "sleep": 3}])
-        self.assertIn("run_total_hours", self.run_yah(repo, code=4))
-        self.assertEqual(len(self.calls("claude")), 1)
+        self.script(claude=[{"tag": "progress"}], diagnose=[{"result": {
+            "result": "The gateway mock hides the 402. Try the sandbox key.\nYAH-RESULT: diagnose-done",
+            "total_cost_usd": 0.5}}])
+        out = self.run_yah(repo, code=3)
+        log = self.run_logs()[0]
+        diag = log.with_name(log.stem + "-P2-diagnose.md")
+        # two stalled builds, one diagnosis, then a build on its answer; a second stall stops: no second diagnosis
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 2 + [
+            "/yah:resume P2 diagnose log=" + log.as_posix(), "/yah:resume P2 build critique=" + diag.as_posix(),
+            "/yah:resume P2 build"])
+        self.assertIn("Try the sandbox key.", diag.read_text("utf-8"))
+        runs = (self.data / "runs").resolve()
+        calls = self.calls("claude")
+        argv = calls[2]  # read-only like a critique, on roles.judge (never fable), and it may read the run log
+        deny = argv[argv.index("--disallowedTools") + 1:argv.index("--max-budget-usd")]
+        for tool in ("Edit", "Write", "NotebookEdit", "Bash(git commit*)", "Bash(git push*)"):
+            self.assertIn(tool, deny)
+        self.assertEqual(Path(self.flag(argv, "--add-dir")).resolve(), runs)
+        self.assertEqual((self.flag(argv, "--model"), self.flag(argv, "--effort")), ("opus", "high"))
+        self.assertNotEqual(self.flag(argv, "--model"), "fable")
+        build = calls[3]  # the build that reads the answer can still commit and push
+        self.assertEqual(Path(self.flag(build, "--add-dir")).resolve(), runs)
+        self.assertNotIn("Edit", build[build.index("--disallowedTools") + 1:build.index("--max-budget-usd")])
+        self.assertIn(f"stop (exit 3): HEAD and NEXT unchanged for 2 iterations in a row. A diagnosis was tried: "
+                      f"{diag.name}.", out)
+        text = log.read_text("utf-8")
+        for want in ("exit 3 held for a read-only diagnosis (1 of 1): HEAD and NEXT unchanged for 2 iterations",
+                     f"diagnose P2: opus high (diagnose: roles.judge), $0.50, diagnose-done, {diag.name}",
+                     "Cost $1.00 over 4 iterations, plus $0.50 over 1 critic/judge sessions."):
+            self.assertIn(want, text)
+        self.assertEqual(text.count("diagnose P2: "), 1)
+        with self.subTest("a diagnosis that fails still counts"):
+            self.clear_run_logs()
+            self.script(claude=[{"tag": "progress"}],
+                        diagnose=[{"result": {"is_error": True, "subtype": "error_max_budget_usd"}}])
+            out = self.run_yah(repo, code=3)
+            self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 2 + [
+                "/yah:resume P2 diagnose log=" + self.run_logs()[0].as_posix()] + ["/yah:resume P2 build"] * 2)
+            self.assertIn("stop (exit 3): HEAD and NEXT unchanged for 2 iterations in a row. A diagnosis was tried and "
+                          "skipped.", out)
+            self.assertIn("diagnose P2: opus high (diagnose: roles.judge), $0.25, skipped: error_max_budget_usd",
+                          self.run_logs()[0].read_text("utf-8"))
+        with self.subTest("a stall on the cap's last build still gets a build on the answer"):
+            self.clear_run_logs()
+            self.script(claude=[{"tag": "progress"}], diagnose=[{"tag": "diagnose-done"}])
+            out = self.run_yah(repo, "--iterations", "2", code=4)  # no appetite: the cap grows by this one build
+            log = self.run_logs()[0]
+            diag = log.with_name(log.stem + "-P2-diagnose.md")
+            self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 2 + [
+                "/yah:resume P2 diagnose log=" + log.as_posix(), "/yah:resume P2 build critique=" + diag.as_posix()])
+            self.assertIn(f"stop (exit 4): reached the cap of 3 iterations. A diagnosis was tried: {diag.name}.", out)
+        with self.subTest("the quality profile on: still roles.judge"):
+            self.config(ultracode=True)
+            self.script()
+            out = self.run_yah(repo, "--dry-run", code=0).replace("\r\n", "\n")
+            self.assertIn("stuck   a stall: one read-only diagnosis on opus high (diagnose: roles.judge), then a "
+                          "rebuild on its answer; the cap: only with an appetite\n", out)
+            self.assertNotIn("at least 2 more builds", out)
+
+    def test_cap_diagnosis_only_with_an_appetite(self):
+        repo = self.repo()
+        self.script(claude=[{"commit": True}], diagnose=[{"tag": "diagnose-done"}])
+        out = self.run_yah(repo, "--iterations", "2", code=4)  # no plan file, so no appetite: the cap stops at once
+        self.assertIn("stop (exit 4): reached the cap of 2 iterations.\n", out.replace("\r\n", "\n"))
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 2)
+        self.bet(repo)
+        self.script()
+        self.assertIn("the cap: the same, then 2 more builds",
+                      self.run_yah(repo, "--iterations", "4", "--dry-run", code=0))
+        self.clear_run_logs()
+        self.script(claude=[{"commit": True}], diagnose=[{"tag": "diagnose-done"}])
+        out = self.run_yah(repo, "--iterations", "4", code=4)
+        log = self.run_logs()[0]
+        diag = log.with_name(log.stem + "-P2-diagnose.md")
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 4 + [
+            "/yah:resume P2 diagnose log=" + log.as_posix(), "/yah:resume P2 build critique=" + diag.as_posix(),
+            "/yah:resume P2 build"])
+        self.assertIn("[yah] iteration 5/6: /yah:resume P2 build critique=", out)  # the cap grew by half of 4
+        self.assertIn(f"stop (exit 4): reached the cap of 6 iterations. A diagnosis was tried: {diag.name}.", out)
+        self.assertIn("exit 4 held for a read-only diagnosis (1 of 1): reached the cap of 4 iterations.",
+                      log.read_text("utf-8"))
+        with self.subTest("run_total_hours never gets one"):
+            self.config(run_total_hours=0.0006)
+            self.script(claude=[{"commit": True, "sleep": 3}], diagnose=[{"tag": "diagnose-done"}])
+            out = self.run_yah(repo, code=4)
+            self.assertIn("stop (exit 4): passed run_total_hours (0.0006 h).\n", out.replace("\r\n", "\n"))
+            self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+            self.assertNotIn("diagnos", out)
+
+    def test_run_retries_zero_keeps_the_old_stops(self):
+        self.config(run_retries=0)
+        repo = self.repo()
+        self.bet(repo)  # even with an appetite
+        self.script(claude=[{"tag": "progress"}], diagnose=[{"tag": "diagnose-done"}])
+        self.run_yah(repo, code=3)
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 2)
+        self.script(claude=[{"commit": True}], diagnose=[{"tag": "diagnose-done"}])
+        self.run_yah(repo, "--iterations", "2", code=4)
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 2)
+        stops = sorted(ln.split(" ", 2)[2] for p in self.run_logs() for ln in p.read_text("utf-8").splitlines()
+                       if " stop, " in ln)
+        self.assertEqual(stops, [
+            "stop, exit 3: HEAD and NEXT unchanged for 2 iterations in a row. Cost $0.50 over 2 iterations.",
+            "stop, exit 4: reached the cap of 2 iterations. Cost $0.50 over 2 iterations."])
+        self.assertNotIn("diagnos", "".join(p.read_text("utf-8") for p in self.run_logs()))
+        self.script()
+        self.assertIn("stuck   off (run_retries 0): a stall stops with exit 3, the cap with exit 4",
+                      self.run_yah(repo, "--dry-run", code=0))
+        for value, says in (("lots", "one read-only diagnosis"), (-1, "one read-only diagnosis"),
+                            (None, "one read-only diagnosis"), (float("inf"), "one read-only diagnosis"),
+                            (2, "a read-only diagnosis (up to 2 a phase)")):  # junk is the default, 1
+            with self.subTest(run_retries=value):
+                self.config(run_retries=value)
+                self.assertIn(f"stuck   a stall: {says} on opus high (diagnose: roles.judge), then a rebuild on "
+                              "its answer; the cap: the same, then 4 more builds",
+                              self.run_yah(repo, "--dry-run", code=0))
+
+    def test_a_diagnosis_runs_on_gpt_with_codex_on_and_falls_back_to_roles_judge(self):
+        repo, env = self.codex()
+        self.config(codex=True, roles={"review_fallback": "fable high"})  # the profile off; never review_fallback
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        state = (repo / "STATE.md").read_text("utf-8").replace(p2, p2 + "\n  - Tried: a mocked gateway")
+        (repo / "STATE.md").write_text(state, encoding="utf-8")
+        self.script(claude=[{"tag": "progress"}],
+                    codex=[{"answer": "The mock hides the 402.\nYAH-RESULT: diagnose-done"}])
+        out = self.run_yah(repo, env=env, code=3)
+        log = self.run_logs()[0]
+        diag = log.with_name(log.stem + "-P2-diagnose.md")
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 2 + [  # claude only builds
+            "/yah:resume P2 build critique=" + diag.as_posix(), "/yah:resume P2 build"])
+        self.assertIn("The mock hides the 402.", diag.read_text("utf-8"))
+        self.assertEqual(len(self.calls("codex")), 1)
+        brief = (self.fake / "codex.stdin").read_text("utf-8")
+        for want in ("### P2 Payment form", "~ pay.py - the form", "Tried: a mocked gateway",
+                     "NEXT: Wire the payment form.", "stuck: HEAD and NEXT unchanged for 2 iterations in a row.",
+                     "iteration 2: $0.25", "a different approach from every Tried: line",
+                     "YAH-RESULT: diagnose-done"):
+            self.assertIn(want, brief)
+        self.assertNotIn("### P3", brief)
+        self.assertTrue(log.with_name(log.stem + "-P2-diagnose-brief.md").is_file())
+        self.assertIn(f"diagnose P2: codex high (diagnose: GPT, no Claude bar), $0.00, diagnose-done, {diag.name}",
+                      log.read_text("utf-8"))
+        self.assertIn(f"A diagnosis was tried: {diag.name}.", out)
+        cases = [("codex fails", {"codex": [{"rc": 1, "err": "boom"}]}, 1,
+                  ["diagnose P2: codex high failed, codex is off for the rest of this run: codex.py exit 1",
+                   "diagnose P2: opus high (diagnose, codex down: roles.judge), $0.25, diagnose-done, "]),
+                 ("no brief for codex", {}, 0,
+                  ["diagnose P2: no brief for codex, this review goes to roles.judge: no ### P2 section in the plan",
+                   "diagnose P2: opus high (no brief for codex: roles.judge), $0.25, diagnose-done, "])]
+        for name, script, gpt, wants in cases:
+            with self.subTest(name):
+                if not gpt:
+                    (repo / "docs" / "plans" / "checkout.md").unlink()
+                self.clear_run_logs()
+                self.script(claude=[{"tag": "progress"}], diagnose=[{"tag": "diagnose-done"}], **script)
+                self.assertIn("A diagnosis was tried: ", self.run_yah(repo, env=env, code=3))
+                self.assertEqual(len(self.calls("codex")), gpt)
+                argv = [a for a in self.calls("claude") if " diagnose " in self.flag(a, "-p")]
+                self.assertEqual(len(argv), 1)
+                self.assertEqual((self.flag(argv[0], "--model"), self.flag(argv[0], "--effort")), ("opus", "high"))
+                self.assertNotIn("fable", [self.flag(a, "--model") for a in self.calls("claude")])
+                text = self.run_logs()[0].read_text("utf-8")
+                for want in wants:
+                    self.assertIn(want, text)
+
+    def test_no_diagnosis_where_the_next_session_could_not_run(self):
+        repo, now = self.repo(), time.time()
+        plan = repo / "docs" / "plans" / "checkout.md"
+
+        def rate(pct):  # the week's reading a session's stream sends: pace is 14% with 6 days to the reset
+            return {"tag": "progress", "rate": {"utilization": pct, "resetsAt": now + 6 * 86400}}
+
+        cases = [("the appetite is spent", {}, "$0.5", [{"tag": "progress"}], False),  # two $0.25 builds: $0.50
+                 ("the week is over pace", {}, None, [rate(0.1), rate(0.5)], False),  # 50% > 14% + 15
+                 ("less time left than a session", {"run_total_hours": 0.5}, None, [{"tag": "progress"}], False),
+                 ("less time left than a codex call", {"run_total_hours": 1, "run_iteration_minutes": 10,
+                                                       "codex": True, "codex_timeout_minutes": 60}, None,
+                  [{"tag": "progress"}], False),
+                 ("time for a session", {"run_total_hours": 1, "run_iteration_minutes": 10}, None,
+                  [{"tag": "progress"}], True)]
+        for name, cfg, appetite, builds, diagnosed in cases:
+            with self.subTest(name):
+                self.config(**cfg)
+                if appetite:
+                    self.bet(repo, appetite)
+                elif plan.exists():
+                    plan.unlink()
+                self.clear_run_logs()
+                self.script(claude=builds, diagnose=[{"tag": "diagnose-done"}])
+                out = self.run_yah(repo, code=3).replace("\r\n", "\n")
+                self.assertEqual(any(" diagnose " in p for p in self.prompts()), diagnosed)
+                if not diagnosed:
+                    self.assertEqual(self.prompts(), ["/yah:resume P2 build"] * 2)
+                    self.assertIn("stop (exit 3): HEAD and NEXT unchanged for 2 iterations in a row.\n", out)
+                    self.assertNotIn("diagnos", out)
+        with self.subTest("a cap reached before any session"):
+            self.config()
+            self.bet(repo)
+            self.clear_run_logs()
+            self.script(claude=[{"commit": True}], diagnose=[{"tag": "diagnose-done"}])
+            out = self.run_yah(repo, "--iterations", "0", code=4).replace("\r\n", "\n")
+            self.assertIn("stop (exit 4): reached the cap of 0 iterations.\n", out)
+            self.assertEqual(self.prompts(), [])
+            self.script()
+            self.assertIn("now     would stop, exit 4: reached the cap of 0 iterations.",
+                          self.run_yah(repo, "--iterations", "0", "--dry-run", code=0))
+
+    def test_a_cap_diagnosis_after_a_fix_slice_past_the_cap_still_gets_a_build(self):
+        repo = self.repo()
+        self.bet(repo)
+        fail = {"rc": 1, "out": "ci\tfail\t1m\turl\n"}
+        # the judge's fix slice runs past a cap of 1, then the checks fail: the cap grows from the 2 sessions run
+        self.no_checks(required=[NO_CHECKS["required"][0]] * 2 + [fail], diagnose=[{"tag": "diagnose-done"}], **{
+            "view-12": [view()], "judge": [{"tag": "judge block 1"}],
+            "build": [{"commit": True, "close": True, "tag": "pr-open #12"}],
+            "fix-findings": [{"commit": True, "tag": "pr-open #12"}], "fix-checks": [{"commit": True}]})
+        out = self.run_yah(repo, "--iterations", "1", code=4)
+        log = self.run_logs()[0]
+        diag = log.with_name(log.stem + "-P2-diagnose.md")
+        prompts = self.prompts()
+        self.assertEqual([p.split()[2] for p in prompts], ["build", "judge", "fix-findings", "diagnose", "fix-checks"])
+        self.assertEqual(prompts[-1], "/yah:resume P2 fix-checks critique=" + diag.as_posix())
+        self.assertIn("[yah] iteration 3/3: /yah:resume P2 fix-checks critique=", out)
+        self.assertIn(f"stop (exit 4): reached the cap of 3 iterations. A diagnosis was tried: {diag.name}.", out)
+        self.assertIn("exit 4 held for a read-only diagnosis (1 of 1): reached the cap of 1 iterations.",
+                      log.read_text("utf-8"))
+
+    def test_a_diagnosis_goes_to_the_next_slice_but_never_beside_findings(self):
+        repo = self.repo(state=CLOSED)
+        fail = {"rc": 1, "out": "ci\tfail\t1m\turl\n"}
+        self.script(required=[fail], diagnose=[{"tag": "diagnose-done"}],
+                    **{"view-12": [view()], "fix-checks": [{"tag": "progress"}]})
+        out = self.run_yah(repo, "P2", code=3)
+        log = self.run_logs()[0]
+        diag = log.with_name(log.stem + "-P2-diagnose.md")
+        # a fix-checks stall: the answer goes to the next fix-checks slice, which resume tells to read it
+        self.assertEqual(self.prompts(), ["/yah:resume P2 fix-checks"] * 2 + [
+            "/yah:resume P2 diagnose log=" + log.as_posix(),
+            "/yah:resume P2 fix-checks critique=" + diag.as_posix(), "/yah:resume P2 fix-checks"])
+        self.assertIn(f"A diagnosis was tried: {diag.name}.", out)
+        with self.subTest("the PR turns green and a judge blocks: its fix slice gets findings= alone"):
+            self.clear_run_logs()
+            self.no_checks(required=[fail] * 3 + [NO_CHECKS["required"][0]], diagnose=[{"tag": "diagnose-done"}],
+                           judge=[{"tag": "judge block 1"}, {"tag": "judge pass"}],
+                           **{"view-12": [view()], "fix-checks": [{"tag": "progress"}],
+                              "fix-findings": [{"commit": True, "tag": "pr-open #12"}]})
+            self.assertIn("stop (exit 8): " + MERGE_OK, self.run_yah(repo, "P2", code=8))
+            prompts = self.prompts()
+            self.assertEqual([p.split()[2] for p in prompts],
+                             ["fix-checks", "fix-checks", "diagnose", "judge", "fix-findings", "judge"])
+            self.assertRegex(prompts[4], r"^/yah:resume P2 fix-findings findings=\S+-P2-judge\.md$")
+
+    def test_a_grown_cap_is_the_diagnosed_phases_only(self):
+        state = STATE.replace("- [ ] P3 Emails", "- [ ] P3 Emails | branch checkout/emails")
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        p3 = "- [~] P3 Emails | branch checkout/emails"
+        repo = self.repo(state=state)
+        self.bet(repo)
+        self.script(list=[], required=[{"rc": 0}], diagnose=[{"tag": "diagnose-done"}], **{
+            "view-12": [view()], "view-13": [view(headRefName="checkout/emails", baseRefName="checkout/payment")],
+            "claude": [{"commit": True}, {"commit": True},
+                       {"commit": True, "tag": "pr-open #12",
+                        "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
+                       {"commit": True, "tag": "pr-open #13",
+                        "replace": [[p3, p3.replace("[~]", "[x]") + " | PR #13"]]}]})
+        out = self.run_yah(repo, "--plan", "--iterations", "2", code=0)
+        self.assertIn("[yah] iteration 3/3: /yah:resume P2 build critique=", out)  # P2's cap grew by 1
+        self.assertIn("[yah] iteration 1/2: /yah:resume P3 build", out)  # P3 starts from the run's own cap
+        self.assertIn("plan done: P2 PR #12 green, P3 PR #13 green.", out)
+
+    def test_the_dry_run_names_where_a_diagnosis_would_run(self):
+        repo, env = self.codex()
+        self.config(codex=True)  # the profile off
+        self.script()
+        gpt = "stuck   a stall: one read-only diagnosis on codex high (diagnose: GPT, no Claude bar)"
+        judge = "stuck   a stall: one read-only diagnosis on opus high (no brief for codex: roles.judge)"
+        self.assertIn(gpt, self.run_yah(repo, "--dry-run", env=env, code=0))
+        self.script(**{"view-12": [view()], "required": [{"rc": 0}]})
+        out = self.run_yah(repo, "#12", "--dry-run", env=env, code=0)  # a PR target has no plan phase to brief
+        self.assertIn(judge, out)
+        self.assertNotIn(gpt, out)
+        (repo / "docs" / "plans" / "checkout.md").unlink()  # nor does a plan with no ### P2 section
+        self.script()
+        self.assertIn(judge, self.run_yah(repo, "--dry-run", env=env, code=0))
+
+    @unittest.skipIf(IS_WIN, "POSIX signals")
+    def test_a_kill_or_a_closed_terminal_ends_the_run_with_exit_130(self):
+        repo = self.repo()
+        pidf, beat = self.pidf(repo), self.fake / "orphan.txt"
+        for sig, name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGHUP, "SIGHUP")):
+            with self.subTest(name):
+                self.script(list=[], claude=[{"sleep": 60, "orphan": True}])
+                self.run_yah(repo, "--detach", code=0)
+                t = time.monotonic()
+                while not beat.exists() and time.monotonic() - t < 30:
+                    time.sleep(0.1)
+                self.assertTrue(beat.exists(), "the session never started its child")
+                os.kill(yahlib.run_state(pidf)["pid"], sig)
+                t = time.monotonic()
+                while yahlib.run_state(pidf).get("alive") and time.monotonic() - t < 20:
+                    time.sleep(0.1)
+                st = yahlib.run_state(pidf)  # not `died`, which /yah:auto restarts unasked
+                self.assertEqual((st["alive"], st["code"], st["reason"]), (False, 130, f"ended by {name}."))
+                self.assertEqual(yahlib.run_status(st), "ended")
+                self.assertTrue(Path(st["log"]).read_text("utf-8").rstrip().endswith(
+                    f"stop, exit 130: ended by {name}. Cost $0.00 over 1 iterations."))
+                size = beat.stat().st_size
+                time.sleep(1)
+                self.assertEqual(beat.stat().st_size, size, "the session's child outlived the run")
+
+    def test_stop_marks_a_run_that_died_without_a_code_stopped(self):
+        repo = self.repo()
+        pidf, log = self.pidf(repo), self.tmp / "old.log"
+        log.write_text("2026-10-12 10:00:00 iteration 1: $0.25, 3 turns, default, progress, HEAD a, NEXT -\n",
+                       encoding="utf-8")
+        os.close(yahlib.hold_run(pidf, {"pid": 4242, "target": "P2", "log": str(log)}))  # gone with no code
+        self.assertEqual(yahlib.run_status(yahlib.run_state(pidf)), "died")
+        self.assertIn("[yah] run ended: pid 4242, P2, log ", self.run_yah(repo, "--stop", code=0))
+        st = yahlib.run_state(pidf)
+        self.assertEqual((st["alive"], st["code"], st["reason"]), (False, 130, "ended by yah run --stop."))
+        self.assertTrue(log.read_text("utf-8").rstrip().endswith("stop, exit 130: ended by yah run --stop."))
+        self.assertIn("[yah] no run is going in this checkout.", self.run_yah(repo, "--stop", code=0))
 
     def test_merged_or_closed_pr_stops_with_exit_6(self):
         repo = self.repo()
@@ -1686,6 +2003,7 @@ class HelperTests(unittest.TestCase):
             "2026-09-29 10:02:00 iteration 2: $0.00, 1 turns, blocked dirty tree, user edits, HEAD a, NEXT -\n"
             "2026-09-29 10:05:00 iteration 3: $0.65, 3 turns, opus h\n"  # cut off mid-write
             "2026-09-29 10:10:00 judge P4: opus high (fable bar 60%, at or over 50%: roles.judge), $0.40, judge pass\n"
+            "2026-09-29 10:15:00 diagnose P4: opus high (diagnose: roles.judge), $0.60, diagnose-done, x.md\n"
             "2026-09-29 10:20:00 stop, exit 0: PR #4 is open and green.\n", encoding="utf-8")
         (tmp / "c.log").write_text(  # still going: no stop line
             "2026-09-29 11:00:00 iteration 1: $1.10, 4 turns, opus high, progress, HEAD abc1237, NEXT x\n",
@@ -1696,12 +2014,12 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(self.mod.spend(tmp, csv, 2, "2026-09-29").splitlines(), [  # the 27th's catch-up counts
             "day         builds               reviews                           catch-up  stops",
             "2026-09-28  $2.50 (1 opus)       $1.25 (1 codex, 1 fable)          2         7: 1",
-            "2026-09-29  $5.10 (2 ?, 1 opus)  $0.40 (1 opus)                    0         0: 1",
-            "total       $7.60 (2 ?, 2 opus)  $1.65 (1 codex, 1 fable, 1 opus)  2         2 runs, 1 with no stop line",
+            "2026-09-29  $5.10 (2 ?, 1 opus)  $1.00 (2 opus)                    0         0: 1",
+            "total       $7.60 (2 ?, 2 opus)  $2.25 (2 opus, 1 codex, 1 fable)  2         2 runs, 1 with no stop line",
             "", "2026-09-28  wk 45%  pace 40%", "2026-09-29  wk ?  pace ?"])
         one = self.mod.spend(tmp, csv, 1, "2026-09-29")
         self.assertNotIn("2026-09-28", one)
-        self.assertRegex(one, r"total +\$5\.10 \(2 \?, 1 opus\) +\$0\.40 \(1 opus\) +0 +1 run, 1 with no stop line")
+        self.assertRegex(one, r"total +\$5\.10 \(2 \?, 1 opus\) +\$1\.00 \(2 opus\) +0 +1 run, 1 with no stop line")
         self.assertEqual(self.mod.spend(tmp / "none", tmp / "none.csv", 1, "2026-09-29"),
                          "no yah run sessions today\n\nno weekly readings in usage-log.csv today")
 
@@ -1741,6 +2059,23 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(ps(None, Path("/c/claude/plugins/marketplaces/mkt/scripts/run.py"))[0])
         self.assertEqual(ps(None, RUN)[0], str(ROOT))
         self.assertEqual(ps(str(ROOT / "scripts"), cache)[0], str(ROOT / "scripts"))
+
+    def test_tried_only_once_a_slice_took_the_diagnosis_and_never_on_the_hours_stop(self):
+        tried = self.mod.tried
+        r = SimpleNamespace(label="P2", target="P2", diagnosed={"P2": ["x-P2-diagnose.md"]}, critique="")
+        self.assertEqual(tried(r), " A diagnosis was tried: x-P2-diagnose.md.")
+        r.critique = "/data/runs/x-P2-diagnose.md"  # still waiting for a slice (a fix-findings one never reads it)
+        self.assertEqual(tried(r), "")
+        r.critique = "/data/runs/x-P2-critique.md"  # another file: the diagnosis was read
+        self.assertEqual(tried(r), " A diagnosis was tried: x-P2-diagnose.md.")
+        r.diagnosed = {"P2": [""]}
+        self.assertEqual(tried(r), " A diagnosis was tried and skipped.")
+        self.assertEqual(tried(SimpleNamespace(label="P3", target="P3", diagnosed=r.diagnosed, critique="")), "")
+        # past run_total_hours right after a diagnosis, before any build: the stop never claims one was tried
+        r = SimpleNamespace(cfg={"ultracode": False, "run_total_hours": 1}, week=None, pr=None, gh=None, last=None,
+                            n=2, cap=8, t0=time.monotonic() - 3601, label="P2", target="P2", critique="",
+                            diagnosed={"P2": ["x-P2-diagnose.md"]})
+        self.assertEqual(self.mod.evaluate(r, wait=False), (4, "passed run_total_hours (1 h)."))
 
     def test_changes_requested_uses_each_reviewers_latest_verdict(self):
         cr = self.mod.changes_requested
@@ -1817,12 +2152,17 @@ class HelperTests(unittest.TestCase):
             logs = {"shop-1": [f"2026-09-29 10:00:00 plan {plan} | before $0.00 and 0.00h",
                                "2026-09-29 10:10:00 critique P1: codex high (GPT, no Claude bar), $0.50, critique-done, x.md",
                                "2026-09-29 10:20:00 iteration 1: $1.25, 38 turns, progress, HEAD a, NEXT -",
+                               "2026-09-29 10:22:00 exit 3 held for a read-only diagnosis (1 of 1): HEAD and NEXT $9",
+                               "2026-09-29 10:24:00 diagnose P1: opus high (diagnose: roles.judge), $0.75, "
+                               "diagnose-done, x-P1-diagnose.md",
                                "2026-09-29 10:25:00 critique P2: codex high failed, codex is off: $9 boom",
                                "2026-09-29 10:30:00 P1 done: PR #1 open and green. Next: P2 on main",
                                "2026-09-29 11:00:00 iteration 1: $2.25, 40 turns, pr-open #2, HEAD b, NEXT -",
                                "2026-09-29 11:00:00 stop, exit 0: plan done: P1 PR #1 green, P2 PR #2 green. "
-                               "Cost $3.50 over 2 iterations, plus $0.50 over 1 critic/judge sessions."],
+                               "Cost $3.50 over 2 iterations, plus $1.25 over 2 critic/judge sessions."],
                     "shop-2": [f"2026-09-29 12:00:00 plan {plan} | before $4.00 and 1.00h",
+                               "2026-09-29 12:20:00 diagnose P2: opus high (diagnose, codex down: roles.judge), $0.50, "
+                               "skipped: no YAH-RESULT line",
                                "2026-09-29 12:30:00 iteration 1: $1.00, 5 turns, blocked x, HEAD c, NEXT -",
                                "2026-09-29 12:30:00 stop, exit 2: blocked: x Cost $1.00 over 1 iterations."],
                     "other-1": [f"2026-09-29 13:00:00 plan {plan}x | before $99.00 and 9.00h",
@@ -1831,15 +2171,17 @@ class HelperTests(unittest.TestCase):
                               "2026-09-20 09:30:00 stop, exit 0: PR #5 is open and green. The merge is yours."]}
             for name, lines in logs.items():
                 (runs / f"{name}.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
-            spent = self.mod.plan_spend(runs, plan)
-            self.assertAlmostEqual(spent[0], 5.0)
+            one = self.mod.log_spend(runs / "shop-1.log")  # the diagnosis is a review: its cost, not a session
+            self.assertEqual((one["cost"], one["sessions"], one["phases"]), (4.75, 2, 2))
+            spent = self.mod.plan_spend(runs, plan)  # the newest log, shop-2: $4 before, a $0.50 diagnosis, $1 build
+            self.assertAlmostEqual(spent[0], 5.5)
             self.assertAlmostEqual(spent[1], 1.5)
             (runs / "shop-1.log").unlink()  # pruned: the newest log on the plan still holds its spend
             self.assertEqual(self.mod.plan_spend(runs, plan), spent)
             self.assertEqual(self.mod.plan_spend(runs, ""), (0.0, 0.0))
             (runs / "shop-1.log").write_text("\n".join(logs["shop-1"]) + "\n", encoding="utf-8")
-            # a phase: shop-1 $2 and 0.5h (two phases), old-1 $3 and 0.5h; shop-2 and other-1 finished none
-            self.assertEqual(self.mod.appetite_hint(runs, 2), "$5 and 1h")
+            # a phase: shop-1 $2.375 and 0.5h (two phases), old-1 $3 and 0.5h; shop-2 and other-1 finished none
+            self.assertEqual(self.mod.appetite_hint(runs, 2), "$6 and 1h")
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(self.mod.appetite_hint(Path(d), 2), "$14 and 1.2h")  # no run finished a phase
 

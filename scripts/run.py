@@ -58,28 +58,44 @@ matches sets the exit code:
        no open phase left, "plan done")
     2  needs you: error, denial, needs-human, blocked, a session that ended without a YAH-RESULT line, a
        merge step that failed, or (--plan) a merge auto-merge skipped
-    3  stalled: HEAD and NEXT unchanged twice in a row
-    4  iteration or wall-clock cap
+    3  stalled: HEAD and NEXT unchanged twice in a row, once the phase's diagnosis (run_retries) was tried
+    4  iteration or wall-clock cap (the iteration cap with an appetite: once the phase's diagnosis was tried)
     5  refused to start (also a start or --stop inside a run's own session, where YAH_PROTECTED is set)
     6  PR merged or closed (--plan goes on past a merged PR of a closed phase)
     7  weekly usage at run_week_stop_pct or over pace + pace_slack
     9  the plan's spend reached the appetite in its ## Bet
     8  PR merged by yah (auto-merge, on by default; --plan goes on to the next phase instead)
     1  run.py itself failed
-  130  Ctrl-C, or ended by --stop
+  130  Ctrl-C, SIGTERM or SIGHUP, or ended by --stop
 
 The appetite is the `appetite: $<X> and <H>h` line in the plan file's `## Bet` (either part alone works; no Bet,
-no line or a part not above 0: no limit on it). Before every session, critiques and fix slices included, the plan's
-spend is checked against it: the dollars and hours of the runs before this one plus this run's sessions and time
-so far. Reaching either stops with exit 9. The judge of an open, green PR still runs, since it guards the merge.
-Each run's log starts with `plan <file> | before $<X> and <H>h`, the plan's spend before it, so the newest log on a
-plan holds its whole spend even after older logs are pruned. One run at a time per plan, across checkouts (a
-lock on runs/plan-<hash>.lock), so each run reads the whole spend of the one before it; a second is refused
-(exit 5). A log with no plan line (runs before this) counts for
-no plan. --appetite-hint PHASES prints `$<X> and <H>h` for a plan that size: the median cost and time per finished
-phase over runs/*.log, else $7 and 0.6h a phase. --spend [DAYS] (default 7) prints the last DAYS days of run spend
-by day, builds and reviews apart and by model, with sessions in catch-up and stop codes, then usage-log.csv's
-weekly trend. Both are read-only: no lock, no plan, and allowed inside a run's own session.
+no line or a part not above 0: no limit on it). Before every session, critiques, diagnoses and fix slices
+included, the plan's spend is checked against it: the dollars and hours of the runs before this one plus this
+run's sessions and time so far. Reaching either stops with exit 9. The judge of an open, green PR still runs,
+since it guards the merge. Each run's log starts with `plan <file> | before $<X> and <H>h`, the plan's spend
+before it, so the newest log on a plan holds its whole spend even after older logs are pruned. One run at a time
+per plan, across checkouts (a lock on runs/plan-<hash>.lock), so each run reads the whole spend of the one before
+it; a second is refused (exit 5). A log with no plan line (runs before this) counts for no plan. --appetite-hint
+PHASES prints `$<X> and <H>h` for a plan that size: the median cost and time per finished phase over runs/*.log,
+else $7 and 0.6h a phase. --spend [DAYS] (default 7) prints the last DAYS days of run spend by day, builds and
+reviews apart and by model, with sessions in catch-up and stop codes, then usage-log.csv's weekly trend. Both are
+read-only: no lock, no plan, and allowed inside a run's own session.
+
+A stuck phase gets a diagnosis before it stops. Where a stall would stop with exit 3, or the iteration cap with
+exit 4 when the plan's ## Bet has an appetite to bound it (and the phase ran a session), run.py first runs one
+read-only `/yah:resume <target> diagnose log=<run log>`, with --add-dir on runs/ so it can read the log. Never for
+run_total_hours, nor with less time left than its longest run (run_iteration_minutes, or codex_timeout_minutes + 1
+with codex on), nor at the appetite or the week's stop. config run_retries (default 1; 0 keeps the old stops)
+caps them per phase. Whatever the profile, it runs where the no-CI judge does: GPT with codex on and up (its brief:
+the phase's plan section, its log lines, the stop reason and the run log's tail), else roles.judge, never Fable.
+Its answer goes to runs/<stem>-<label>-diagnose.md and to the next slice as critique=<path> (a fix-findings slice
+leaves it to the one after). Done or skipped, it counts: the stall count starts over, and at the cap the cap grows
+by half the run's starting cap (at least 1) from the sessions run; a stall on the cap's last build gets one more
+build for the answer. A phase that still stalls or reaches the cap after a slice took the answer says so: "A
+diagnosis was tried: <file>." (or "A diagnosis was tried and skipped."). The run_total_hours stop never does.
+
+SIGTERM and SIGHUP (a kill, a closed terminal) end a run like Ctrl-C, with exit 130. --stop on a run that died
+with no exit code marks it stopped (130), so /yah:auto never restarts it unasked.
 
 Logs go to <data dir>/runs/. The driver writes nothing inside the repo. Each run holds a lock on
 runs/<project>-<hash>.pid (<project>-<hash>@<worktree>.pid in a linked worktree), a JSON file with its pid, target, log and,
@@ -146,7 +162,8 @@ DENY_BASE = ["PowerShell", "Bash(git push --force*)", "Bash(git push -f*)", "Bas
              "Bash(git push *--prune*)", "Bash(git push -d*)", "Bash(git push * -d *)"]
 DENY_BRANCH = ["Bash(git push * {})", "Bash(git push * {} *)", "Bash(git push * HEAD:{}*)", "Bash(git push * *:{}*)",
                "Bash(git push *refs/heads/{}*)"]
-# also denied to the profile's critic and judge: a commit or push would change the PR it judged green
+# also denied to the critic, the judge and a diagnosis, which only read: a commit or push would change the PR a
+# judge passed
 READ_ONLY = ["Edit", "Write", "NotebookEdit", "Bash(git commit*)", "Bash(git push*)"]
 PR_JSON = ("state,url,reviewDecision,reviews,commits,headRefName,baseRefName,mergeable,mergeStateStatus,isDraft,"
            "author,headRefOid")
@@ -158,7 +175,7 @@ HINT_PHASE = (7.0, 0.6)  # dollars and hours a phase when no run log finished on
 STAMP = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ")
 PLAN_LINE = re.compile(r"^\S+ \S+ plan (.+) \| before \$(\d+(?:\.\d+)?) and (\d+(?:\.\d+)?)h$")
 SESSION = re.compile(r"^\S+ \S+ (?:iteration \d+: \$(\d+(?:\.\d+)?), \d+ turns|"
-                     r"(?:critique|judge) \S+: \S+ \S+ \([^)]*\), \$(\d+(?:\.\d+)?), )")
+                     r"(?:critique|judge|diagnose) \S+: \S+ \S+ \([^)]*\), \$(\d+(?:\.\d+)?), )")
 PHASE_DONE = re.compile(r"^\S+ \S+ (?:P\d+ done: PR |stop, exit [08]: |stop, exit 2: PR #\d+ is open and green\.)")
 # --spend: an iteration line names its model after its turns (`opus xhigh, pr-open #12`); lines from before
 # P1 have only the tag there, so the model is `?`. RAN takes a model only in ran_as's shape and never a tag's
@@ -166,7 +183,8 @@ PHASE_DONE = re.compile(r"^\S+ \S+ (?:P\d+ done: PR |stop, exit [08]: |stop, exi
 BUILD = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ iteration \d+: \$(\d+(?:\.\d+)?), \d+ turns, (.*?), HEAD ")
 RAN = re.compile(r"(?!(?:progress|phase-done|pr-open|needs-human|blocked|no)\b)([^\s,]+)"
                  r"(?: (?:low|medium|high|xhigh|max))?, ")
-REVIEW = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ (?:critique|judge) \S+: (\S+) \S+ \([^)]*\), \$(\d+(?:\.\d+)?), ")
+REVIEW = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ (?:critique|judge|diagnose) \S+: (\S+) \S+ \([^)]*\), "
+                    r"\$(\d+(?:\.\d+)?), ")
 STOP = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ stop, exit (-?\d+): ")
 CATCH_UP = re.compile(r"^\S+ \S+ catch-up (on|off): ")
 DAY = re.compile(r"^\d{4}-\d\d-\d\d$")
@@ -246,10 +264,11 @@ CATCH_UP_BUDGET = 1.5  # x --max-budget-usd for a build in catch-up
 
 
 def claude_argv(r, prompt=None, role=None):
-    """A build session's argv, or with `role` (model, effort) a read-only critique or judge running `prompt`.
-    critique=<path> or findings=<path> goes last: the skill reads the path to the end of the prompt."""
+    """A build session's argv, or with `role` (model, effort) a read-only critique, judge or diagnosis running
+    `prompt`. critique=<path>, findings=<path> or log=<path> goes last: the skill reads the path to the end of the
+    prompt, so a fix-findings slice never gets a critique (it waits for the next slice)."""
     prompt = prompt or " ".join(x for x in ("/yah:resume", r.target or r.label, r.mode, r.base_arg and "base=" + r.base_arg,
-                                            r.critique and "critique=" + r.critique,
+                                            r.mode != "fix-findings" and r.critique and "critique=" + r.critique,
                                             r.mode == "fix-findings" and "findings=" + r.findings) if x)
     # the quality profile (config ultracode) runs roles.main; a user --model replaces only its model. In catch-up
     # a build runs one effort step higher on CATCH_UP_BUDGET x the budget: the pool it spends is lost at the reset
@@ -260,8 +279,9 @@ def claude_argv(r, prompt=None, role=None):
     argv = [r.claude, "-p", prompt, "--permission-mode", "auto", "--permission-prompts", "none",
             "--disallowedTools", *r.deny, *(READ_ONLY if role else []), "--max-budget-usd", "{:g}".format(budget),
             "--output-format", "stream-json", "--verbose", "--settings", guard_settings()]
-    # the critique or findings file sits in runs/, outside the repo: let the build read it without a prompt
-    names_file = not role and r.log is not None and (r.critique or r.mode == "fix-findings")
+    # the critique or findings file, or a diagnosis's run log, sits in runs/, outside the repo: let the session read
+    # it without a prompt
+    names_file = r.log is not None and (" log=" in prompt if role else bool(r.critique or r.mode == "fix-findings"))
     return (argv + (["--model", model] if model else []) + (["--effort", effort] if effort else [])
             + (["--plugin-dir", r.plugin_dir] if r.plugin_dir else [])
             + (["--add-dir", r.log.parent.as_posix()] if names_file else []))
@@ -541,10 +561,11 @@ def evaluate(r, wait=True):
         if not r.last["tag"]:
             return 2, NO_TAG
         if r.stalls >= 2:
-            return 3, "HEAD and NEXT unchanged for 2 iterations in a row."
+            return 3, "HEAD and NEXT unchanged for 2 iterations in a row." + tried(r)
     if r.n >= r.cap and r.mode != "fix-findings":  # the judge's one fix slice runs past the cap
-        return 4, f"reached the cap of {r.cap} iterations."
+        return 4, f"reached the cap of {r.cap} iterations." + tried(r)
     if time.monotonic() - r.t0 > r.cfg["run_total_hours"] * 3600:
+        # no tried(r): this stop never gets a diagnosis, and it can come before a build read an earlier one
         return 4, f"passed run_total_hours ({r.cfg['run_total_hours']:g} h)."
     code, reason = over_appetite(r)
     if code:
@@ -555,11 +576,17 @@ def evaluate(r, wait=True):
             log(r, "pace unknown")
             r.pace_logged = True
         return None, ""
+    return over_week(r)
+
+
+def over_week(r):
+    """Exit 7 when the week's reading is at run_week_stop_pct or over pace + pace_slack; (None, "") when it is
+    not, or when there is no reading."""
     used, pace = r.used, r.pace
     stop, slack = r.cfg["run_week_stop_pct"], r.cfg["pace_slack"]
-    if used >= stop:
+    if used is not None and used >= stop:
         return 7, f"weekly usage {used:.0f}% is at or over run_week_stop_pct ({stop:g}%)."
-    if pace is not None and used > num(pace, 0) + slack:
+    if used is not None and pace is not None and used > num(pace, 0) + slack:
         return 7, f"weekly usage {used:.0f}% is over pace {num(pace, 0):.0f}% + {slack:g}."
     return None, ""
 
@@ -798,9 +825,10 @@ def iterate(r):
     r.n += 1
     r.total += 1
     argv = claude_argv(r)
-    r.critique = ""  # folded in by this build; later ones read its Decided: lines
     if r.mode == "fix-findings":
         r.findings = ""  # one slice; the loop goes on as usual
+    else:
+        r.critique = ""  # folded in by this slice; later ones read its Decided: lines
     say(f"[yah] iteration {r.n}/{r.cap}: {argv[2]}")
     it = session(r, argv, f"{r.total}", r.n)
     it["ran"] = ran_as(argv)
@@ -858,7 +886,7 @@ def session(r, argv, name, n=0):
     return it
 
 
-# ---------------------------------------------------------------- critic and judge (the profile, no-CI judge)
+# ---------------------------------------------------------------- critic, judge and diagnosis
 
 def pool_used(r, model):
     """The used % of the fullest rate-limit pool whose key names `model` (seven_day_fable, ...): the stream's
@@ -873,18 +901,19 @@ def pool_used(r, model):
 
 
 def review_role(r, mode):
-    """(model, effort, why) for a `mode` (critique or judge) review. A codex critic is GPT, at config codex_effort
-    with no Claude bar; with codex off, or down after a failed call, roles.review_fallback. In catch-up its
-    critique, never its judge, runs on roles.premium: the judge gates auto-merge and stays the other model family.
-    A Claude critic runs as roles.critic, or roles.judge once its bar is at critic_week_skip_pct: its model's own
-    weekly pool when Claude Code sends one, else the weekly bar; with neither it runs ("bar unknown"). With the
-    profile off, a judge runs only because a PR with no checks needs one before auto-merge: GPT while codex is on
-    and up, else roles.judge, never roles.critic or roles.premium (Fable)."""
-    if no_ci_judge(r, mode):
+    """(model, effort, why) for a `mode` (critique, judge or diagnose) review. A codex critic is GPT, at config
+    codex_effort with no Claude bar; with codex off, or down after a failed call, roles.review_fallback. In catch-up
+    its critique, never its judge, runs on roles.premium: the judge gates auto-merge and stays the other model
+    family. A Claude critic runs as roles.critic, or roles.judge once its bar is at critic_week_skip_pct: its model's
+    own weekly pool when Claude Code sends one, else the weekly bar; with neither it runs ("bar unknown"). With the
+    profile off, a judge runs only because a PR with no checks needs one before auto-merge: GPT while codex is on and
+    up, else roles.judge, never roles.critic or roles.premium (Fable). A diagnosis, profile on or off, too."""
+    if judge_rule(r, mode):
+        who = "no-CI judge" if mode == "judge" else mode
         if r.cfg["codex"] and not r.codex_down:
-            return "codex", r.cfg["codex_effort"], "no-CI judge: GPT, no Claude bar"
+            return "codex", r.cfg["codex_effort"], f"{who}: GPT, no Claude bar"
         model, effort = r.cfg["roles"]["judge"].split()
-        return model, effort, "no-CI judge" + (", codex down" if r.cfg["codex"] else "") + ": roles.judge"
+        return model, effort, who + (", codex down" if r.cfg["codex"] else "") + ": roles.judge"
     model, effort = r.cfg["roles"]["critic"].split()
     if model == "codex":
         if mode == "critique" and r.catch_up:
@@ -905,9 +934,10 @@ def review_role(r, mode):
     return model, effort, f"{why}, at or over {skip:g}%: roles.judge"
 
 
-def no_ci_judge(r, mode):
-    """A judge with the quality profile off: it runs only because a PR with no checks needs a pass to auto-merge."""
-    return mode == "judge" and not r.cfg["ultracode"]
+def judge_rule(r, mode):
+    """The no-CI judge's model rule (GPT, else roles.judge, never Fable) holds: for a judge with the quality profile
+    off, which runs only because a PR with no checks needs a pass to auto-merge, and for every diagnosis."""
+    return mode == "diagnose" or (mode == "judge" and not r.cfg["ultracode"])
 
 
 def wants_critique(r):
@@ -941,6 +971,20 @@ def wants_judge(r):
                 and r.passed.get(r.pr) != (r.view or {}).get("headRefOid") and r.judges.get(r.pr, 0) < 2)
 
 
+def wants_diagnose(r, code):
+    """A diagnosis in place of evaluate's stop: a stall (exit 3), or the iteration cap (exit 4, never
+    run_total_hours, nor a cap reached before any session of the phase) when the plan's ## Bet has an appetite to
+    bound the sessions it adds. run_retries a phase, and only where it and a build could run: with time left for
+    its longest run (run_iteration_minutes, or a codex call's timeout), so it ends before run_total_hours; not at
+    the appetite or the week's stop, which evaluate checks after these."""
+    if code == 4 and (not r.n or r.n < r.cap or appetite(r.plan_file) == (None, None)):
+        return False
+    left = r.cfg["run_total_hours"] * 60 - (time.monotonic() - r.t0) / 60
+    need = max(r.cfg["run_iteration_minutes"], r.cfg["codex_timeout_minutes"] + 1 if r.cfg["codex"] else 0)
+    return bool(code in (3, 4) and len(r.diagnosed.get(r.label or r.target, [])) < r.cfg["run_retries"]
+                and left >= need and not over_appetite(r)[0] and not over_week(r)[0])
+
+
 CRITIQUE_ASK = """You are reviewing the plan for one phase of work in this repository before anyone builds it.
 Read the code the phase will touch, then write at most 300 words: what will break, what the plan is missing,
 and the order to build in. Change nothing.
@@ -962,6 +1006,25 @@ changed file as the PR has it with `git show origin/{head}:<path>`.
 End your answer with this exact last line, where <count> is the number of proven defects:
 YAH-RESULT: judge pass    (when none is proven)
 YAH-RESULT: judge block <count>"""
+DIAGNOSE_ASK = """Headless sessions are building one phase of work in this repository, and it is stuck: {reason}
+Find out why. Read the phase's log lines and the run log's tail below, then the code the phase touches. Write at
+most 300 words: why the phase is stuck, with the evidence, and a different approach from every Tried: line, with
+its first concrete step. Never hand the user a technical choice; name a decision only when it is the user's
+alone. Change nothing.
+
+{plan}
+
+The phase's log lines and NEXT:
+{log}
+
+The run log's last lines:
+```
+{tail}
+```
+
+End your answer with this exact last line:
+YAH-RESULT: diagnose-done"""
+DIAGNOSE_TAIL = 80  # run log lines a diagnosis brief carries
 
 
 def plan_text(path, label):
@@ -1013,7 +1076,7 @@ def appetite(path):
 
 def log_spend(path):
     """One run log: its plan and what the plan spent before it (from its first `plan` line; "" and 0 without one),
-    its sessions' cost (iterations, critiques and judges), its hours from the first to the last line, and the
+    its sessions' cost (iterations, critiques, judges and diagnoses), its hours from the first to the last line, and the
     phases it took to an open, green or merged PR. None when it cannot be read."""
     try:
         lines = Path(path).read_text("utf-8", errors="replace").splitlines()
@@ -1154,11 +1217,21 @@ def spend(runs, usage, days, today=None):
 
 
 def review_brief(r, mode):
-    """(brief, error) for a codex critique or judge: GPT reads the repo, but gets no plan tool, gh or network,
-    so run.py hands it the phase's plan section or the PR's diff."""
-    if mode == "critique":
-        plan = plan_text(spec_path(r), r.label or "")
-        return (CRITIQUE_ASK.format(plan=plan), "") if plan else ("", f"no ### {r.label} section in the plan")
+    """(brief, error) for a codex critique, judge or diagnosis: GPT reads the repo, but gets no plan tool, gh or
+    network, so run.py hands it the phase's plan section or the PR's diff; a diagnosis also gets the phase's log
+    lines, NEXT, the stop reason and the run log's tail."""
+    if mode in ("critique", "diagnose"):
+        plan = plan_text(spec_path(r), r.label) if r.label else ""
+        if not plan:
+            return "", f"no ### {r.label} section in the plan" if r.label else "no plan phase"
+        if mode == "critique":
+            return CRITIQUE_ASK.format(plan=plan), ""
+        try:
+            tail = r.log.read_text("utf-8", errors="replace").splitlines()[-DIAGNOSE_TAIL:]
+        except OSError as e:
+            return "", f"could not read the run log: {e}"
+        log = [*((r.phase or {}).get("log") or []), "NEXT: " + (r.next or "-")]
+        return DIAGNOSE_ASK.format(reason=r.stuck, plan=plan, log="\n".join(log), tail="\n".join(tail)), ""
     rc, diff, err = gh(r, "pr", "diff", str(r.pr), timeout=60)
     if rc != 0 or not diff.strip():
         return "", "gh pr diff failed: " + (brief(err, 200) if rc else "no diff" if rc == 0 else "gh did not run")
@@ -1195,19 +1268,20 @@ def codex_review(r, mode, name):
     return dict(it, is_error=False, text=answer, tag=tags[-1] if tags else "")
 
 
-def review(r, target, mode, name, verdict):
-    """One read-only `/yah:resume <target> <mode>` on review_role, or a codex.py review when that is codex. When
-    its YAH-RESULT matches the `verdict` regex, its answer goes to runs/<stem>-<name>-<mode>.md: returns (the
+def review(r, target, mode, name, verdict, arg=""):
+    """One read-only `/yah:resume <target> <mode> [arg]` on review_role, or a codex.py review when that is codex.
+    When its YAH-RESULT matches the `verdict` regex, its answer goes to runs/<stem>-<name>-<mode>.md: returns (the
     match, that path). A failed codex call marks codex down for the rest of the run and reruns on
     roles.review_fallback; a brief that cannot be built (a plan with no spec file, gh pr diff failing) sends only
-    that review there, or to roles.judge for the no-CI judge. An error or another tag is logged as skipped: (None, "")."""
+    that review there, or to roles.judge for the no-CI judge and a diagnosis. An error or another tag is logged as
+    skipped: (None, "")."""
     model, effort, why = review_role(r, mode)
     it = None
     if model == "codex":
         say(f"[yah] {mode} {name}: codex.py review on {model} {effort} ({why})")
         it = codex_review(r, mode, name)
         if it.get("no_brief"):  # nothing to hand GPT (no plan section, no diff): not codex's fault, so this one only
-            fb = "judge" if no_ci_judge(r, mode) else "review_fallback"  # the no-CI judge never leaves roles.judge
+            fb = "judge" if judge_rule(r, mode) else "review_fallback"  # never leaves roles.judge
             tell(r, f"{mode} {name}: no brief for {model}, this review goes to roles.{fb}: {it['error']}")
             model, effort = r.cfg["roles"][fb].split()
             why, it = f"no brief for codex: roles.{fb}", None
@@ -1217,7 +1291,7 @@ def review(r, target, mode, name, verdict):
             model, effort, why = review_role(r, mode)
             it = None
     if it is None:
-        argv = claude_argv(r, f"/yah:resume {target} {mode}", (model, effort))
+        argv = claude_argv(r, " ".join(x for x in ("/yah:resume", target, mode, arg) if x), (model, effort))
         say(f"[yah] {mode} {name}: {argv[2]} on {model} {effort} ({why})")
         it = session(r, argv, f"{name}-{mode}")
     r.review_cost, r.reviews = r.review_cost + it["cost"], r.reviews + 1
@@ -1258,6 +1332,37 @@ def judge(r):
         # The PR was green, so how the last build ended (an error, no tag, a stall) stopped nothing; left in
         # place, evaluate would stop on it now instead of running the fix slice.
         r.findings, r.last, r.stalls = path, None, 0
+
+
+def diagnose(r, code, reason):
+    """/yah:resume <target> diagnose log=<run log> where a stall (exit 3) or the cap (exit 4) would stop: the next
+    slice's prompt (never a fix-findings one) names its answer, as a build's names a critique's. Done or skipped,
+    it counts in r.diagnosed, and the run goes on: the stall count starts over, and at the cap the cap grows by half
+    the run's starting cap, at least 1, from the sessions run (a judge's fix slice runs past the cap). A stall on
+    the cap's last build gets the one build its answer needs."""
+    key = r.label or r.target
+    done = r.diagnosed.setdefault(key, [])
+    tell(r, f"exit {code} held for a read-only diagnosis ({len(done) + 1} of {r.cfg['run_retries']}): {reason}")
+    r.stuck = reason
+    name = (r.label or (f"PR{r.pr}" if r.pr else "run")) + (f"-{len(done) + 1}" if done else "")
+    path = review(r, r.target or r.label or (f"#{r.pr}" if r.pr else ""), "diagnose", name, r"diagnose-done\b.*",
+                  "log=" + r.log.as_posix())[1]
+    done.append(Path(path).name if path else "")
+    r.critique, r.stalls, r.last = path, 0, None
+    if code == 4:
+        r.cap = max(r.cap, r.n) + max(1, r.cap0 // 2)
+    elif r.n >= r.cap:  # a stall on the cap's last build: one build on its answer, else the cap stops it unread
+        r.cap = r.n + 1
+
+
+def tried(r):
+    """` A diagnosis was tried: <file>.` for an exit 3 or 4 of a phase that had one (its newest) and a slice after
+    it, or `... and skipped.`: /yah:auto tells you instead of rerunning it blindly. "" when it had none, or while
+    its answer still waits for a slice (a fix-findings slice never reads one)."""
+    done = r.diagnosed.get(r.label or r.target)
+    if not done or (done[-1] and Path(r.critique).name == done[-1]):
+        return ""
+    return f" A diagnosis was tried: {done[-1]}." if done[-1] else " A diagnosis was tried and skipped."
 
 
 # ---------------------------------------------------------------- stop
@@ -1368,6 +1473,7 @@ def advance(r, code, reason):
     r.label = r.target = nxt["label"]
     r.pr, r.url, r.pr_state, r.n, r.stalls, r.last, r.waiting, r.critique, r.findings = (None, "", "", 0, 0, None,
                                                                                          False, "", "")
+    r.cap = r.cap0  # a diagnosis at the cap grew it for that phase only
     refresh(r, s)
     r.base, r.base_from = pr_base(r, s)
     # Nothing in this run pushes the finished phase's branch again, nor the new phase's base.
@@ -1395,6 +1501,20 @@ def refuse(reason):
     return 5
 
 
+class Ended(KeyboardInterrupt):
+    """SIGTERM or SIGHUP (a kill, a closed terminal) ends the run like Ctrl-C: exit 130, never `died`, which
+    /yah:auto restarts unasked."""
+
+
+ENDS = [getattr(signal, s) for s in ("SIGTERM", "SIGHUP") if hasattr(signal, s)]  # Windows has no SIGHUP
+
+
+def on_signal(num, _frame):
+    for s in ENDS:  # once: the cleanup that writes the exit code runs to its end
+        signal.signal(s, signal.SIG_IGN)
+    raise Ended(signal.Signals(num).name)
+
+
 def busy(st):
     st = st or {}
     since = time.strftime("%H:%M", time.localtime(st["started"])) if st.get("started") else "?"
@@ -1412,22 +1532,25 @@ def plan_busy(r, st, pidf):
 
 
 def stop_run(pidf):
-    """--stop: end the checkout's run and everything under it, then write its exit code for the RUN line."""
+    """--stop: end the checkout's run and everything under it, then write its exit code for the RUN line. A run
+    that died with no code (one ended by hand after a --stop gave up) is marked stopped, so /yah:auto never
+    restarts it unasked."""
     st = run_state(pidf)
-    if not st or not st.get("alive"):
+    if not st or (not st.get("alive") and "code" in st):
         say("[yah] no run is going in this checkout.")
         return 0
     pid, what = int(num(st.get("pid"), 0)), st.get("target") or "current phase"
-    if pid > 0:
+    if pid > 0 and st.get("alive"):
         end_tree(pid, freeze=True)
     t = time.monotonic()
     while st.get("alive") and time.monotonic() - t < STOP_WAIT_S:
         time.sleep(0.1)
         st = run_state(pidf) or st  # None: caught mid-write
     if st.get("alive"):
-        say(f"[yah] the run (pid {pid}, {what}) still holds its lock after {STOP_WAIT_S} s. End that pid by hand.")
+        say(f"[yah] the run (pid {pid}, {what}) still holds its lock after {STOP_WAIT_S} s. End that pid by hand, "
+            "then run `yah run --stop` again to mark it stopped.")
         return 1
-    if "code" not in st:  # it may have ended on its own just now: then its own code stands
+    if "code" not in st:  # a code it wrote itself, ending on its own just now, stands
         st.pop("alive", None)
         end_run(pidf, dict(st, ended=int(time.time()), code=130, reason=STOPPED))
         log(SimpleNamespace(log=st.get("log") or None), f"stop, exit 130: {STOPPED}")
@@ -1522,6 +1645,17 @@ def dry_run(r):
     say("bet     no appetite (no `appetite:` line in the plan's ## Bet): no limit" if cost is None and hours is None
         else "bet     appetite " + " and ".join(x for x in (cost and f"${cost:g}", hours and f"{hours:g}h") if x)
         + f", spent ${r.before[0]:.2f} and {r.before[1]:.1f}h in earlier runs")
+    n = c["run_retries"]
+    if n:
+        model, effort, why = review_role(r, "diagnose")
+        if model == "codex" and not (r.label and plan_text(spec_path(r), r.label)):  # review_brief's own check
+            (model, effort), why = r.cfg["roles"]["judge"].split(), "no brief for codex: roles.judge"
+        first ="one read-only diagnosis" if n == 1 else f"a read-only diagnosis (up to {n} a phase)"
+        say(f"stuck   a stall: {first} on {model} {effort} ({why}), then a rebuild on its answer; the cap: "
+            + ("only with an appetite" if cost is None and hours is None else
+               f"the same, then {max(1, r.cap0 // 2)} more builds"))
+    else:
+        say("stuck   off (run_retries 0): a stall stops with exit 3, the cap with exit 4")
     say("week    pace unknown" if r.used is None else f"week    {r.used:.0f}% used"
         + ("" if r.pace is None else f", pace {r.pace:.0f}%")
         + (f", catch-up ({r.gap:.0f} pts under{to_reset(r)})" if r.catch_up else ""))
@@ -1623,18 +1757,19 @@ def main():
     if not gh_path:
         return refuse("gh (the GitHub CLI) not found. yah run needs it to open the PR and follow its checks.")
     plugin_dir, plugin_src = plugin_source(a.plugin_dir)
+    cap = int(cfg["run_iterations"] if a.iterations is None else a.iterations)
     r = SimpleNamespace(
         cfg=cfg, top=str(top), key=key, branch=branch, target=target, claude=claude, gh=gh_path, model=a.model,
         plugin_dir=plugin_dir, plugin_src=plugin_src, prod=prod, base="", base_from="",
         deny=deny_list(fence), protected=fence,
-        cap=int(cfg["run_iterations"] if a.iterations is None else a.iterations),
+        cap=cap, cap0=cap,
         budget=cfg["run_budget_usd"] if a.budget is None else a.budget,
         pr=int(target[1:]) if target[:1] == "#" else None, label=target if target[:1] == "P" else None,
         phase=None, phases=[], plan_key=None, next="", head="", mode="build", checks="", url="", waiting=False,
         week=None, pace_logged=False, used=None, pace=None, gap=None, hours_left=None, catch_up=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
         chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="",
         pools={}, critiqued=set(), critique="", judged=set(), judges={}, passed={}, findings="", review_cost=0.0,
-        reviews=0, codex_down=False, spec="", plan_file=None, before=(0.0, 0.0))
+        reviews=0, codex_down=False, spec="", plan_file=None, before=(0.0, 0.0), diagnosed={}, stuck="")
     refresh(r, s)
     if a.plan and not target and cfg["auto_merge"]:  # leftover PRs of closed phases merge first, bottom-up
         ph = sweep_phase(r, s)
@@ -1679,9 +1814,14 @@ def main():
     if cfg.get("config_unreadable"):  # it may hold "auto_merge": false: never merge on a guess
         tell(r, "auto-merge off: " + UNREADABLE)
     prune(runs)
+    for s in ENDS:
+        signal.signal(s, on_signal)
     try:
         while True:
             code, reason = evaluate(r)
+            if wants_diagnose(r, code):
+                diagnose(r, code, reason)
+                continue  # the stop rules (hours, week, appetite) again before the build that reads it
             if code == 0 and wants_judge(r):
                 judge(r)
                 continue  # a block: one fix-findings slice; a pass or a skip: the PR read again, then exit 0 or a merge
@@ -1708,8 +1848,8 @@ def main():
             line = "iteration {}: ${:.2f}, {} turns, {}, {}, HEAD {}, NEXT {}".format(
                 it["n"], it["cost"], it["turns"], it["ran"], it["tag"] or "no YAH-RESULT", r.head, r.next[:80] or "-")
             tell(r, line)
-    except KeyboardInterrupt:
-        code, reason = 130, "interrupted."
+    except KeyboardInterrupt as e:
+        code, reason = 130, f"ended by {e}." if isinstance(e, Ended) else "interrupted."
     except Exception as e:  # a detached run has no terminal: the log, the notification and the pid file say it
         code, reason = 1, f"run.py failed: {e}"
     write_run(hold, dict(info, ended=int(time.time()), code=code, reason=reason))  # first: finish can fail
