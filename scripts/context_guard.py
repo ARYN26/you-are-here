@@ -8,6 +8,7 @@
   ultracode on (config.json, set by setup.py --ultracode): workflow sizing rules from config roles, once per session
   codex on (config.json, set by setup.py --codex): what goes to GPT, once per session
   a newer yah installed while this session runs the old copy: once per session, until reload
+  auto-merge on by default and config.json never names it: once ever, to the user only, never in yah run's sessions
 
 Thresholds come from config.json and its tier preset. Context size comes from the
 transcript's last main-thread assistant turn (fresh), falling back to the statusline's
@@ -78,6 +79,14 @@ def codex_text(ultra):
             "prove it in the code or with a test before fixing it.")
 
 
+def names_auto_merge():
+    """config.json sets auto_merge itself, for every repo or in a project's entry: that user already knows."""
+    raw = read_json(data_dir() / "config.json", {})
+    raw = raw if isinstance(raw, dict) else {}
+    projects = raw.get("projects") if isinstance(raw.get("projects"), dict) else {}
+    return "auto_merge" in raw or any(isinstance(v, dict) and "auto_merge" in v for v in projects.values())
+
+
 def main():
     utf8_stdout()
     try:
@@ -138,6 +147,14 @@ def main():
     if event == "UserPromptSubmit" and not flags.get("outdated") and plugin_outdated():
         flags["outdated"] = True
         to_user.append("yah was updated: run /reload-plugins (or /exit and restart) to load it.")
+
+    # merging became the default: tell the user once ever (the key never resets); yah run's sessions never see it
+    if (event == "UserPromptSubmit" and cfg["auto_merge"] and not daily.get("automerge_notice")
+            and not os.environ.get("YAH_PROTECTED") and not names_auto_merge()):
+        daily["automerge_notice"] = True
+        write_json(daily_path, daily)
+        to_user.append("yah now merges the green PRs it opened (auto-merge is on by default). To turn it off: "
+                       f'/yah:setup, or "auto_merge": false in {data_dir() / "config.json"}.')
 
     week, pace = state.get("week"), state.get("pace")
     known = week is not None and pace is not None

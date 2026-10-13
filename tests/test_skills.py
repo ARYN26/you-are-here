@@ -186,6 +186,30 @@ class StampTests(unittest.TestCase):
         finish = text.split("## 7. Finish with exactly this", 1)[1]
         self.assertIn("The run has <phase label>; this session can close.", finish)
 
+    def test_wrap_hands_a_phase_pr_to_the_run_when_auto_merge_is_on(self):
+        text = body("wrap")
+        self.assertIn("`next_stale` and `auto_merge`", text)  # step 1 reads the repo's effective setting
+        step = text.split("## 6.5 Hand the open phase to a run", 1)[1].split("## 7.", 1)[0]
+        # the run merges the PR this wrap opened, even with no phase left; the other rules still hold
+        hand = "Or `auto_merge` is true and this wrap opened or updated a plan phase's PR, even with no phase left open"
+        self.assertIn(hand, step)
+        self.assertIn("the run merges that PR, then goes on to any next phase", step)
+        self.assertLess(step.index("never restart a run unasked"), step.index(hand))
+        self.assertLess(step.index(hand), step.index("NEXT does not start with `NEEDS-HUMAN:`"))
+        finish = text.split("## 7. Finish with exactly this", 1)[1]
+        self.assertIn("It merges PR #<N> when it is green.", finish)
+        self.assertIn("With `auto_merge` true and a phase PR open that has no `(you)` merge follow-up, keep the "
+                      "middle sentence", finish)
+
+    def test_wrap_never_tells_the_session_to_merge(self):
+        text = body("wrap")
+        self.assertNotIn("Merging is always the user's", text)  # true only with auto_merge off
+        self.assertIn("Never merge a PR yourself.", text)
+        self.assertIn("With `auto_merge` true, the `yah run` driver merges", text)
+        self.assertIn("a merge while `auto_merge` is false", text)  # (you) merge lines only when it is off
+        self.assertIn("With `auto_merge` true, write no merge line", text)
+        self.assertNotIn("`/yah:where` shows `auto-merge: on`", text)  # wrap reads auto_merge itself
+
     def test_resume_never_starts_or_stops_a_run(self):
         step = body("resume").split("## 4. Test, then wrap", 1)[1].split("## 5.", 1)[0]
         self.assertIn("Never start or stop a run (`run.py`), and skip wrap's step 6.5", step)
@@ -204,7 +228,11 @@ class StampTests(unittest.TestCase):
         self.assertIn("`  - Parked: NEXT was <NEXT>`", text)
         self.assertIn("take NEXT from its Parked line", text)
         self.assertIn("delete the Parked line", text)
-        self.assertIn("The merge of this PR becomes a `(you)` follow-up", text)
+        # the run step 6.5 starts follows the claimed plan, so only a run on this plan merges this PR
+        self.assertIn("The merge of this PR becomes a `(you)` follow-up with its command, unless `auto_merge` is true "
+                      "and this is a run's session (`/yah:resume`)", text)
+        self.assertIn("A run started from step 6.5 follows the claimed phase's plan, so it never merges this PR.", text)
+        self.assertNotIn("With `auto_merge` false, the merge of this PR becomes a `(you)` follow-up", text)
 
     def test_phases_stamps_next(self):
         text = body("phases")
@@ -258,13 +286,25 @@ class UserCommandTests(unittest.TestCase):
                 self.assertNotIn("--delete-branch", body(name))  # deleting a stack's base closes the PR on it
         self.assertIn("Merge PR #13: gh pr merge 13 --merge (you)", body("wrap"))  # `(you)` still ends the line
         self.assertIn("- [ ] Merge PR #13: gh pr merge 13 --merge (you)", body("phases"))
+        # with auto-merge on (the default) the run merges, and --plan would stop at a `(you)` merge phase
+        self.assertIn("a merge while `auto_merge` is false in the JSON above) is its own line", body("phases"))
+        self.assertIn("With `auto_merge` true, write no merge step", body("phases"))
+        self.assertIn("a merge while `auto_merge` is false) is its own child with `-l human`", body("phases"))
+        self.assertNotIn("(a review, a merge, a console step)", body("phases"))
         self.assertIn("paste in a terminal, e.g. `gh pr merge 13 --merge`", (ROOT / "RULES.md").read_text("utf-8"))
 
     def test_wrap_finish_gives_the_merge_command(self):
         finish = body("wrap").split("## 7. Finish with exactly this", 1)[1]
         self.assertIn("Merge   <the merge command>", finish)
         self.assertIn("`gh pr edit <N> --base <that PR's base>` once that PR merges", finish)
-        self.assertIn("Leave the Merge line out when no PR is open", finish)
+        self.assertIn("Leave the Merge line out when no PR is open, or when `auto_merge` is true and the PR has no "
+                      "`(you)` merge follow-up: the run merges it", finish)
+        self.assertNotIn("or when `auto_merge` is true: the run merges it", finish)  # not a PR step 6 left to the user
+
+    def test_rules_say_only_the_run_driver_merges(self):
+        safety = (ROOT / "RULES.md").read_text("utf-8").split("## Safety", 1)[1]
+        self.assertIn("- Never merge a PR yourself. With auto-merge on (the default), yah run's driver merges the "
+                      "green PRs it opened; with it off, give the user the merge command.", safety)
 
 
 class TreeTests(unittest.TestCase):
@@ -451,6 +491,37 @@ class AutoTests(unittest.TestCase):
         self.assertIn("Tiny: cut a new branch from that base", rows[waits])  # never commit onto the waiting PR
         self.assertIn("**plan it** (section 3)", rows[waits])
 
+    def test_a_waiting_phase_pr_goes_to_the_run_with_auto_merge_on(self):
+        row = self.rows()[self.row("NEXT waits on the user")]
+        hand = ("Not merged, `auto_merge` true in `where.py --json --no-gh`, the PR is a phase's of the current plan "
+                "(its PR line names the phase) and the task is not `here`: **start the run**")
+        self.assertIn(hand, row)
+        # run.py sweeps only the plan it pins: another plan's PR stays the user's
+        self.assertIn("its sweep merges that plan's green phase PRs left open, bottom-up, then goes on", row)
+        self.assertNotIn("the PR is a plan phase's and", row)
+        # the old question stays for auto_merge off, a PR that is no phase's, or `here`
+        self.assertLess(row.index(hand), row.index("Otherwise not merged: say in one line what waits on the user"))
+        self.assertIn("`gh pr merge <N> --merge`", row)
+        self.assertLess(self.row("The RUN line says the run `ended` with exit 1"), self.row("NEXT waits on the user"))
+        self.assertNotIn("gh pr merge", self.meta["allowed-tools"])  # only the run driver merges
+
+    def test_a_closed_phases_open_pr_goes_to_the_run_not_to_what_next(self):
+        """wrap marks a phase [x] once its PR opens, so a finished stack still has PRs open: with auto-merge on,
+        "every phase is done" must not ask what to build while the sweep has them to merge."""
+        rows, empty = self.rows(), self.row("No plan and no NEXT")
+        hand = self.row("A closed phase's PR is still open")
+        self.assertIn("It does not count while a closed phase of the current plan still has an open PR, "
+                      "`auto_merge` is true in `where.py --json --no-gh` and the task is not `here`: read on",
+                      rows[empty])
+        self.assertIn("**Start the run**: its sweep merges that plan's green phase PRs left open, bottom-up", rows[hand])
+        self.assertIn("`auto_merge` is true", rows[hand])
+        # an ended run (exit 2 on a skipped merge) is told first; the hand-off comes before the open-phase rows
+        for row in ("NEXT starts with `NEEDS-HUMAN:`", "The RUN line says the run `ended` with exit 1",
+                    "The RUN line says the run `ended` with exit 9", "The RUN line says the run `ended` with exit 130"):
+            self.assertLess(self.row(row), hand, row)
+        for row in ("NEXT waits on the user", "You are not on the phase's branch", "A plan with an open phase"):
+            self.assertLess(hand, self.row(row), row)
+
     def test_an_open_plan_is_parked_before_a_new_one_is_tracked(self):
         plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
         park = plan.index("park it first")
@@ -460,10 +531,11 @@ class AutoTests(unittest.TestCase):
         self.assertIn("goes back to `[ ]`", plan)
         self.assertIn("with no `[~]`, its first `[ ]` phase stays `[ ]`", plan)  # a not-yet-started phase parks too
 
-    def test_deep_on_every_tier_and_merges_stay_the_users(self):
+    def test_deep_on_every_tier_and_only_the_run_driver_merges(self):
         self.assertIn("every plan tier", self.body)
-        self.assertIn("Never merge a PR yourself", self.body)
-        self.assertIn("Only the run driver merges, and only when `auto_merge` is on", self.body)
+        self.assertIn("Never merge a PR yourself, and never push a protected branch.", self.body)
+        self.assertIn("Only the run driver merges, with `auto_merge` on (the default).", self.body)
+        self.assertNotIn("only when `auto_merge` is on", self.body)  # it is on unless config turns it off
 
     def test_q1_asks_the_aim_once_right_before_the_pick(self):
         rows, aim, empty = self.rows(), self.row("No AIM"), self.row("No plan and no NEXT")
@@ -672,6 +744,25 @@ class GptTests(unittest.TestCase):
         self.assertIn("`--uninstall` restores", section)
 
 
+class SetupSkillTests(unittest.TestCase):
+    def test_auto_merge_is_an_opt_out(self):
+        setup = body("setup")
+        section = setup[setup.index("## 3d. Auto-merge (on by default)"):setup.index("## 3e. GPT")]
+        for want in ("It is on by default. Keep it on?", "Only the `yah run` driver merges, never the model",
+                     "at least one check ran and all passed, or it has no checks and yah's judge passed its exact "
+                     "head commit", "merges green phase PRs left open, bottom-up",
+                     "it stops with exit 2 instead of stacking the next phase on that PR",
+                     "On no, run `setup.py --no-auto-merge` and show the output", "`--uninstall` restores",
+                     "`\"auto_merge\": false` in that repo's entry under `projects`"):
+            self.assertIn(want, section, want)
+        self.assertNotIn("It is off by default", section)
+        # a yes writes true, so a re-run turns back on what an earlier no turned off
+        self.assertIn("On yes, run `setup.py --auto-merge` and show the output", section)
+        self.assertNotIn("On yes, change nothing", section)
+        self.assertIn("Step 3d is the one opt-out: auto-merge is on by default, so there a no turns it off.",
+                      setup)  # the yes-to-change rule's exception
+
+
 class DocsTests(unittest.TestCase):
     def setUp(self):
         self.readme = (ROOT / "README.md").read_text("utf-8")
@@ -744,7 +835,43 @@ class DocsTests(unittest.TestCase):
                 self.assertIn("state-md", kw)
                 self.assertLess(kw.index("state-md"), kw.index("beads"))
                 self.assertFalse(entry["description"].lower().startswith("beads"))
+                self.assertNotIn("never merges", entry["description"].lower())  # auto-merge is on by default
+                self.assertIn("until a PR is open and green, then merges it (auto-merge is on by default)",
+                              entry["description"])
         self.assertFalse(market["metadata"]["description"].lower().startswith("beads"))
+        self.assertNotIn("never merges", market["metadata"]["description"].lower())
+
+    def test_auto_merge_section_is_on_by_default(self):
+        runs = self.section("## Hands-free runs")
+        merge = runs[runs.index("#### Auto-merge: on by default"):runs.index("#### Critic and judge")]
+        for want in ("`auto_merge: false` in config.json turns it off", "`setup.py --no-auto-merge`",
+                     "`\"auto_merge\": false` in that repo's entry under `projects`",
+                     "a check ran and every check passed, or no checks exist and yah's judge passed the PR's exact "
+                     "head commit", "on `roles.judge` (Opus at high effort), or on GPT when [codex](#claude--gpt) is on",
+                     "one `fix-findings` slice, then one re-judge", "**No stacking.**", "stops with exit 2",
+                     "**The sweep.**", "the lowest closed phase of its plan whose PR is still open", "bottom-up"):
+            self.assertIn(want, merge, want)
+        self.assertNotIn("Turned on after a stacked plan finished", self.readme)  # the sweep replaced it
+        self.assertNotIn("#auto-merge-opt-in", self.readme)
+        self.assertNotIn("Auto-merge: opt-in", self.readme)
+        self.assertGreaterEqual(self.readme.count("(#auto-merge-on-by-default)"), 8)
+        self.assertIn("| `auto_merge` | Default `true`", self.section("## Config"))
+        for want in ("any value but `true` turns it off", "a config.json that does not load as JSON"):
+            self.assertIn(want, merge, want)
+        # --plan goes on only after a merge while auto-merge is on: never "past exit 0" on a green PR
+        plan_row = next(ln for ln in self.readme.splitlines() if ln.startswith("| `--plan` |"))
+        self.assertNotIn("Go on past exit 0", plan_row)
+        self.assertIn("a merge it skips stops the run with exit 2", plan_row)
+        self.assertIn("or open and green (auto-merge off)", plan_row)
+        self.assertIn("on the plan's last phase there is none, but the merge still waits on you", merge)
+        self.assertIn("`auto_merge` once you answer whether to keep auto-merge", self.readme)
+        self.assertNotIn("and `auto_merge` if you opt out", self.readme)  # a yes writes true too
+        run_py = (ROOT / "scripts/run.py").read_text("utf-8")
+        self.assertNotIn('help="after the phase\'s PR is green, go on to the next open', run_py)
+        self.assertIn("a skipped merge stops", run_py)
+        for words in ('"merged by yah"', '"plan done"'):  # the stop lines it quotes are the ones run.py writes
+            self.assertIn(words.strip('"'), run_py)
+            self.assertIn(words, merge if words == '"merged by yah"' else runs)
 
 
 if __name__ == "__main__":

@@ -6,17 +6,24 @@
     yah run --appetite-hint PHASES
     yah run --spend [DAYS]
 
---plan goes on past exit 0: once a phase's PR is open and green (or merged) and the phase is closed, it
-pins the next open phase and runs that, until none is left ("plan done", exit 0). The iteration cap is per
-phase; run_total_hours and the weekly pace hold for the whole run. A phase whose plan base is a phase
-branch that has since merged builds on where it merged, and a phase with no base stacks on the phase this
-run just finished while that PR is open; either way /yah:resume is told `base=<branch>`.
+--plan goes on until no phase is left ("plan done", exit 0): once a phase is closed and its PR merged, or with
+auto-merge off open and green, it pins the next open phase and runs that. The iteration cap is per phase;
+run_total_hours and the weekly pace hold for the whole run. A phase whose plan base is a phase branch that has
+since merged builds on where it merged, and a phase with no base stacks on the phase this run just finished
+while that PR is open (auto-merge off); either way /yah:resume is told `base=<branch>`.
 
-Auto-merge is off unless config.json has "auto_merge": true. Then the driver, never a session, merges an
-open, green PR of a closed plan phase when every rule holds (a check ran and all passed, MERGEABLE, merge
-state CLEAN or HAS_HOOKS, not a draft, no newer CHANGES_REQUESTED, authored by the gh user): a merge commit
-pinned to the head it saw, then the open PRs on its head retargeted to its base, then the head branch
-deleted unless protected. --plan then goes on, and the next phase builds on that base.
+Auto-merge is on by default; "auto_merge": false in config.json (or projects.<key>.auto_merge: false, for one
+repo) turns it off, and so does a config.json that does not load. The driver, never a session, merges an open,
+green PR of a closed plan phase when every rule holds (every check passed, or with no checks a judge passed its
+head commit; MERGEABLE, merge state CLEAN or HAS_HOOKS, not a draft, no newer CHANGES_REQUESTED, authored by the
+gh user): a merge commit pinned to the head it saw, then the open PRs on its head retargeted to its base, then
+the head branch deleted unless protected. --plan then goes on, and the next phase builds on that base. A PR with
+no checks gets a read-only judge even with the quality profile off: GPT with codex on, else roles.judge, never
+Fable. A block gets one fix-findings slice, then one judge of the new head; past 2 judges none runs, and the PR
+merges only after a pass on its head. A merge skipped in --plan stops the run (exit 2) instead of stacking the
+next phase on it. With auto-merge on, --plan first takes the lowest closed phase of its plan whose PR is still
+open, so leftover PRs merge bottom-up before the next open phase; a plan with only those left merges them, then
+"plan done".
 
 The quality profile (config.json "ultracode": true) starts builds with --model/--effort from roles.main (a user
 --model replaces only the model). Before a plan phase's first build (no PR, no phase branch on origin) it runs one
@@ -25,7 +32,8 @@ critic_week_skip_pct: its own weekly pool if Claude Code sends one, else the wee
 with critique=<path>. Once a phase's PR is open and green, before auto-merge or exit 0, it runs one read-only
 `/yah:resume <label> judge` on the same model. A `judge block <n>` saves its answer to runs/<stem>-<label>-judge.md
 and runs one `fix-findings findings=<path>` slice, which the iteration cap does not hold back; then the loop goes on
-as usual, with no second judge. A critique or judge that fails is logged and skipped; it never stops the run.
+as usual, with no second judge (but a PR with no checks, under auto-merge, gets one). A critique or judge that fails
+is logged and skipped; it never stops the run.
 With config codex on, roles.critic defaults to codex: GPT critiques and judges through `codex.py review`, with
 no Claude bar and $0 logged. run.py writes its brief to runs/<stem>-<name>-<mode>-brief.md (the phase's plan
 section and the plan's Decisions, or the PR's diff from gh), since GPT has no plan tools, gh or network there. A
@@ -48,14 +56,15 @@ matches sets the exit code:
 
     0  PR open, green, phase closed: the merge is yours, or auto-merge skipped it and says why (--plan:
        no open phase left, "plan done")
-    2  needs you: error, denial, needs-human, blocked, or a session that ended without a YAH-RESULT line
+    2  needs you: error, denial, needs-human, blocked, a session that ended without a YAH-RESULT line, a
+       merge step that failed, or (--plan) a merge auto-merge skipped
     3  stalled: HEAD and NEXT unchanged twice in a row
     4  iteration or wall-clock cap
     5  refused to start (also a start or --stop inside a run's own session, where YAH_PROTECTED is set)
     6  PR merged or closed (--plan goes on past a merged PR of a closed phase)
     7  weekly usage at run_week_stop_pct or over pace + pace_slack
     9  the plan's spend reached the appetite in its ## Bet
-    8  PR merged by yah (auto_merge on; --plan goes on to the next phase instead)
+    8  PR merged by yah (auto-merge, on by default; --plan goes on to the next phase instead)
     1  run.py itself failed
   130  Ctrl-C, or ended by --stop
 
@@ -120,8 +129,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import where  # noqa: E402
 from statusline import to_epoch, week_pace  # noqa: E402
 from phasemap import HEAD, is_fence  # noqa: E402
-from yahlib import (NO_WINDOW, bump, config, data_dir, find_git, find_tool, end_run, hold_run, num,  # noqa: E402
-                    project_key, read_branch, read_json, run, run_pid_path, run_state, utf8_stdout, write_run)
+from yahlib import (NO_WINDOW, auto_merge_on, bump, config, data_dir, find_git, find_tool, end_run,  # noqa: E402
+                    hold_run, num, project_key, read_branch, read_json, run, run_pid_path, run_state, utf8_stdout,
+                    write_run)
 
 POLL_S = num(os.environ.get("YAH_RUN_POLL_S"), 30)  # tests shorten the pending-checks poll
 KEEP_RUNS = 20
@@ -149,7 +159,7 @@ STAMP = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ")
 PLAN_LINE = re.compile(r"^\S+ \S+ plan (.+) \| before \$(\d+(?:\.\d+)?) and (\d+(?:\.\d+)?)h$")
 SESSION = re.compile(r"^\S+ \S+ (?:iteration \d+: \$(\d+(?:\.\d+)?), \d+ turns|"
                      r"(?:critique|judge) \S+: \S+ \S+ \([^)]*\), \$(\d+(?:\.\d+)?), )")
-PHASE_DONE = re.compile(r"^\S+ \S+ (?:P\d+ done: PR |stop, exit [08]: )")
+PHASE_DONE = re.compile(r"^\S+ \S+ (?:P\d+ done: PR |stop, exit [08]: |stop, exit 2: PR #\d+ is open and green\.)")
 # --spend: an iteration line names its model after its turns (`opus xhigh, pr-open #12`); lines from before
 # P1 have only the tag there, so the model is `?`. RAN takes a model only in ran_as's shape and never a tag's
 # first word, since an old tag can hold a comma (`blocked dirty tree, user edits`)
@@ -164,6 +174,7 @@ NO_TAG = "session ended without a YAH-RESULT line; is the yah plugin loaded? (--
 NO_BASE = ("cannot tell which branch {} targets: no base in the plan, no open PR for {}, no origin/HEAD and no "
            "prod in config.json, so it cannot be protected. Set base in the plan (`| base <branch>` on the STATE.md "
            "phase line, or beads metadata if you already use beads) or prod in config.json.")
+UNREADABLE = "config.json does not load as a JSON object, so nothing merges until it does"
 
 
 def say(text=""):
@@ -294,7 +305,7 @@ def pr_view(r, ref=None, fields=PR_JSON):
 
 def checks(r, wait):
     """pass, none (gh reports no checks), fail, pending or unknown. Pending (gh exit 8) is polled up to
-    run_checks_wait_minutes. The stop rules treat none as green; auto-merge wants pass."""
+    run_checks_wait_minutes. The stop rules treat none as green; auto-merge wants pass, or none and a judge pass."""
     deadline = time.monotonic() + r.cfg["run_checks_wait_minutes"] * 60
     while True:
         rc, out, err = gh(r, "pr", "checks", str(r.pr), "--required")
@@ -553,7 +564,7 @@ def evaluate(r, wait=True):
     return None, ""
 
 
-# ---------------------------------------------------------------- auto-merge (config auto_merge, off by default)
+# ---------------------------------------------------------------- auto-merge (config auto_merge, on by default)
 
 def to_reset(r):
     """`, 7h to reset` for a catch-up message, or nothing when the reset time is unknown."""
@@ -586,8 +597,12 @@ def mergeable(r, view):
         return False, f"PR #{r.pr} is not a plan phase's PR"
     if pr_number(ph) != r.pr and not (ph.get("branch") and view.get("headRefName") == ph["branch"]):
         return False, f"PR #{r.pr} is not {r.label}'s PR in the plan"
-    if r.checks != "pass":
-        return False, "no checks ran" if r.checks == "none" else f"checks {r.checks or 'unknown'}"
+    if r.checks == "none":  # no CI: a judge pass on this exact head stands in for it
+        oid = view.get("headRefOid") or ""
+        if not oid or r.passed.get(r.pr) != oid:
+            return False, f"no checks ran and no judge passed {oid[:7] or 'its head'}"
+    elif r.checks != "pass":
+        return False, f"checks {r.checks or 'unknown'}"
     if view.get("isDraft") is not False:
         return False, "it is a draft"
     if view.get("mergeable") != "MERGEABLE":
@@ -649,11 +664,11 @@ def merge(r, view):
 
 def auto_merge(r, reason):
     """evaluate said open and green (exit 0) and auto_merge is on: merge when mergeable() allows. (code, reason):
-    8 once merged (--plan goes on from its base; /yah:resume fetches it), 2 when a merge step failed, else 0
-    with the skip reason."""
+    8 once merged (--plan goes on from its base; /yah:resume fetches it), 2 when a merge step failed or --plan
+    skipped the merge (the next phase would stack on an unmerged PR), else 0 with the skip reason."""
     if stopped(r.last):
         ok, why = False, "the last session stopped: " + needs_you(r)
-    elif r.phase is None or r.checks != "pass":  # a fresh read changes neither: skip its wait
+    elif r.phase is None or r.checks not in ("pass", "none"):  # a fresh read changes neither: skip its wait
         ok, why = mergeable(r, r.view or {})
     else:
         seen = (r.view or {}).get("headRefOid")
@@ -662,14 +677,23 @@ def auto_merge(r, reason):
         if ok and r.view.get("headRefOid") != seen:
             ok, why = False, "a new commit landed after its checks passed"
     if not ok:
-        if r.chain:  # advance's own reason replaces this one
-            tell(r, f"PR #{r.pr}: auto-merge skipped: {why}.")
-        return 0, f"{reason} Auto-merge skipped: {why}."
+        if r.chain and stopped(r.last, errors=False):  # advance stops on it and names what the session asked
+            return 0, reason
+        return skipped(r, reason, why)
     code, why = merge(r, r.view)
     if code is not None:
         return code, why
     r.pr_state, r.base = "MERGED", r.view["baseRefName"]
     return 8, f"PR #{r.pr} merged by yah (merge commit)."
+
+
+def skipped(r, reason, why):
+    """(code, reason) for a merge auto-merge skipped: 0 and why, or with --plan 2, since the run never builds on an
+    unmerged PR. Only when the plan has a phase left does it say the next one would stack on it."""
+    if not r.chain:
+        return 0, f"{reason} Auto-merge skipped: {why}."
+    more = next_phase(r, where.collect(r.top, use_gh=bool(r.gh)) or {}, {r.label})
+    return 2, f"{reason} Auto-merge skipped: {why}" + ("; the next phase would stack on it." if more else ".")
 
 
 # ---------------------------------------------------------------- one iteration
@@ -834,7 +858,7 @@ def session(r, argv, name, n=0):
     return it
 
 
-# ---------------------------------------------------------------- critic and judge (the quality profile)
+# ---------------------------------------------------------------- critic and judge (the profile, no-CI judge)
 
 def pool_used(r, model):
     """The used % of the fullest rate-limit pool whose key names `model` (seven_day_fable, ...): the stream's
@@ -853,7 +877,14 @@ def review_role(r, mode):
     with no Claude bar; with codex off, or down after a failed call, roles.review_fallback. In catch-up its
     critique, never its judge, runs on roles.premium: the judge gates auto-merge and stays the other model family.
     A Claude critic runs as roles.critic, or roles.judge once its bar is at critic_week_skip_pct: its model's own
-    weekly pool when Claude Code sends one, else the weekly bar; with neither it runs ("bar unknown")."""
+    weekly pool when Claude Code sends one, else the weekly bar; with neither it runs ("bar unknown"). With the
+    profile off, a judge runs only because a PR with no checks needs one before auto-merge: GPT while codex is on
+    and up, else roles.judge, never roles.critic or roles.premium (Fable)."""
+    if no_ci_judge(r, mode):
+        if r.cfg["codex"] and not r.codex_down:
+            return "codex", r.cfg["codex_effort"], "no-CI judge: GPT, no Claude bar"
+        model, effort = r.cfg["roles"]["judge"].split()
+        return model, effort, "no-CI judge" + (", codex down" if r.cfg["codex"] else "") + ": roles.judge"
     model, effort = r.cfg["roles"]["critic"].split()
     if model == "codex":
         if mode == "critique" and r.catch_up:
@@ -874,6 +905,11 @@ def review_role(r, mode):
     return model, effort, f"{why}, at or over {skip:g}%: roles.judge"
 
 
+def no_ci_judge(r, mode):
+    """A judge with the quality profile off: it runs only because a PR with no checks needs a pass to auto-merge."""
+    return mode == "judge" and not r.cfg["ultracode"]
+
+
 def wants_critique(r):
     """The profile critiques a plan phase once per run, before its first build: no PR yet and no phase branch on
     origin (a remote that cannot be read has none). Not when NEXT already waits on you: the build stops there."""
@@ -891,12 +927,18 @@ def wants_critique(r):
 
 
 def wants_judge(r):
-    """The profile judges each PR once per run, when evaluate finds it open and green; not after a session that
-    stopped for you, since the run stops there anyway, nor past run_total_hours, where session() would cut it off
-    at once."""
-    return bool(r.cfg["ultracode"] and r.pr and r.pr_state == "OPEN" and r.pr not in r.judged
-                and not stopped(r.last, errors=False)
-                and time.monotonic() - r.t0 < r.cfg["run_total_hours"] * 3600)
+    """A judge when evaluate finds the PR open and green: the profile judges each PR once per run, and with
+    auto-merge on a plan phase's PR with no checks is judged until a judge passes its head, 2 judges at most (a
+    block, its fix slice, then one judge of the new head). Not after a session that stopped for you, since the
+    run stops there anyway, nor past run_total_hours, where session() would cut it off at once. The no-CI judge
+    also skips a session that errored: auto-merge refuses after one, so its pass could merge nothing."""
+    if not (r.pr and r.pr_state == "OPEN" and not stopped(r.last, errors=False)
+            and time.monotonic() - r.t0 < r.cfg["run_total_hours"] * 3600):
+        return False
+    if r.cfg["ultracode"] and r.pr not in r.judged:
+        return True
+    return bool(r.cfg["auto_merge"] and r.checks == "none" and r.phase is not None and not stopped(r.last)
+                and r.passed.get(r.pr) != (r.view or {}).get("headRefOid") and r.judges.get(r.pr, 0) < 2)
 
 
 CRITIQUE_ASK = """You are reviewing the plan for one phase of work in this repository before anyone builds it.
@@ -1158,16 +1200,17 @@ def review(r, target, mode, name, verdict):
     its YAH-RESULT matches the `verdict` regex, its answer goes to runs/<stem>-<name>-<mode>.md: returns (the
     match, that path). A failed codex call marks codex down for the rest of the run and reruns on
     roles.review_fallback; a brief that cannot be built (a plan with no spec file, gh pr diff failing) sends only
-    that review there. An error or another tag is logged as skipped: (None, "")."""
+    that review there, or to roles.judge for the no-CI judge. An error or another tag is logged as skipped: (None, "")."""
     model, effort, why = review_role(r, mode)
     it = None
     if model == "codex":
         say(f"[yah] {mode} {name}: codex.py review on {model} {effort} ({why})")
         it = codex_review(r, mode, name)
         if it.get("no_brief"):  # nothing to hand GPT (no plan section, no diff): not codex's fault, so this one only
-            tell(r, f"{mode} {name}: no brief for {model}, this review goes to roles.review_fallback: {it['error']}")
-            model, effort = r.cfg["roles"]["review_fallback"].split()
-            why, it = "no brief for codex: roles.review_fallback", None
+            fb = "judge" if no_ci_judge(r, mode) else "review_fallback"  # the no-CI judge never leaves roles.judge
+            tell(r, f"{mode} {name}: no brief for {model}, this review goes to roles.{fb}: {it['error']}")
+            model, effort = r.cfg["roles"][fb].split()
+            why, it = f"no brief for codex: roles.{fb}", None
         elif it["is_error"]:
             r.codex_down = True
             tell(r, f"{mode} {name}: {model} {effort} failed, codex is off for the rest of this run: {it['error']}")
@@ -1202,11 +1245,16 @@ def critique(r):
 
 def judge(r):
     """/yah:resume <target> judge on an open, green PR. A block sets r.findings, so evaluate asks for one
-    fix-findings slice before exit 0 or a merge; a pass or a skip lets them happen."""
+    fix-findings slice before exit 0 or a merge; a pass or a skip lets them happen. r.judges counts each PR's
+    judges, and a pass records the head it judged in r.passed: a PR with no checks merges only on that head."""
     r.judged.add(r.pr)
+    r.judges[r.pr] = r.judges.get(r.pr, 0) + 1
+    oid = (r.view or {}).get("headRefOid")  # evaluate's read, just before this judge
     m, path = review(r, r.target or r.label or f"#{r.pr}", "judge", r.label or f"PR{r.pr}",
                      r"judge\s+(pass|block)\b.*")
-    if m and m.group(1).lower() == "block":
+    if m and m.group(1).lower() == "pass" and oid:
+        r.passed[r.pr] = oid
+    elif m and m.group(1).lower() == "block":
         # The PR was green, so how the last build ended (an error, no tag, a stall) stopped nothing; left in
         # place, evaluate would stop on it now instead of running the fix slice.
         r.findings, r.last, r.stalls = path, None, 0
@@ -1275,9 +1323,31 @@ def goes_on(r, code):
                                                  and (r.phase or {}).get("status") == "closed"))
 
 
+def sweep_phase(r, s, skip=()):
+    """--plan with auto-merge on: the lowest closed phase of the pinned plan whose PR is still open and that this
+    run has not finished (nor skip names). Its PR merges before any open phase builds, so leftovers merge
+    bottom-up. The PR is the one pr_from_where picks: the `pr` field's number when there is one (a closed #11 is
+    no leftover, even with its branch the head of a new PR), else an open PR from the phase's branch. None when
+    there is none."""
+    prs = [p for p in s.get("prs") or [] if isinstance(p, dict)]
+    nums, heads = {p.get("number") for p in prs}, {p.get("headRefName") for p in prs} - {"", None}
+    done = {d[0] for d in r.done} | set(skip)
+    return next((p for p in plan_phases(r, s) if p.get("status") == "closed" and p.get("label") not in done
+                 and (pr_number(p) in nums if pr_number(p) is not None else p.get("branch") in heads)), None)
+
+
+def next_phase(r, s, skip=()):
+    """--plan's next phase: with auto-merge on, a leftover (sweep_phase), else the next open phase this run has
+    not finished (nor skip names). None when the plan has none left."""
+    done = {d[0] for d in r.done} | set(skip)
+    return (sweep_phase(r, s, skip) if r.cfg["auto_merge"] else None) or next(
+        (p for p in plan_phases(r, s) if p.get("status") != "closed" and p.get("label") not in done), None)
+
+
 def advance(r, code, reason):
     """--plan: the stop rule said the phase is done (its PR open and green, or merged, and the phase closed),
-    so pin the next open phase and go on. (None, "") to run again, else the (code, reason) to stop with."""
+    so pin the next phase and go on: with auto-merge on, a closed phase whose PR is still open (sweep_phase),
+    else the next open one. (None, "") to run again, else the (code, reason) to stop with."""
     if not goes_on(r, code):
         return code, reason
     merged = r.pr_state == "MERGED"
@@ -1285,9 +1355,7 @@ def advance(r, code, reason):
         return 2, f"{needs_you(r)} ({r.label}'s PR #{r.pr} is {'merged' if merged else 'open and green'}.)"
     r.done.append((r.label, r.pr, "merged by yah" if code == 8 else "merged" if merged else "green"))
     s = where.collect(r.top, use_gh=bool(r.gh)) or {}
-    done = [d[0] for d in r.done]
-    nxt = next((p for p in plan_phases(r, s)
-                if p.get("status") != "closed" and p.get("label") not in done), None)
+    nxt = next_phase(r, s)
     parts = ", ".join(f"{label} PR #{pr} {how}" for label, pr, how in r.done)
     if nxt is None:
         return 0, f"plan done: {parts}." + (" The merges are yours." if any(d[2] == "green" for d in r.done) else "")
@@ -1407,9 +1475,24 @@ def dry_run(r):
     code, reason = evaluate(r, wait=False)
     if code is None and not r.base:
         code, reason = 5, "run refused: " + no_base(r)
+    c, am, green = r.cfg, "on" if r.cfg["auto_merge"] else "off", code == 0
+    if c.get("config_unreadable"):
+        am += f" ({UNREADABLE})"
+    if c["auto_merge"] and green and r.pr_state == "OPEN":  # open and green: what it would do, never doing it
+        judge_first = r.checks == "none" and wants_judge(r)
+        if judge_first:  # the rules a judge pass on its head would leave
+            r.passed[r.pr] = (r.view or {}).get("headRefOid")
+        ok, why = mergeable(r, r.view or {})
+        if ok and judge_first:
+            model, effort, how = review_role(r, "judge")
+            am += f": no checks, so would judge PR #{r.pr} on {model} {effort} ({how}), then merge it on a pass"
+        else:
+            am += f": would merge PR #{r.pr} (merge commit)" if ok else f": would not merge PR #{r.pr}: {why}"
+        # the stop the run would make: merged (8), or the skip (0, or 2 with --plan)
+        code, reason = (8, f"PR #{r.pr} merged by yah (merge commit).") if ok else skipped(r, reason, why)
     if goes_on(r, code):
-        reason += " With --plan, a done phase goes on to the next open one."
-    c = r.cfg
+        reason += (" With --plan, the run goes on instead: to the next leftover phase PR, else the next open phase."
+                   if c["auto_merge"] else " With --plan, a done phase goes on to the next open one.")
     phase = f"phase {r.label}" if r.label else "no plan phase"
     say("[yah] dry run: nothing is spawned")
     say(f"repo    {r.top}  branch {r.branch}  project {r.key}")
@@ -1418,11 +1501,13 @@ def dry_run(r):
     say(f"base    {r.base} ({r.base_from})" if r.base else "base    unknown")
     if r.chain:
         todo, prev, steps = [p for p in r.phases if p.get("status") != "closed"], "", []
+        below = "where {} merged" if c["auto_merge"] else "{}'s branch"  # auto-merge never stacks on an open PR
         for p in todo:
-            base = r.base if p.get("label") == r.label else p.get("base") or (f"{prev}'s branch" if prev else "?")
+            base = r.base if p.get("label") == r.label else p.get("base") or (below.format(prev) if prev else "?")
             steps.append(f"{p.get('label')} {p.get('branch') or '(new branch)'} <- {base}")
             prev = p.get("label")
-        say(f"plan    {' | '.join(steps)}; each phase until its PR is green, then the next")
+        say(f"plan    {' | '.join(steps)}; each phase until its PR is green"
+            + (" and merged" if c["auto_merge"] else "") + ", then the next")
     say(f"plugin  {r.plugin_src}")
     say(f"protect {', '.join(r.protected)}")
     say(f"argv    {shlex.join(claude_argv(r))}")
@@ -1440,16 +1525,12 @@ def dry_run(r):
     say("week    pace unknown" if r.used is None else f"week    {r.used:.0f}% used"
         + ("" if r.pace is None else f", pace {r.pace:.0f}%")
         + (f", catch-up ({r.gap:.0f} pts under{to_reset(r)})" if r.catch_up else ""))
-    am = "on" if c["auto_merge"] else "off"
-    if c["auto_merge"] and code == 0 and r.pr_state == "OPEN":  # open and green: what it would do, never doing it
-        ok, why = mergeable(r, r.view or {})
-        am += f": would merge PR #{r.pr} (merge commit)" if ok else f": would not merge PR #{r.pr}: {why}"
     say(f"merge   auto-merge {am}")
     if c["ultracode"]:
         if code is None and wants_critique(r):
             model, effort, why = review_role(r, "critique")
             say(f"critic  would critique {r.label} on {model} {effort} ({why}) before its first build")
-        elif code == 0 and wants_judge(r):
+        elif green and wants_judge(r):
             model, effort, why = review_role(r, "judge")
             say(f"critic  would judge PR #{r.pr} on {model} {effort} ({why}) before it stops or merges")
         else:
@@ -1462,10 +1543,13 @@ def dry_run(r):
 def main():
     utf8_stdout()
     ap = argparse.ArgumentParser(prog="yah run", description="Chain headless /yah:resume sessions until the "
-                                 "phase's PR is open and green. It merges only with auto_merge on in config.json.")
+                                 "phase's PR is open and green, then merge it. Auto-merge is on by default; "
+                                 "\"auto_merge\": false in config.json (or projects.<key>.auto_merge: false) "
+                                 "turns it off.")
     ap.add_argument("target", nargs="?", default="", help="P<n>, #<pr> (or the bare number), or empty")
-    ap.add_argument("--plan", action="store_true", help="after the phase's PR is green, go on to the next open "
-                    "phase until the plan is done")
+    ap.add_argument("--plan", action="store_true", help="go on to the next phase until the plan is done: once "
+                    "this one's PR is merged (auto-merge on: leftover phase PRs first, and a skipped merge stops "
+                    "with exit 2), or open and green (auto-merge off)")
     grp = ap.add_mutually_exclusive_group()
     grp.add_argument("--cwd", help="run in this repo")
     grp.add_argument("--project", help="run in this project (config.json or seen by where.py)")
@@ -1520,6 +1604,7 @@ def main():
     if a.stop:
         return stop_run(pidf)
     pcfg = cfg["projects"].get(key) if isinstance(cfg["projects"].get(key), dict) else {}
+    cfg = dict(cfg, auto_merge=auto_merge_on(key))  # projects.<key>.auto_merge: false turns it off for this repo
     trunks = pcfg.get("trunks") or []
     trunks = where.DEFAULT_TRUNKS | set([trunks] if isinstance(trunks, str) else trunks)
     branch = read_branch(git_dir) if git_dir else None
@@ -1548,9 +1633,14 @@ def main():
         phase=None, phases=[], plan_key=None, next="", head="", mode="build", checks="", url="", waiting=False,
         week=None, pace_logged=False, used=None, pace=None, gap=None, hours_left=None, catch_up=False, n=0, total=0, cost=0.0, last=None, stalls=0, t0=time.monotonic(), log=None,
         chain=a.plan, prev=None, done=[], pr_state="", base_arg="", view=None, login="",
-        pools={}, critiqued=set(), critique="", judged=set(), findings="", review_cost=0.0, reviews=0,
-        codex_down=False, spec="", plan_file=None, before=(0.0, 0.0))
+        pools={}, critiqued=set(), critique="", judged=set(), judges={}, passed={}, findings="", review_cost=0.0,
+        reviews=0, codex_down=False, spec="", plan_file=None, before=(0.0, 0.0))
     refresh(r, s)
+    if a.plan and not target and cfg["auto_merge"]:  # leftover PRs of closed phases merge first, bottom-up
+        ph = sweep_phase(r, s)
+        if ph:
+            r.label, r.pr = ph["label"], None
+            refresh(r, s)
     r.plan_file = spec_path(r)  # pinned, like the plan: its ## Bet is read before every session
     r.before = plan_spend(data_dir() / "runs", plan_id(r.plan_file))
     if (target[:1] == "P" or a.plan) and r.phase is None:
@@ -1586,6 +1676,8 @@ def main():
     if r.plan_file:  # read again under the plan's lock: what the next run on this plan reads as spent before it
         r.before = plan_spend(runs, plan_id(r.plan_file))  # hours unrounded: a rounded carry drops short runs
         log(r, f"plan {plan_id(r.plan_file)} | before ${r.before[0]:.2f} and {r.before[1]:.6f}h")
+    if cfg.get("config_unreadable"):  # it may hold "auto_merge": false: never merge on a guess
+        tell(r, "auto-merge off: " + UNREADABLE)
     prune(runs)
     try:
         while True:

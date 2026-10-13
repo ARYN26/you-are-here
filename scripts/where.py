@@ -30,9 +30,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import beads  # noqa: E402
-from yahlib import (NO_WINDOW, claude_dir, config, data_dir, empty_state, find_git, find_tool,  # noqa: E402
-                    first_line, log_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs, run, run_info,
-                    run_status, run_text, short_of, utf8_stdout, where_cache_path, write_json)
+from yahlib import (NO_WINDOW, auto_merge_on, claude_dir, config, data_dir, empty_state, find_git,  # noqa: E402
+                    find_tool, first_line, log_line, norm, pick_phase, project_key, read_branch, read_json, repo_dirs,
+                    run, run_info, run_status, run_text, short_of, utf8_stdout, where_cache_path, write_json)
 
 PR_FIELDS = "number,title,headRefName,baseRefName,isDraft,reviewDecision,statusCheckRollup,updatedAt"
 FOOTER = ("This is the current state. Do not read docs to orient; /yah:where shows the full view. "
@@ -518,7 +518,7 @@ def prod_line(s):
 
 
 def pr_lines(prs, branch, state, limit=4, trunks=(), auto=False):
-    """auto: config.json's auto_merge, so a green phase PR says `yah run` merges it, not you."""
+    """auto: the repo's auto_merge (auto_merge_on), so a green phase PR says `yah run` merges it, not you."""
     if not prs:
         return [], {}
     trunks = DEFAULT_TRUNKS | set(trunks)
@@ -646,7 +646,7 @@ def collect(cwd, use_bd=True, use_gh=True, infer=True):
          "ignored_plan": ignored, "beads_source": bz["source"], "state_md": sm, "prs": prs,
          "gh_tried": proc is not None, "prod": cfg.get("prod", ""), "prod_branches": prods,
          "trunks": cfg.get("trunks", []), "landing": land,
-         "auto_merge": config()["auto_merge"],
+         "auto_merge": auto_merge_on(key),
          "bases": bases, "ancestors": near, "merged_in": merged, "next_stale": stale,
          "aliases": aliases(str(top), plan.get("spec")) if infer else [],
          "run": run_info(key, str(top), str(main_root)), "plans": plans}

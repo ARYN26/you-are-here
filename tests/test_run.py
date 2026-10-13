@@ -46,6 +46,8 @@ STATE = """# Shop
 CLOSED = STATE.replace("- [~] P2 Payment form | branch checkout/payment | base main",
                        "- [x] P2 Payment form | branch checkout/payment | base main | PR #12")
 MERGE_OK = "PR #12 merged by yah (merge commit)."
+NO_CHECKS = {"required": [{"rc": 1, "err": "no required checks reported on the 'x' branch\n"}],
+             "checks": [{"rc": 1, "err": "no checks reported on the 'x' branch\n"}]}
 
 FAKE = r'''
 import json, os, re, subprocess, sys, time
@@ -74,8 +76,9 @@ def emit(ev):
 
 
 if role == "gh":
-    if args[:2] == ["pr", "list"]:  # --base: the PRs stacked on a merged head
-        print(json.dumps(script.get("stacked" if "--base" in args else "list", [])))
+    if args[:2] == ["pr", "list"]:  # --base: the PRs stacked on a merged head; stacked-<head> scripts one head
+        head = "stacked-" + args[args.index("--base") + 1] if "--base" in args else ""
+        print(json.dumps(script.get(head, script.get("stacked", [])) if head else script.get("list", [])))
     elif args[:2] in (["pr", "merge"], ["pr", "edit"]) or args[:1] == ["api"]:
         c = step("user" if "user" in args else args[1] if args[0] == "pr" else "delete")
         sys.stdout.write(c.get("out", ""))
@@ -175,6 +178,7 @@ class RunTests(unittest.TestCase):
                         GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.com",
                         GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.com",
                         PATH=str(self.bin) + os.pathsep + os.environ.get("PATH", ""))
+        self.config()  # auto-merge is on with no config.json: a test that wants it says so (self.auto)
 
     # ------------------------------------------------------------ fixtures
 
@@ -192,8 +196,9 @@ class RunTests(unittest.TestCase):
         return b
 
     def config(self, **cfg):
+        """config.json with auto_merge off unless cfg turns it on."""
         self.data.mkdir(exist_ok=True)
-        (self.data / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        (self.data / "config.json").write_text(json.dumps(dict({"auto_merge": False}, **cfg)), encoding="utf-8")
 
     def git(self, repo, *args):
         subprocess.run(["git", *args], cwd=str(repo), env=self.env, check=True, capture_output=True)
@@ -236,8 +241,9 @@ class RunTests(unittest.TestCase):
 
     def assert_merge_safe(self, out):
         """Every run: a merge is a merge commit pinned to a head, nothing squashes, rebases, forces or deletes the
-        branch with the merge, the ref DELETE comes after the merge and every retarget, and auto_merge off asks gh
-        nothing new and prints nothing new."""
+        branch with the merge, the ref DELETE comes after the merge and every retarget, and auto_merge off (any
+        value but true, a config.json that does not load, or the shop project's value but true; a missing key is
+        on) asks gh nothing new and prints nothing new."""
         calls = self.calls("gh")
         for a in calls:
             for bad in ("--squash", "--rebase", "--delete-branch", "--admin", "--auto"):
@@ -253,8 +259,16 @@ class RunTests(unittest.TestCase):
                 nxt = kinds.index("merge", i) if "merge" in kinds[i:] else len(kinds)
                 self.assertIn("merge", kinds[:i], calls)
                 self.assertNotIn("retarget", kinds[i + 1:nxt], calls)
-        cfg = self.data / "config.json"
-        if not (cfg.exists() and json.loads(cfg.read_text("utf-8")).get("auto_merge") is True):
+        f = self.data / "config.json"
+        raw = f.read_bytes() if f.exists() else b""
+        try:
+            cfg = json.loads(raw.decode("utf-8-sig")) if raw.strip() else {}  # no file, or no key: on
+        except ValueError:
+            cfg = None
+        cfg = cfg if isinstance(cfg, dict) else {"auto_merge": "unreadable"}  # a file that does not load: off
+        projects = cfg.get("projects") if isinstance(cfg.get("projects"), dict) else {}
+        shop = next((v for k, v in projects.items() if k.lower() == "shop" and isinstance(v, dict)), {})
+        if cfg.get("auto_merge", True) is not True or shop.get("auto_merge", True) is not True:
             self.assertFalse(self.merge_calls(), calls)
             self.assertNotIn("Auto-merge", out)
             self.assertNotIn("merged by yah", out)
@@ -579,7 +593,8 @@ class RunTests(unittest.TestCase):
         p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
         pr12 = {"number": 12, "title": "P2", "headRefName": "checkout/payment", "baseRefName": "main", "isDraft": False,
                 "reviewDecision": "", "statusCheckRollup": [], "updatedAt": "2026-09-24T10:00:00Z"}
-        self.script(list=[pr12], required=[{"rc": 0}], **{
+        pr11 = dict(pr12, number=11, title="P1", headRefName="checkout/cart")  # closed P1's PR, still open
+        self.script(list=[pr11, pr12], required=[{"rc": 0}], **{
             "view-12": [view()], "view-13": [view(headRefName="p3", baseRefName="checkout/payment")],
             "claude": [{"commit": True, "tag": "pr-open #12",
                         "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]},
@@ -589,6 +604,8 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.prompts(), ["/yah:resume P2 build", "/yah:resume P3 build base=checkout/payment"])
         self.assertIn("Next: P3 on checkout/payment (stacked on P2's PR #12, still open)", out)
         self.assertIn("checkout/payment", (self.fake / "claude.env").read_text("utf-8").split(","))
+        self.assertNotIn("P1 PR #11", out)  # auto-merge off: no sweep goes back to a closed phase's open PR
+        self.assertNotIn("Next: P1", out)
 
     def test_plan_checks_the_stop_rules_before_the_next_phase(self):
         p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
@@ -635,7 +652,7 @@ class RunTests(unittest.TestCase):
 
     def test_weekly_usage_stops_with_exit_7(self):
         repo, now = self.repo(), time.time()
-        self.data.mkdir()
+        self.data.mkdir(exist_ok=True)
         lim = {"ts": now, "five_hour": {"used_pct": 10, "resets_at": now}, "pace_pct": 86,
                "seven_day": {"used_pct": 85, "resets_at": now + 86400}}
         (self.data / "limits.json").write_text(json.dumps(lim), encoding="utf-8")
@@ -765,16 +782,19 @@ class RunTests(unittest.TestCase):
     def test_auto_merge_skips_an_ineligible_pr(self):
         repo = self.repo(state=CLOSED)
         cr = [review("b", "CHANGES_REQUESTED", "2026-09-21T09:00:00Z")]
-        cases = [("no checks", "P2", {"view-12": [view()], "checks": [{"rc": 1, "err": "no checks reported\n"}],
-                                      "required": [{"rc": 1, "err": "no required checks reported\n"}]},
-                  "no checks ran"),
-                 ("#N target", "#12", {"view-12": [view()]}, "PR #12 is not a plan phase's PR")]
+        cases = [("no checks and no judge verdict", "P2", dict(NO_CHECKS, **{
+                      "view-12": [view()], "judge": [{"result": {"result": "Looks fine."}}]}),
+                  "no checks ran and no judge passed abc1234", ["/yah:resume P2 judge"] * 2),
+                 ("#N target, no checks", "#12", dict(NO_CHECKS, **{"view-12": [view()]}),  # no judge: it cannot merge
+                  "PR #12 is not a plan phase's PR", []),
+                 ("#N target", "#12", {"view-12": [view()]}, "PR #12 is not a plan phase's PR", [])]
         # The other rules one by one: test_mergeable_needs_every_rule, in-process.
-        for name, target, script, why in cases:
+        for name, target, script, why, prompts in cases:
             with self.subTest(name):
                 self.auto(**script)
                 self.assertIn(f"stop (exit 0): {GREEN} Auto-merge skipped: {why}.", self.run_yah(repo, target, code=0))
                 self.assertFalse(self.merges())
+                self.assertEqual(self.prompts(), prompts)
         self.assertNotIn(["api", "user", "--jq", ".login"], self.calls("gh"))  # #N: no phase, so no need to ask
         # Not green, so evaluate never offers a merge: a session runs instead, and this one asks a question.
         for name, script in (("pending", {"required": [{"rc": 8}]}),
@@ -785,16 +805,21 @@ class RunTests(unittest.TestCase):
                 self.run_yah(repo, "P2", code=2)
                 self.assertEqual(self.merge_calls(), [])
         # Green and closed, but the session stopped: evaluate says green before it reads r.last.
-        for name, session, why in (("open", {"tag": "needs-human"}, "needs you: the session asked for you"),
-                                   ("erred", {"result": {"is_error": True, "subtype": "error_max_budget_usd"}},
-                                    "iteration 1 ended with an error")):
+        erred = {"result": {"is_error": True, "subtype": "error_max_budget_usd"}}
+        # no checks: no judge after an errored build either, since its pass could merge nothing
+        for i, (name, session, extra, why) in enumerate((
+                ("open", {"tag": "needs-human"}, {}, "needs you: the session asked for you"),
+                ("erred", erred, {}, "iteration 1 ended with an error"),
+                ("erred, no checks", erred, dict(NO_CHECKS, judge=[{"tag": "judge pass"}]),
+                 "iteration 1 ended with an error"))):
             with self.subTest(name):
-                self.auto(**{"view-12": [view()], "list": [{"number": 12, "headRefName": "checkout/payment",
-                                                            "baseRefName": "main"}],
-                             "claude": [dict(session, close=True, commit=True)]})
-                out = self.run_yah(self.repo(name=name), "P2", code=0)
+                self.auto(**dict(extra, **{"view-12": [view()], "list": [{"number": 12, "headRefName":
+                                                                          "checkout/payment", "baseRefName": "main"}],
+                                           "claude": [dict(session, close=True, commit=True)]}))
+                out = self.run_yah(self.repo(name=f"stopped{i}"), "P2", code=0)
                 self.assertIn(f"{GREEN} Auto-merge skipped: the last session stopped: {why}", out)
                 self.assertEqual(self.merge_calls(), [])
+                self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
         # evaluate's view can predate a long checks wait: the merge reads the PR again and trusts only that read.
         for name, views, why in (("changes requested during the wait", [view(), view(reviews=cr)], "changes requested"),
                                  ("back to draft during the wait", [view(), view(isDraft=True)], "it is a draft"),
@@ -816,6 +841,10 @@ class RunTests(unittest.TestCase):
                 self.auto(**{"view-12": views})
                 self.assertIn("stop (exit 8): " + MERGE_OK, self.run_yah(repo, "P2", code=8))
                 self.assertIn(["pr", "merge", "12", "--merge", "--match-head-commit", "abc1234def"], self.calls("gh"))
+        with self.subTest("no checks: read again after the judge"):  # its read predates the judge
+            self.no_checks(**{"view-12": [view(), view(mergeable="UNKNOWN"), view()], "judge": [{"tag": "judge pass"}]})
+            self.assertIn("stop (exit 8): " + MERGE_OK, self.run_yah(repo, "P2", code=8))
+            self.assertEqual(self.merges(), [["pr", "merge", "12", "--merge", "--match-head-commit", "abc1234def"]])
         with self.subTest("still unknown after the retries"):
             self.auto(**{"view-12": [view(mergeable="UNKNOWN")]})
             self.assertIn("Auto-merge skipped: mergeable is UNKNOWN.", self.run_yah(repo, "P2", code=0))
@@ -846,6 +875,275 @@ class RunTests(unittest.TestCase):
                 self.assertIn(f"kept {head}: a protected branch is never deleted", out)
                 self.assertEqual([a[:2] for a in self.merge_calls()],
                                  [["api", "user"], ["pr", "merge"], ["pr", "list"]])
+
+    def no_checks(self, cfg=None, **script):
+        """auto-merge on, and gh reports no checks on the PR, required or not."""
+        self.auto(cfg, **dict(NO_CHECKS, **script))
+
+    def test_no_checks_merges_after_a_judge_pass_on_its_head(self):
+        repo = self.repo(state=CLOSED)
+        cases = [("roles.judge", {}, ("opus", "high"), "opus high (no-CI judge: roles.judge)"),
+                 ("its own roles.judge", {"roles": {"judge": "sonnet xhigh"}}, ("sonnet", "xhigh"),
+                  "sonnet xhigh (no-CI judge: roles.judge)")]
+        for name, cfg, ran, why in cases:
+            with self.subTest(name):
+                self.clear_run_logs()
+                self.no_checks(cfg, **{"view-12": [view()], "judge": [{"tag": "judge pass"}]})
+                self.assertIn("stop (exit 8): " + MERGE_OK, self.run_yah(repo, "P2", code=8))
+                self.assertEqual(self.prompts(), ["/yah:resume P2 judge"])
+                argv = self.calls("claude")[0]  # read-only, and never roles.critic or roles.premium (fable)
+                self.assertEqual((self.flag(argv, "--model"), self.flag(argv, "--effort")), ran)
+                self.assertNotEqual(self.flag(argv, "--model"), "fable")
+                self.assertIn("Edit", argv[argv.index("--disallowedTools") + 1:argv.index("--max-budget-usd")])
+                self.assertEqual(self.merges(), [["pr", "merge", "12", "--merge", "--match-head-commit", "abc1234def"]])
+                self.assertIn(f"judge P2: {why}, $0.25, judge pass, ", self.run_logs()[-1].read_text("utf-8"))
+        with self.subTest("GPT with codex on"):
+            (self.tmp / "codex.py").write_text(FAKE, encoding="utf-8")
+            self.clear_run_logs()
+            self.no_checks({"codex": True}, diff=[{"out": "diff --git a/pay.py b/pay.py\n+cents = 0\n"}],
+                           codex=[{"answer": "Nothing blocks.\nYAH-RESULT: judge pass"}], **{"view-12": [view()]})
+            out = self.run_yah(repo, "P2", env=dict(self.env, YAH_CODEX=str(self.tmp / "codex.py")), code=8)
+            self.assertIn("stop (exit 8): " + MERGE_OK, out)
+            self.assertEqual((len(self.calls("codex")), self.calls("claude")), (1, []))
+            self.assertIn("judge P2: codex high (no-CI judge: GPT, no Claude bar), $0.00, judge pass, ",
+                          self.run_logs()[-1].read_text("utf-8"))
+        env = dict(self.env, YAH_CODEX=str(self.tmp / "codex.py"))
+        with self.subTest("codex fails: roles.judge, never codex as a claude model"):
+            self.clear_run_logs()
+            self.no_checks({"codex": True}, diff=[{"out": "diff --git a/pay.py b/pay.py\n+cents = 0\n"}],
+                           codex=[{"rc": 1, "err": "boom"}], judge=[{"tag": "judge pass"}], **{"view-12": [view()]})
+            self.assertIn("stop (exit 8): " + MERGE_OK, self.run_yah(repo, "P2", env=env, code=8))
+            argv = self.calls("claude")[0]
+            self.assertEqual((self.flag(argv, "--model"), self.flag(argv, "--effort")), ("opus", "high"))
+            self.assertIn("judge P2: opus high (no-CI judge, codex down: roles.judge), $0.25, judge pass, ",
+                          self.run_logs()[-1].read_text("utf-8"))
+        with self.subTest("no brief for codex: roles.judge, never roles.review_fallback"):
+            self.clear_run_logs()
+            self.no_checks({"codex": True, "roles": {"review_fallback": "fable high"}},
+                           diff=[{"rc": 1, "err": "HTTP 502"}], judge=[{"tag": "judge pass"}], **{"view-12": [view()]})
+            self.assertIn("stop (exit 8): " + MERGE_OK, self.run_yah(repo, "P2", env=env, code=8))
+            argv = self.calls("claude")[0]
+            self.assertEqual((self.flag(argv, "--model"), self.flag(argv, "--effort")), ("opus", "high"))
+            self.assertEqual(self.calls("codex"), [])
+            log = self.run_logs()[-1].read_text("utf-8")
+            self.assertIn("judge P2: no brief for codex, this review goes to roles.judge: gh pr diff failed: HTTP 502",
+                          log)
+            self.assertIn("judge P2: opus high (no brief for codex: roles.judge), $0.25, judge pass, ", log)
+
+    def test_no_checks_block_fix_then_one_rejudge(self):
+        self.no_checks(**{"view-12": [view(), view(), view(headRefOid="fff9999aaa")],  # the fix is a new head
+                          "judge": [{"tag": "judge block 1"}, {"tag": "judge pass"}],
+                          "fix-findings": [{"commit": True, "tag": "pr-open #12"}]})
+        out = self.run_yah(self.repo(state=CLOSED), "P2", code=8)
+        self.assertIn("stop (exit 8): " + MERGE_OK, out)
+        prompts = self.prompts()
+        self.assertEqual([p.split(" findings=")[0] for p in prompts],
+                         ["/yah:resume P2 judge", "/yah:resume P2 fix-findings", "/yah:resume P2 judge"])
+        self.assertRegex(prompts[1], r"findings=.+-P2-judge\.md$")
+        self.assertEqual(self.merges(), [["pr", "merge", "12", "--merge", "--match-head-commit", "fff9999aaa"]])
+        log = self.run_logs()[-1].read_text("utf-8")
+        self.assertIn("judge P2: opus high (no-CI judge: roles.judge), $0.25, judge block 1, ", log)
+        self.assertIn("judge P2: opus high (no-CI judge: roles.judge), $0.25, judge pass, ", log)
+
+    def test_no_checks_failed_judge_never_merges(self):
+        repo = self.repo(state=CLOSED)
+        none = {"result": {"result": "Looks fine."}}
+        fix = [{"commit": True, "tag": "pr-open #12"}]
+        cases = [("two blocks", [], {"judge": [{"tag": "judge block 1"}], "fix-findings": fix},
+                  ["judge", "fix-findings", "judge", "fix-findings"], 0, "no judge passed abc1234."),
+                 ("no verdict", [], {"judge": [none]}, ["judge", "judge"], 0, "no judge passed abc1234."),
+                 ("a pass on an older head", [], {"view-12": [view(), view(headRefOid="fff9999aaa")],
+                                                  "judge": [{"tag": "judge pass"}, none]},
+                  ["judge", "judge"], 0, "no judge passed fff9999."),
+                 ("no verdict, --plan", ["--plan"], {"judge": [none]}, ["judge", "judge"], 2,
+                  "no judge passed abc1234; the next phase would stack on it.")]
+        for name, args, script, modes, code, why in cases:
+            with self.subTest(name):
+                self.no_checks(**dict({"view-12": [view()]}, **script))
+                out = self.run_yah(repo, "P2", *args, code=code)
+                self.assertIn(f"stop (exit {code}): {GREEN} Auto-merge skipped: no checks ran and " + why, out)
+                self.assertEqual([p.split()[2] for p in self.prompts()], modes)  # 2 judges at most
+                self.assertFalse(self.merges())
+
+    def test_plan_stops_instead_of_stacking_on_a_skipped_merge(self):
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        closed = [[p2, p2.replace("[~]", "[x]") + " | PR #12"], ["- [ ] P3", "- [~] P3"]]
+        cases = [("merge state BLOCKED", {"view-12": [view(mergeStateStatus="BLOCKED")]}, {"tag": "pr-open #12"},
+                  ["/yah:resume P2 build"],
+                  f"{GREEN} Auto-merge skipped: merge state BLOCKED; the next phase would stack on it."),
+                 ("no checks, no judge pass", dict(NO_CHECKS, **{"view-12": [view()], "judge": [{"tag": "x"}]}),
+                  {"tag": "pr-open #12"}, ["/yah:resume P2 build", "/yah:resume P2 judge", "/yah:resume P2 judge"],
+                  f"{GREEN} Auto-merge skipped: no checks ran and no judge passed abc1234; the next phase would "
+                  "stack on it."),
+                 ("a question", {"view-12": [view()]}, {"tag": "needs-human", "next": "NEEDS-HUMAN: SES or SendGrid?"},
+                  ["/yah:resume P2 build"],
+                  "needs you: NEEDS-HUMAN: SES or SendGrid? (P2's PR #12 is open and green.)")]
+        for i, (name, script, build, prompts, text) in enumerate(cases):
+            with self.subTest(name):
+                self.auto(**dict(script, claude=[dict(build, commit=True, replace=closed)]))
+                repo = self.repo(name=f"shop{i}")
+                out = self.run_yah(repo, "--plan", code=2)
+                self.assertIn("[yah] stop (exit 2): " + text, out)
+                self.assertEqual(self.prompts(), prompts)  # P3 never starts on the unmerged PR
+                self.assertNotIn("Next: P3", out)
+                self.assertFalse(self.merges())
+                st = yahlib.run_state(self.data / "runs" / yahlib.run_pid_path(f"shop{i}", str(repo), str(repo)).name)
+                self.assertEqual((st["code"], st["reason"], st["target"]), (2, text, "P2"))  # the RUN line
+
+    def test_a_skipped_merge_on_the_plans_last_phase_stops_without_a_next_phase(self):
+        p2 = "- [~] P2 Payment form | branch checkout/payment | base main"
+        self.auto(**{"view-12": [view(mergeStateStatus="BLOCKED")],
+                     "claude": [{"commit": True, "tag": "pr-open #12",
+                                 "replace": [[p2, p2.replace("[~]", "[x]") + " | PR #12"]]}]})
+        repo = self.repo(state=STATE.replace("- [ ] P3 Emails\n", ""))
+        out = self.run_yah(repo, "--plan", code=2)
+        self.assertIn(f"[yah] stop (exit 2): {GREEN} Auto-merge skipped: merge state BLOCKED.\n",
+                      out.replace("\r\n", "\n"))
+        self.assertNotIn("would stack", out)  # no phase is left to stack on it
+        self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+        self.assertFalse(self.merges())
+
+    def leftovers(self, state, **script):
+        """A plan whose closed P1 and P2 still have open PRs, #12 stacked on #11's branch: auto-merge on."""
+        pr11 = {"number": 11, "headRefName": "checkout/cart", "baseRefName": "main"}
+        pr12 = {"number": 12, "headRefName": "checkout/payment", "baseRefName": "checkout/cart"}
+        self.auto(**dict({"list": [pr11, pr12], "stacked-checkout/cart": [{"number": 12}],
+                          "view-11": [view(headRefName="checkout/cart", headRefOid="1111111aa")],
+                          "view-12": [view(headRefOid="1212121bb")]}, **script))  # #12 once retargeted to main
+        return self.repo(state=state)
+
+    def test_plan_sweeps_leftover_phase_prs_bottom_up(self):
+        state = STATE.replace("- [~] P2 Payment form | branch checkout/payment | base main",
+                              "- [x] P2 Payment form | branch checkout/payment | PR #12")
+        repo = self.leftovers(state, **{
+            "view-13": [view(headRefName="checkout/emails", headRefOid="1313131cc")],
+            "claude": [{"commit": True, "tag": "pr-open #13",
+                        "replace": [["- [ ] P3 Emails", "- [x] P3 Emails | branch checkout/emails | PR #13"]]}]})
+        dry = self.run_yah(repo, "--plan", "--dry-run", code=0)
+        self.assertIn("target  current phase (phase P1)  PR #11", dry)
+        self.assertIn("merge   auto-merge on: would merge PR #11 (merge commit)", dry)
+        self.assertIn("; each phase until its PR is green and merged, then the next", dry)
+        self.script(**json.loads((self.fake / "script.json").read_text("utf-8")))  # fresh counters and logs
+        out = self.run_yah(repo, "--plan", code=0)
+        self.assertEqual(self.prompts(), ["/yah:resume P3 build base=main"])  # on the trunk, after both merged
+        delete = "repos/{owner}/{repo}/git/refs/heads/"
+        self.assertEqual(self.merge_calls(), [
+            ["api", "user", "--jq", ".login"],
+            ["pr", "merge", "11", "--merge", "--match-head-commit", "1111111aa"],
+            ["pr", "list", "--base", "checkout/cart", "--state", "open", "--json", "number"],
+            ["pr", "edit", "12", "--base", "main"],
+            ["api", "-X", "DELETE", delete + "checkout/cart"],
+            ["pr", "merge", "12", "--merge", "--match-head-commit", "1212121bb"],
+            ["pr", "list", "--base", "checkout/payment", "--state", "open", "--json", "number"],
+            ["api", "-X", "DELETE", delete + "checkout/payment"],
+            ["pr", "merge", "13", "--merge", "--match-head-commit", "1313131cc"],
+            ["pr", "list", "--base", "checkout/emails", "--state", "open", "--json", "number"],
+            ["api", "-X", "DELETE", delete + "checkout/emails"]])
+        self.assertIn("[yah] retargeted PR #12 from checkout/cart to main", out)
+        self.assertIn("P1 done: PR #11 merged by yah. Next: P2 on ", out)
+        self.assertIn("P2 done: PR #12 merged by yah. Next: P3 on main (where P2's PR #12 merged)", out)
+        self.assertIn("plan done: P1 PR #11 merged by yah, P2 PR #12 merged by yah, P3 PR #13 merged by yah.", out)
+
+    def test_plan_with_only_leftovers_merges_then_plan_done(self):
+        state = STATE.replace("- [~] P2 Payment form | branch checkout/payment | base main",
+                              "- [x] P2 Payment form | branch checkout/payment | PR #12") \
+            .replace("- [ ] P3 Emails", "- [x] P3 Emails | branch checkout/emails | PR #13")  # #13 merged by hand
+        repo = self.leftovers(state)
+        out = self.run_yah(repo, "--plan", code=0)
+        self.assertIn("stop (exit 0): plan done: P1 PR #11 merged by yah, P2 PR #12 merged by yah.", out)
+        self.assertEqual(self.calls("claude"), [])
+        self.assertEqual([a[2] for a in self.merges()], ["11", "12"])  # bottom-up
+        self.assertIn(["pr", "edit", "12", "--base", "main"], self.calls("gh"))
+        self.script(**json.loads((self.fake / "script.json").read_text("utf-8")))
+        self.config()  # auto-merge off: no sweep, so nothing is left to do
+        self.assertIn("--plan found no open phase", self.run_yah(repo, "--plan", code=5))
+        self.assertEqual(self.merge_calls(), [])
+
+    def test_project_opt_out(self):
+        repo = self.repo(state=CLOSED)
+        cases = [("checks pass", {"view-12": [view()]}),
+                 ("no checks: no judge either", dict(NO_CHECKS, judge=[{"tag": "judge pass"}],
+                                                     **{"view-12": [view()]}))]
+        for name, script in cases:
+            with self.subTest(name):
+                self.auto({"projects": {"shop": {"auto_merge": False}}}, **script)
+                out = self.run_yah(repo, "P2", code=0)
+                self.assertIn(f"[yah] stop (exit 0): {GREEN}\n", out.replace("\r\n", "\n"))
+                self.assertEqual(self.calls("claude"), [])
+                self.assertEqual(self.merge_calls(), [])
+        for value in ("false", 0, None, "off"):  # like the global key: any value but JSON true is off
+            with self.subTest(value=value):
+                self.auto({"projects": {"shop": {"auto_merge": value}}}, **{"view-12": [view()]})
+                out = self.run_yah(repo, "P2", code=0)
+                self.assertIn(f"[yah] stop (exit 0): {GREEN}\n", out.replace("\r\n", "\n"))
+                self.assertEqual(self.merge_calls(), [])
+        with self.subTest("keyed in the folder's own case"):  # the folder Blog is project blog
+            self.auto({"projects": {"Blog": {"auto_merge": False}}}, **{"view-12": [view()]})
+            self.run_yah(self.repo(name="Blog", state=CLOSED), "P2", code=0)
+            self.assertEqual(self.merge_calls(), [])
+        with self.subTest("another repo's opt-out"):
+            self.auto({"projects": {"api": {"auto_merge": False}}}, **{"view-12": [view()]})
+            self.assertIn("stop (exit 8): " + MERGE_OK, self.run_yah(repo, "P2", code=8))
+        with self.subTest("true in the entry: the global key decides"):
+            self.auto({"projects": {"shop": {"auto_merge": True}}}, **{"view-12": [view()]})
+            self.assertIn("stop (exit 8): " + MERGE_OK, self.run_yah(repo, "P2", code=8))
+
+    def test_a_config_json_that_does_not_load_never_merges(self):
+        """read_json gives {} for a file it cannot parse, and the defaults merge: a lost "auto_merge": false."""
+        repo = self.repo(state=CLOSED)
+        for name, raw in (("a trailing comma", b'{"auto_merge": false, "tier": "max5",}'),
+                          ("saved as UTF-16", json.dumps({"auto_merge": False}).encode("utf-16")),
+                          ("not an object", b"[]")):
+            with self.subTest(name):
+                self.auto(**{"view-12": [view()]})
+                (self.data / "config.json").write_bytes(raw)
+                out = self.run_yah(repo, "P2", code=0)
+                self.assertIn(f"[yah] stop (exit 0): {GREEN}\n", out.replace("\r\n", "\n"))
+                self.assertIn("[yah] auto-merge off: config.json does not load as a JSON object", out)
+                self.assertIn("auto-merge off: config.json does not load", self.run_logs()[-1].read_text("utf-8"))
+                self.assertEqual(self.merge_calls(), [])
+                dry = self.run_yah(repo, "P2", "--dry-run", code=0)
+                self.assertIn("merge   auto-merge off (config.json does not load as a JSON object", dry)
+                self.clear_run_logs()
+        with self.subTest("blank: no file, so on"):
+            self.auto(**{"view-12": [view()]})
+            (self.data / "config.json").write_text(" \n", encoding="utf-8")
+            out = self.run_yah(repo, "P2", code=8)
+            self.assertIn("stop (exit 8): " + MERGE_OK, out)
+            self.assertNotIn("does not load", out)
+
+    def test_plan_sweep_takes_the_pr_its_phase_names(self):
+        """sweep_phase and pr_from_where agree: a `pr` field wins over an open PR from the phase's branch."""
+        p1 = "- [x] P1 Cart API | branch checkout/cart | PR #11"
+        pr15 = {"number": 15, "headRefName": "checkout/cart", "baseRefName": "main"}
+        v15 = view(headRefName="checkout/cart", headRefOid="1515151aa")
+        with self.subTest("its PR closed, a new one from its branch"):  # GitHub closed #11 with its base
+            self.auto(list=[pr15], claude=[{"tag": "needs-human"}],
+                      **{"view-11": [view("CLOSED", headRefName="checkout/cart")], "view-15": [v15]})
+            out = self.run_yah(self.repo(name="shop1"), "--plan", code=2)
+            self.assertNotIn("PR #11 is closed", out)
+            self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+            self.assertEqual(self.merge_calls(), [])
+        with self.subTest("no PR field: the open PR from its branch"):
+            self.auto(list=[pr15], claude=[{"tag": "needs-human"}], **{"view-15": [v15]})
+            repo = self.repo(name="shop2", state=STATE.replace(p1, "- [x] P1 Cart API | branch checkout/cart"))
+            out = self.run_yah(repo, "--plan", code=2)
+            self.assertEqual(self.merges(), [["pr", "merge", "15", "--merge", "--match-head-commit", "1515151aa"]])
+            self.assertIn("P1 done: PR #15 merged by yah. Next: P2 on main", out)
+            self.assertEqual(self.prompts(), ["/yah:resume P2 build"])
+
+    def test_auto_merge_off_never_merges_even_after_a_judge_pass(self):
+        repo = self.repo(state=CLOSED)
+        for name, cfg, prompts in (("off", {}, []), ("not a JSON true", {"auto_merge": "yes"}, []),
+                                   ("off, profile on", {"ultracode": True}, ["/yah:resume P2 judge"])):
+            with self.subTest(name):
+                self.config(**cfg)
+                self.script(**dict(NO_CHECKS, list=[], user=[{"out": "aryan\n"}], judge=[{"tag": "judge pass"}],
+                                   **{"view-12": [view()]}))
+                out = self.run_yah(repo, "P2", code=0)
+                self.assertIn(f"[yah] stop (exit 0): {GREEN}\n", out.replace("\r\n", "\n"))
+                self.assertEqual(self.prompts(), prompts)
+                self.assertEqual(self.merge_calls(), [])
 
     # ------------------------------------------------------------ argv and --dry-run
 
@@ -1287,15 +1585,58 @@ class RunTests(unittest.TestCase):
         repo = self.repo(state=CLOSED)
         self.script(list=[], required=[{"rc": 0}], **{"view-12": [view()]})
         self.assertRegex(self.run_yah(repo, "P2", "--dry-run", code=0), r"(?m)^merge   auto-merge off\s*$")
-        cases = [({"view-12": [view()]}, "merge   auto-merge on: would merge PR #12 (merge commit)"),
+        merged = "now     would stop, exit 8: " + MERGE_OK
+        # the merge line, and the now line: the stop the run would make (8 once merged, 0 with the skip reason)
+        cases = [({"view-12": [view()]}, "merge   auto-merge on: would merge PR #12 (merge commit)", merged),
                  ({"view-12": [view(mergeStateStatus="BEHIND")]},
-                  "merge   auto-merge on: would not merge PR #12: merge state BEHIND"),
-                 ({"view-12": [view()], "required": [{"rc": 1, "out": "ci\tfail\n"}]}, "merge   auto-merge on\n")]
-        for script, line in cases:
+                  "merge   auto-merge on: would not merge PR #12: merge state BEHIND",
+                  f"now     would stop, exit 0: {GREEN} Auto-merge skipped: merge state BEHIND.\n"),
+                 ({"view-12": [view()], "required": [{"rc": 1, "out": "ci\tfail\n"}]}, "merge   auto-merge on\n",
+                  "now     would run iteration 1 in MODE fix-checks"),
+                 (dict(NO_CHECKS, **{"view-12": [view()]}),
+                  "merge   auto-merge on: no checks, so would judge PR #12 on opus high (no-CI judge: roles.judge), "
+                  "then merge it on a pass\n", merged),
+                 (dict(NO_CHECKS, **{"view-12": [view(isDraft=True)]}),  # a pass would not change that
+                  "merge   auto-merge on: would not merge PR #12: it is a draft\n",
+                  f"now     would stop, exit 0: {GREEN} Auto-merge skipped: it is a draft.\n")]
+        for script, line, now in cases:
             with self.subTest(line):
                 self.auto(**script)
-                self.assertIn(line, self.run_yah(repo, "P2", "--dry-run", code=0).replace("\r\n", "\n"))
+                out = self.run_yah(repo, "P2", "--dry-run", code=0).replace("\r\n", "\n")
+                self.assertIn(line, out)
+                self.assertIn(now, out)
                 self.assertFalse(self.merges())
+                self.assertEqual(self.calls("claude"), [])
+        # --plan: a skipped merge stops it (exit 2) as the real run does; a merge goes on
+        last = self.repo(name="last", state=CLOSED.replace("- [ ] P3 Emails\n", ""))
+        goes = " With --plan, the run goes on instead: to the next leftover phase PR, else the next open phase."
+        for name, cwd, script, now in (
+                ("skipped", repo, {"view-12": [view(mergeStateStatus="BLOCKED")]},
+                 f"now     would stop, exit 2: {GREEN} Auto-merge skipped: merge state BLOCKED; the next phase "
+                 "would stack on it.\n"),
+                ("skipped on the last phase", last, {"view-12": [view(mergeStateStatus="BLOCKED")]},
+                 f"now     would stop, exit 2: {GREEN} Auto-merge skipped: merge state BLOCKED.\n"),
+                ("merged", repo, {"view-12": [view()]}, merged + goes + "\n")):
+            with self.subTest("--plan " + name):
+                self.auto(**script)
+                out = self.run_yah(cwd, "P2", "--plan", "--dry-run", code=0).replace("\r\n", "\n")
+                self.assertIn(now, out)
+                if name != "merged":
+                    self.assertNotIn("goes on", out)
+                self.assertFalse(self.merges())
+        with self.subTest("--plan, auto-merge off"):
+            self.config()
+            self.script(list=[], required=[{"rc": 0}], **{"view-12": [view()]})
+            self.assertIn(f"now     would stop, exit 0: {GREEN} With --plan, a done phase goes on to the next open one.",
+                          self.run_yah(repo, "P2", "--plan", "--dry-run", code=0))
+        with self.subTest("no config.json: on by default"):
+            (self.data / "config.json").unlink()
+            self.script(list=[], required=[{"rc": 0}], user=[{"out": "aryan\n"}], **{"view-12": [view()]})
+            self.assertIn("merge   auto-merge on: would merge PR #12 (merge commit)",
+                          self.run_yah(repo, "P2", "--dry-run", code=0))
+        with self.subTest("the project opts out"):
+            self.auto({"projects": {"shop": {"auto_merge": False}}}, **{"view-12": [view()]})
+            self.assertRegex(self.run_yah(repo, "P2", "--dry-run", code=0), r"(?m)^merge   auto-merge off\s*$")
 
 
 class HelperTests(unittest.TestCase):
@@ -1414,7 +1755,7 @@ class HelperTests(unittest.TestCase):
         def r(**kw):
             return SimpleNamespace(**dict({"phase": {"label": "P2", "branch": "checkout/payment", "pr": ""},
                                            "label": "P2", "pr": 12, "checks": "pass", "login": "aryan", "gh": None,
-                                           "top": ".", "phases": [], "prev": None}, **kw))
+                                           "top": ".", "phases": [], "prev": None, "passed": {}}, **kw))
         cr = [review("b", "CHANGES_REQUESTED", "2026-09-21T09:00:00Z")]
         cases = [(r(), view(), ""),
                  (r(phase={"label": "P2", "branch": "other", "pr": "#12"}), view(), ""),  # the phase's PR by number
@@ -1422,7 +1763,12 @@ class HelperTests(unittest.TestCase):
                  (r(phase=None), view(), "PR #12 is not a plan phase's PR"),
                  (r(phase={"label": "P2", "branch": "other", "pr": "#9"}), view(), "PR #12 is not P2's PR"),
                  (r(phase={"label": "P2"}), view(), "PR #12 is not P2's PR"),
-                 (r(checks="none"), view(), "no checks ran"),
+                 (r(checks="none"), view(), "no checks ran and no judge passed abc1234"),
+                 (r(checks="none", passed={12: "abc1234def"}), view(), ""),  # a judge passed this head
+                 (r(checks="none", passed={12: "abc1234def"}), view(headRefOid="fff9999aaa"),
+                  "no checks ran and no judge passed fff9999"),  # a commit since the pass
+                 (r(checks="none", passed={11: "abc1234def"}), view(), "no judge passed abc1234"),  # another PR's
+                 (r(checks="none", passed={12: None}), view(headRefOid=None), "no judge passed its head"),
                  (r(checks="pending"), view(), "checks pending"),
                  (r(checks="fail"), view(), "checks fail"),
                  (r(), view(isDraft=True), "it is a draft"),
@@ -1496,6 +1842,21 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(self.mod.appetite_hint(runs, 2), "$5 and 1h")
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(self.mod.appetite_hint(Path(d), 2), "$14 and 1.2h")  # no run finished a phase
+
+    def test_a_skipped_merge_stop_counts_as_a_finished_phase(self):
+        """--plan's exit 2 on a skipped merge ends a phase at an open, green PR, like exit 0: the hint's median
+        counts it. Another exit 2 (a question) finished no phase."""
+        with tempfile.TemporaryDirectory() as d:
+            for tail, phases in (("stop, exit 2: PR #12 is open and green. The merge is yours. Auto-merge skipped: "
+                                  "merge state BLOCKED; the next phase would stack on it. Cost $2.00 over 1 iterations.",
+                                  1),
+                                 ("stop, exit 2: needs you: NEEDS-HUMAN: SES or SendGrid? Cost $2.00 over 1 iterations.",
+                                  0)):
+                with self.subTest(phases=phases):
+                    log = Path(d) / "shop-1.log"
+                    log.write_text("2026-09-29 10:00:00 iteration 1: $2.00, 5 turns, pr-open #12, HEAD a, NEXT -\n"
+                                   f"2026-09-29 10:30:00 {tail}\n", encoding="utf-8")
+                    self.assertEqual(self.mod.log_spend(log)["phases"], phases)
 
     def test_prune_keeps_the_newest_log_on_each_plan(self):
         with tempfile.TemporaryDirectory() as d:

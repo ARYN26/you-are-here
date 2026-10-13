@@ -182,11 +182,11 @@ def main():
     cmd = (d.get("tool_input") or {}).get("command") if d.get("tool_name", "Bash") in SHELL_TOOLS else None
     why = problem(cmd, d.get("cwd") or os.getcwd(), protected) if isinstance(cmd, str) else None
     if why:
+        reason = ("[yah] blocked {}. yah run pushes only feature branches, with `git push -u origin <branch>`, and "
+                  "never force-pushes or deletes ({} are protected). Merging is denied in a yah run session: only "
+                  "the run driver merges, after its checks.").format(why, ", ".join(sorted(protected)))
         print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "deny",
-            "permissionDecisionReason": "[yah] blocked {}. yah run pushes only feature branches, with "
-            "`git push -u origin <branch>`, and never force-pushes, deletes or merges ({} are protected). "
-            "The merge is the user's.".format(why, ", ".join(sorted(protected)))}}))
+            "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
 
 
 if __name__ == "__main__":

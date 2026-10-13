@@ -152,7 +152,10 @@ class PushGuardTests(unittest.TestCase):
         self.assertEqual((set(out), hso["hookEventName"], hso["permissionDecision"]),
                          ({"hookSpecificOutput"}, "PreToolUse", "deny"))
         self.assertTrue(hso["permissionDecisionReason"].startswith("[yah] blocked a push from main"))
-        self.assertIn("The merge is the user's.", hso["permissionDecisionReason"])
+        self.assertIn("Merging is denied in a yah run session: only the run driver merges, after its checks.",
+                      hso["permissionDecisionReason"])
+        for old in ("The merge is the user's", "deletes or merges"):  # yah does merge now: only never in a session
+            self.assertNotIn(old, hso["permissionDecisionReason"])
         self.assertEqual(self.hook(payload("git push -u origin feat/x")), "")
         self.assertEqual(self.hook(payload("git push --force"), protected=""), "")  # not inside `yah run`
         self.assertEqual(self.hook(payload("git push --force", tool="Read")), "")

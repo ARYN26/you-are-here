@@ -7,15 +7,18 @@
     setup.py --install-rules [FILE]                append RULES.md to FILE (default: CLAUDE.md)
     setup.py --ultracode                           opt-in: ultracode on by default, workflows medium
     setup.py --auto-update                         opt-in: Claude Code auto-updates yah's marketplace
-    setup.py --auto-merge                          opt-in: `yah run` merges the green phase PRs it opened
+    setup.py --no-auto-merge                       opt-out: `yah run` leaves the green phase PRs it opened to you
+    setup.py --auto-merge                          auto-merge back on (it is on by default)
     setup.py --codex                               opt-in: /yah:gpt sends research and reviews to GPT
     setup.py --uninstall                           undo all of the above
 
 Merge-only: settings.json is backed up first and only its statusLine key changes (never model,
 effort, permissions, hooks or env), plus ultracode and workflowSizeGuideline with --ultracode, and
-autoUpdate on yah's extraKnownMarketplaces entry with --auto-update. --auto-merge sets only auto_merge
-in config.json (--ultracode sets ultracode there too, --codex sets codex once a signed-in codex answers a
-smoke call); those four run on their own and never touch the statusLine. What it changed goes into setup-state.json in the data dir, so --uninstall can put things back.
+autoUpdate on yah's extraKnownMarketplaces entry with --auto-update. Auto-merge is on by default;
+--no-auto-merge turns it off. --auto-merge and --no-auto-merge set only auto_merge in config.json (--ultracode
+sets ultracode there too, --codex sets codex once a signed-in codex answers a smoke call); those run on their
+own and never touch the statusLine. What it changed goes into setup-state.json in the data dir, so --uninstall
+can put things back.
 --dry-run writes nothing. Re-running is safe.
 """
 import argparse
@@ -414,21 +417,26 @@ def auto_update(settings, sp, state, state_file, dry, say):
         say(f"WARNING    {', '.join(off)} turns plugin auto-update off. Set FORCE_AUTOUPDATE_PLUGINS=1 to keep it on.")
 
 
-def auto_merge(state, state_file, dry, say):
-    """Opt-in: `yah run` merges a phase PR it opened once every check passed (a merge commit, then it
-    retargets stacked PRs, then deletes the head branch). Only the driver merges, never the model. The old
-    value goes into setup-state.json so --uninstall can put it back."""
+def auto_merge(state, state_file, dry, say, on=True):
+    """On by default: `yah run` merges a phase PR it opened once it is green (a merge commit, then it retargets
+    stacked PRs, then deletes the head branch). Only the driver merges, never the model. on=False
+    (--no-auto-merge) writes false. The value from before setup's first change goes into setup-state.json
+    ("set" is what setup wrote last), so --uninstall can put it back."""
     cp = data_dir() / "config.json"
     cfg = load_obj(cp)
-    if cfg.get("auto_merge") is True:
-        say("automerge  unchanged (on)")
+    if cfg.get("auto_merge") is on:
+        say(f"automerge  unchanged ({'on' if on else 'off'})")
         return
-    # it was off, so config.json holds the user's latest choice: record that, not an older run's
-    state["autoMerge"] = {"added": "auto_merge" not in cfg, "prev": cfg.get("auto_merge")}
-    cfg["auto_merge"] = True
+    rec = state.get("autoMerge")
+    # still what setup wrote last: keep the value from before; else config.json holds the user's latest choice
+    if not (isinstance(rec, dict) and cfg.get("auto_merge") is rec.get("set", True)):
+        state["autoMerge"] = {"added": "auto_merge" not in cfg, "prev": cfg.get("auto_merge")}
+    state["autoMerge"]["set"] = on
+    cfg["auto_merge"] = on
     save_json(cp, cfg, dry)
     save_json(state_file, state, dry)
-    say(f"automerge  on: `yah run` merges a green phase PR it opened, then retargets and deletes its branch  ({cp})")
+    say(f"automerge  on: `yah run` merges a green phase PR it opened, then retargets and deletes its branch  ({cp})"
+        if on else f"automerge  off: green phase PRs wait for you to merge them  ({cp})")
 
 
 def codex_on(state, state_file, dry, say):
@@ -471,7 +479,7 @@ def uninstall(sdir, state, state_file, dry, say):
     cp = data_dir() / "config.json"
     cfg, changed = (load_obj(cp) if recs else {}), False
     for key, rec, what in recs:
-        if cfg.get(key) is True:  # still ours: a hand edit since then is the user's choice
+        if cfg.get(key) is rec.get("set", True):  # still ours: a hand edit since then is the user's choice
             if rec.get("added"):
                 cfg.pop(key)
             else:
@@ -546,8 +554,11 @@ def main():
                     help="opt-in (for max20): ultracode on by default, workflowSizeGuideline medium")
     ap.add_argument("--auto-update", action="store_true",
                     help="opt-in: turn on Claude Code's auto-update for yah's marketplace (off for third-party ones)")
-    ap.add_argument("--auto-merge", action="store_true",
-                    help="opt-in: `yah run` merges the green phase PRs it opened (merge commit, never squash)")
+    merge = ap.add_mutually_exclusive_group()
+    merge.add_argument("--auto-merge", action="store_true",
+                       help="auto_merge true: `yah run` merges the green phase PRs it opened (on by default)")
+    merge.add_argument("--no-auto-merge", action="store_true",
+                       help="opt-out: auto_merge false, so `yah run` leaves its green phase PRs to you")
     ap.add_argument("--codex", action="store_true",
                     help="opt-in: /yah:gpt sends web research and reviews to GPT (needs a signed-in codex CLI)")
     ap.add_argument("--yes", action="store_true", help="no prompts")
@@ -569,17 +580,17 @@ def main():
         if edit_block(dest, f"{RULES[0]}\n{rules}\n{RULES[1]}", RULES, a.dry_run, say, "rules") is not None:
             record(state, "rules", dest, state_file, a.dry_run)
         return 0
-    if a.auto_update or a.auto_merge or a.ultracode or a.codex:  # on their own: never touch a kept statusline
+    if a.auto_update or a.auto_merge or a.no_auto_merge or a.ultracode or a.codex:  # never touch a kept statusline
         extra = [f for f, v in (("--tier", a.tier), ("--python", a.python), ("--launcher", a.launcher),
                                 ("--install-launcher", a.install_launcher)) if v]
         if extra:
-            say(f"WARNING    {', '.join(extra)} ignored: --ultracode, --auto-update, --auto-merge and --codex run on "
-                "their own. Run setup again with just those.")
+            say(f"WARNING    {', '.join(extra)} ignored: --ultracode, --auto-update, --auto-merge, --no-auto-merge "
+                "and --codex run on their own. Run setup again with just those.")
         sp = claude_dir() / "settings.json"
         if a.auto_update:
             auto_update(load_obj(sp), sp, state, state_file, a.dry_run, say)
-        if a.auto_merge:
-            auto_merge(state, state_file, a.dry_run, say)
+        if a.auto_merge or a.no_auto_merge:
+            auto_merge(state, state_file, a.dry_run, say, on=a.auto_merge)
         if a.ultracode:
             ultracode(load_obj(sp), sp, state, state_file, a.dry_run, say)
         return codex_on(state, state_file, a.dry_run, say) if a.codex else 0

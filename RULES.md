@@ -30,4 +30,5 @@
 
 ## Safety
 - Never push a trunk or production branch. Open a PR into it instead.
+- Never merge a PR yourself. With auto-merge on (the default), yah run's driver merges the green PRs it opened; with it off, give the user the merge command.
 - Never commit .env files or secrets.
