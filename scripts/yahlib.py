@@ -24,7 +24,7 @@ EFFORTS = ("low", "medium", "high", "xhigh")  # max is refused everywhere
 DEFAULTS = {"tier": "max5", "pace_slack": 15, "premium_models": ["fable", "mythos"], "recent_days": 14,
             "brain_dir": "docs/brain", "recall_max_chars": 10000,
             "run_iterations": 8, "run_iteration_minutes": 45, "run_total_hours": 6,
-            "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "ultracode": False, "auto_merge": False,
+            "run_checks_wait_minutes": 30, "run_week_stop_pct": 80, "ultracode": False, "auto_merge": True,
             "roles": {}, "critic_week_skip_pct": 50, "catch_up_pct": 20, "codex": False, "codex_model": "gpt-6.1-sol",
             "codex_effort": "high", "codex_timeout_minutes": 15}
 # tier -> --max-budget-usd per `yah run` iteration, unless run_budget_usd is set.
@@ -69,6 +69,14 @@ def write_json(path, data):
         pass
 
 
+def has_text(path):
+    """The file exists and holds more than whitespace."""
+    try:
+        return bool(Path(path).read_bytes().strip())
+    except OSError:
+        return False
+
+
 def num(v, default):
     try:
         return float(v)
@@ -81,8 +89,11 @@ def config():
     unless those keys are set explicitly."""
     global _config
     if _config is None:
-        user = read_json(data_dir() / "config.json", {})
+        path = data_dir() / "config.json"
+        user = read_json(path)
         cfg = dict(DEFAULTS, **(user if isinstance(user, dict) else {}))
+        # it holds something, but no JSON object (a trailing comma, UTF-16): it may say "auto_merge": false
+        cfg["config_unreadable"] = not isinstance(user, dict) and has_text(path)
         cfg["tier"] = str(cfg["tier"]).lower()
         for key, val in zip(("amber", "wrap_soon", "wrap_now"), TIERS.get(cfg["tier"], TIERS["max5"])):
             cfg[key] = num(cfg.get(key), val)
@@ -96,9 +107,10 @@ def config():
             cfg["catch_up_pct"] = DEFAULTS["catch_up_pct"]
         cfg["run_budget_usd"] = num(cfg.get("run_budget_usd"), RUN_BUDGET.get(cfg["tier"], RUN_BUDGET["max5"]))
         cfg["brain_dir"] = str(cfg["brain_dir"] or DEFAULTS["brain_dir"]).strip("/\\")
-        cfg["auto_merge"] = cfg["auto_merge"] is True  # merging is opt-in: only a JSON true turns it on
+        # on by default: any value but JSON true turns it off, and so does a config.json that does not load
+        cfg["auto_merge"] = cfg["auto_merge"] is True and not cfg["config_unreadable"]
         cfg["ultracode"] = cfg["ultracode"] is True
-        cfg["codex"] = cfg["codex"] is True  # sends work to GPT through the codex CLI: opt-in like auto_merge
+        cfg["codex"] = cfg["codex"] is True  # sends work to GPT through the codex CLI: opt-in like ultracode
         for key in ("codex_model", "codex_effort"):
             cfg[key] = str(cfg[key] or "").strip() or DEFAULTS[key]
         roles = cfg["roles"] if isinstance(cfg["roles"], dict) else {}
@@ -111,6 +123,19 @@ def config():
             cfg["projects"] = {}
         _config = cfg
     return _config
+
+
+def auto_merge_on(key=None):
+    """config.json's auto_merge (on by default), unless the project's own entry has an auto_merge that is not
+    JSON true: like the global key, any other value turns it off. The entry is matched by key in any case
+    (projects.Shop for a folder named Shop), so an opt-out never misses on case."""
+    cfg = config()
+    projects = cfg["projects"]
+    proj = projects.get(key) if key else None
+    if key and proj is None:
+        proj = next((v for k, v in projects.items() if str(k).lower() == str(key).lower()), None)
+    return cfg["auto_merge"] and not (isinstance(proj, dict) and "auto_merge" in proj
+                                      and proj["auto_merge"] is not True)
 
 
 def role_text(value, default):

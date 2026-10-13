@@ -262,7 +262,15 @@ class StatuslineTests(Base):
 # ---------------------------------------------------------------- context guard
 
 class GuardTests(Base):
-    def guard(self, tokens=0, prompt="go on", sid="g1", scripts=SCRIPTS):
+    NOTICE = "yah now merges the green PRs it opened (auto-merge is on by default)."
+
+    def guard(self, tokens=0, prompt="go on", sid="g1", scripts=SCRIPTS, notice=False):
+        """notice=False marks the one-time auto-merge notice seen first, so a test sees only its own nudges."""
+        if not notice:
+            daily = self.data / "guard-daily.json"
+            seen = json.loads(daily.read_text("utf-8")) if daily.exists() else {}
+            self.data.mkdir(exist_ok=True)
+            daily.write_text(json.dumps({**seen, "automerge_notice": True}), encoding="utf-8")
         d = {"session_id": sid, "prompt": prompt, "transcript_path": self.transcript(tokens) if tokens else ""}
         out, err, rc = self.py("context_guard.py", stdin=json.dumps(d), scripts=scripts)
         self.assertEqual((rc, err), (0, ""))
@@ -353,7 +361,7 @@ class GuardTests(Base):
         self.config()
         self.state("c7", week=52, pace=96, tokens=1000)
         self.env["YAH_PROTECTED"] = "main"
-        self.assertIsNone(self.guard(sid="c7"))
+        self.assertIsNone(self.guard(sid="c7", notice=True))  # nor the auto-merge notice, so nothing is written
         del self.env["YAH_PROTECTED"]
         d = {"session_id": "c7", "hook_event_name": "PostToolUse"}
         self.assertEqual(self.py("context_guard.py", stdin=json.dumps(d)), ("", "", 0))
@@ -459,6 +467,46 @@ class GuardTests(Base):
         (self.cfg / "plugins" / "installed_plugins.json").write_text("[]", encoding="utf-8")
         r = self.guard(210_000, sid="o4", scripts=old)  # unreadable: no notice, other nudges intact
         self.assertEqual(r["systemMessage"], "Context 210k: wrap now (/yah:wrap, then /clear).")
+
+    def test_auto_merge_notice_once_ever_to_the_user_only(self):
+        daily = self.data / "guard-daily.json"
+        r = self.guard(sid="n1", notice=True)
+        self.assertEqual(r, {"systemMessage": f'{self.NOTICE} To turn it off: /yah:setup, or "auto_merge": false in '
+                                              f'{self.data / "config.json"}.'})  # the user only
+        self.assertNotIn("hookSpecificOutput", r)
+        self.assertIs(json.loads(daily.read_text("utf-8"))["automerge_notice"], True)
+        self.assertIsNone(self.guard(sid="n1", notice=True))  # not on the next prompt
+        self.assertIsNone(self.guard(sid="n2", notice=True))  # nor in the next session
+        daily.write_text(json.dumps({"automerge_notice": True, "pace": "2000-01-01"}), encoding="utf-8")
+        self.state("n3", week=60, pace=30, tokens=1000)  # a new day re-arms the pace nudge, never the notice
+        r = self.guard(sid="n3", notice=True)
+        self.assertIn("run lean today", r["systemMessage"])
+        self.assertNotIn("auto-merge", r["systemMessage"])
+        daily.unlink()  # beside the model's nudges, the notice still goes to the user alone
+        r = self.guard(210_000, sid="n4", notice=True)
+        self.assertTrue(r["systemMessage"].startswith("Context 210k: wrap now (/yah:wrap, then /clear). " + self.NOTICE))
+        self.assertTrue(r["hookSpecificOutput"]["additionalContext"].startswith("[yah] Context is 210k"))
+        self.assertNotIn("merge", r["hookSpecificOutput"]["additionalContext"])  # never to the model
+
+    def test_auto_merge_notice_skips_who_set_it_and_yah_run(self):
+        daily = self.data / "guard-daily.json"
+        # config.json names auto_merge (it is then off, or on by the user's own hand), or opts a repo out
+        for n, cfg in enumerate(({"auto_merge": True}, {"auto_merge": False}, {"auto_merge": "no"},
+                                 {"projects": {"shop": {"auto_merge": False}}})):
+            with self.subTest(cfg=cfg):
+                self.config(**cfg)
+                self.assertIsNone(self.guard(sid=f"s{n}", notice=True))
+                self.assertNotIn("automerge_notice", json.loads(daily.read_text("utf-8")) if daily.exists() else {})
+        self.config()  # nobody set it: a yah run session neither shows the notice nor spends it
+        self.env["YAH_PROTECTED"] = "main"
+        self.assertIsNone(self.guard(sid="r1", notice=True))
+        del self.env["YAH_PROTECTED"]
+        d = {"session_id": "r1", "hook_event_name": "PostToolUse"}
+        self.assertEqual(self.py("context_guard.py", stdin=json.dumps(d)), ("", "", 0))
+        self.assertFalse(daily.exists())
+        r = self.guard(sid="r2", notice=True)  # the user's own next session gets it
+        self.assertIn(self.NOTICE, r["systemMessage"])
+        self.assertNotIn("hookSpecificOutput", r)
 
 
 class RolesTests(Base):
@@ -1694,14 +1742,27 @@ class PrLinesTests(unittest.TestCase):
 
 
 class AutoMergeWhereTests(Base):
-    def test_only_a_json_true_turns_auto_merge_on(self):
+    def test_auto_merge_is_on_unless_config_turns_it_off(self):
         w = load_where()
         repo = self.beads_repo()
         prs = [{"number": 7, "headRefName": "checkout/payment", "baseRefName": "checkout/cart",
                 "statusCheckRollup": [{"conclusion": "SUCCESS"}]}]
-        for value, on in ((True, True), ("true", False), (1, False), (None, False)):
-            with self.subTest(auto_merge=value):
-                self.config(**({} if value is None else {"auto_merge": value}))
+        # a missing key is on; any value but a JSON true is off, and so is a config.json that does not load;
+        # projects.<key> (in any case) can only opt this repo out, with any value but a JSON true
+        for cfg, on in (({}, True), ({"auto_merge": True}, True), ({"auto_merge": False}, False),
+                        ({"auto_merge": "true"}, False), ({"auto_merge": 1}, False),
+                        ({"projects": {"shop": {"auto_merge": False}}}, False),
+                        ({"projects": {"shop": {"auto_merge": "no"}}}, False),
+                        ({"projects": {"Shop": {"auto_merge": 0}}}, False),
+                        ({"projects": {"shop": {"auto_merge": True}, "web": {"auto_merge": False}}}, True),
+                        ({"projects": {"shop": {"trunks": ["main"]}}}, True),
+                        ({"auto_merge": False, "projects": {"shop": {"auto_merge": True}}}, False),
+                        ('{"auto_merge": false,}', False), ("", True)):
+            with self.subTest(cfg=cfg):
+                if isinstance(cfg, str):  # the file as is: a trailing comma, or blank
+                    (self.data / "config.json").write_text(cfg, encoding="utf-8")
+                else:
+                    self.config(**cfg)
                 s = json.loads(self.where(repo, "--json"))
                 self.assertIs(s["auto_merge"], on)
                 s["prs"] = prs  # the same view gh would give, through render: --brief and the full view agree
@@ -1790,8 +1851,8 @@ class SetupTests(Base):
         (self.cfg / "plugins" / "known_marketplaces.json").write_text(
             json.dumps({"you-are-here": {"source": {"source": "github", "repo": "ARYN26/you-are-here"}}}), "utf-8")
         before = self.snapshot()
-        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--auto-merge"], ["--codex"],
-                     ["--install-launcher", str(self.home / ".bashrc")],
+        for args in (["--tier", "max20", "--yes"], ["--auto-update"], ["--auto-merge"], ["--no-auto-merge"],
+                     ["--codex"], ["--install-launcher", str(self.home / ".bashrc")],
                      ["--install-rules"], ["--uninstall"]):
             out, err, rc = self.setup_py("--dry-run", *args, scripts=scripts)
             self.assertEqual(rc, 0, err)
@@ -2017,6 +2078,49 @@ class SetupTests(Base):
         self.config(auto_merge=False)  # the user turns it off by hand
         self.assertNotIn("automerge", self.setup_py("--uninstall")[0])
         self.assertEqual(self.read_config(), {"auto_merge": False})
+
+    def test_no_auto_merge_opt_out_and_uninstall(self):
+        self.settings(self.SETTINGS)
+        state = self.data / "setup-state.json"
+        for prior in (None, True, "true"):  # absent (on by default), on, and a string that never counted as on
+            with self.subTest(prior=prior):
+                cfg = {"tier": "max20", **({} if prior is None else {"auto_merge": prior})}
+                self.config(**cfg)
+                before = self.snapshot()
+                out, err, rc = self.setup_py("--dry-run", "--no-auto-merge")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("[dry-run] automerge  off:", out)
+                self.assertEqual(self.snapshot(), before)  # a dry run writes nothing
+                out, err, rc = self.setup_py("--no-auto-merge", "--yes")  # --yes must not reach the statusline
+                self.assertEqual(rc, 0, err)
+                self.assertIn("automerge  off:", out)
+                self.assertNotIn("statusLine", out)
+                self.assertEqual(self.read_config(), {**cfg, "auto_merge": False})
+                self.assertEqual(json.loads(state.read_text("utf-8"))["autoMerge"],
+                                 {"added": prior is None, "prev": prior, "set": False})
+                self.assertEqual(self.settings(), self.SETTINGS)
+                self.assertIn("automerge  unchanged (off)", self.setup_py("--no-auto-merge")[0])
+                out, err, rc = self.setup_py("--uninstall")
+                self.assertEqual(rc, 0, err)
+                self.assertIn("automerge  removed" if prior is None else "automerge  restored", out)
+                self.assertEqual(self.read_config(), cfg)
+                if prior is None:  # it had no key: uninstall leaves none, not a false or a null
+                    self.assertNotIn("auto_merge", self.read_config())
+                self.assertEqual(self.settings(), self.SETTINGS)
+        # back and forth: uninstall still restores what was there before setup's first change
+        self.config(tier="max20")
+        self.setup_py("--no-auto-merge")
+        self.assertIn("automerge  on:", self.setup_py("--auto-merge")[0])
+        self.assertEqual(self.read_config(), {"tier": "max20", "auto_merge": True})
+        self.assertIn("automerge  removed", self.setup_py("--uninstall")[0])
+        self.assertEqual(self.read_config(), {"tier": "max20"})
+        self.setup_py("--no-auto-merge")
+        self.config(tier="max20", auto_merge=True)  # the user turns it back on by hand: that stays
+        self.assertNotIn("automerge", self.setup_py("--uninstall")[0])
+        self.assertEqual(self.read_config(), {"tier": "max20", "auto_merge": True})
+        out, err, rc = self.setup_py("--auto-merge", "--no-auto-merge")  # one or the other
+        self.assertEqual(rc, 2)
+        self.assertNotIn("automerge", out)
 
     def test_launcher_block(self):
         rc_file = self.home / ".bashrc"

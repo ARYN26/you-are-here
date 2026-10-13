@@ -34,7 +34,7 @@ An indented checkbox line under a phase is a sub-task: not a phase, and not coun
 
 An indented plain line under a phase is its handoff log (`log` in `where.py --json`): `  - Done: <what>`, `  - Tried: <what> failed because <why>`, `  - Decided: <what> because <why>`. `/yah:wrap` writes them, keeps the newest 6, and moves them into the PR body when the phase closes. Do not write any here.
 
-A step only the user can do (a review, a merge, a console step) is its own line that ends with `(you)`, as a phase, a sub-task or under `## Follow-ups`. It names the command that does it when there is one, ready to paste in a terminal: `- [ ] Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user.
+A step only the user can do (a review, a console step, or a merge while `auto_merge` is false in the JSON above) is its own line that ends with `(you)`, as a phase, a sub-task or under `## Follow-ups`. With `auto_merge` true, write no merge step: the `yah run` driver merges the green phase PRs, and `yah run --plan` stops at a `(you)` phase. It names the command that does it when there is one, ready to paste in a terminal: `- [ ] Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user.
 
 `- At:` stamps NEXT so `/yah:where` can flag it once commits land after it; leave it out if the repo tracks STATE.md. Tell the user STATE.md is not committed unless they want it tracked; offer to add it to `.gitignore`.
 
@@ -49,7 +49,7 @@ Run every `bd` below as `store.bd`, quoted.
    - `<HEAD>` is `git rev-parse HEAD`, run once. It stamps NEXT so `/yah:where` can flag it once the phase branch has commits NEXT predates.
    - Only the current phase gets `--notes "<NEXT: the first concrete action>"`.
    - Already shipped as a PR: add `--external-ref gh-<N>`, then `bd close <id> --reason "PR #<N> open"`.
-   - A step only the user can do (a review, a merge, a console step) is its own child with `-l human` and a title that starts with a verb.
+   - A step only the user can do (a review, a console step, or a merge while `auto_merge` is false) is its own child with `-l human` and a title that starts with a verb.
 4. **Claim the current phase:** `bd update <id> --claim`.
 
 ## Check the result

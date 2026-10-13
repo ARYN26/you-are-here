@@ -17,7 +17,9 @@ PY "${CLAUDE_SKILL_DIR}/../../scripts/where.py" --json --no-gh
 
 `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
-Note `state.plan` (its `spec` is the plan file), `state.phase` (label, branch, id), `store`, `git.branch`, `git.dirty`, `protected` and `next_stale`.
+Note `state.plan` (its `spec` is the plan file), `state.phase` (label, branch, id), `store`, `git.branch`, `git.dirty`, `protected`, `next_stale` and `auto_merge`.
+
+`auto_merge` is this repo's merge setting. True: the `yah run` driver merges the green phase PRs it opened, so no merge waits on the user. False: every merge is the user's.
 
 `next_stale` set means commits landed after NEXT was written, so it may already be done. Run `git log --oneline <next_stale.sha>..<next_stale.branch>` and write the new NEXT from where those commits leave off.
 
@@ -37,7 +39,7 @@ Edit the file at `store.path`, or create it if it does not exist. In a linked wo
 - While a phase is open, add 1 to 3 handoff lines indented under its phase line, plain, not checkboxes: `  - Done: <what>`, `  - Tried: <what> failed because <why>`, `  - Decided: <what> because <why>`. They are the phase's `log`, which the next session reads before it starts. New lines go below the older ones. Keep only the newest 6; delete older ones.
 - A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Mark one being worked on `[~]`. Delete finished ones; the commit or PR is their record.
 - Delete a `## Plan:` section whose phases are all `[x]` once none of their PRs is open (`gh pr view <N> --json state`). The plan file and the PRs keep its history, and the file the model reads each session stays short.
-- A step only the user can do (a review, a merge, a console step) ends with `(you)`, and names the command that does it when there is one, ready to paste in a terminal: `Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user.
+- A step only the user can do (a review, a console step, a merge while `auto_merge` is false or one that step 6 item 6 leaves to the user) ends with `(you)`, and names the command that does it when there is one, ready to paste in a terminal: `Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user. With `auto_merge` true, write no merge line, outside step 6 item 6: the run merges the PR.
 - Keep only the 5 newest dated entries; delete older ones. Leave anything else in the file alone, above all the `AIM:` line under the `#` title: never move, reword or delete it.
 
 ## 2b. Beads: rewrite the phase bead's notes
@@ -90,19 +92,19 @@ The phase's done-when in the plan file (`state.plan.spec`: the path in `## Plan:
 3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body. Move the phase's log lines into the body. Write the body to a temp file outside the repo, add the phase's map with `PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" P<n> --into <file> --no-gh` (STATE.md or beads holds the PR numbers), and pass it with `--body-file <file>`, never `--body`: the run's deny rules can match words in an inline body. Updating an open PR, refresh its map the same way: `gh pr view <N> --json body -q .body` into the file, `--into`, then `gh pr edit <N> --body-file <file>`.
 4. Record it. STATE.md: mark the phase `[x]`, add `| PR #<N>` and delete its log lines. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open"`. Then refresh the PR's map as in step 3, so it shows the phase done with its PR.
 5. Claim the next phase and give it a NEXT line, stamped as in step 4. STATE.md: mark it `[~]`. Beads: `bd update <next-id> --claim`.
-6. No phase left in this plan, and another `## Plan:` section has a phase with a `  - Parked: NEXT was <NEXT>` line under it (STATE.md only): claim that phase. Mark it `[~]`, take NEXT from its Parked line, stamped as in step 4, and delete the Parked line. The merge of this PR becomes a `(you)` follow-up with its command.
+6. No phase left in this plan, and another `## Plan:` section has a phase with a `  - Parked: NEXT was <NEXT>` line under it (STATE.md only): claim that phase. Mark it `[~]`, take NEXT from its Parked line, stamped as in step 4, and delete the Parked line. The merge of this PR becomes a `(you)` follow-up with its command, unless `auto_merge` is true and this is a run's session (`/yah:resume`): that run is on this plan, so it merges the PR. A run started from step 6.5 follows the claimed phase's plan, so it never merges this PR.
 
-Merging is always the user's.
+Never merge a PR yourself. With `auto_merge` true, the `yah run` driver merges (step 6.5 starts it); with it false, the merge is the user's.
 
 ## 6.5 Hand the open phase to a run
 
 Skip this step under `/yah:resume`: a run's own session never starts or stops a run. Skip it too when the user ended a run in this session, or chose to go on by hand after one ended: never restart a run unasked. Otherwise run step 1's command again and go on only when all of these hold:
-- A plan phase is open (the one wrapped, or the one step 6 claimed), and its line does not end with `(you)`.
+- A plan phase is open (the one wrapped, or the one step 6 claimed), and its line does not end with `(you)`. Or `auto_merge` is true and this wrap opened or updated a plan phase's PR, even with no phase left open: the run merges that PR, then goes on to any next phase.
 - NEXT does not start with `NEEDS-HUMAN:`.
 - No run is live: `run` is null or `run.alive` is not true.
 - The tree is clean: `git.dirty` is 0, not counting a STATE.md the repo does not track.
 
-Then run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach` in a Bash call of its own, `--detach` last. Exit 0: use the finish line for a started run. Any other exit: show its output and use the finish line for an open phase.
+Then run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach` in a Bash call of its own, `--detach` last. Exit 0: use the finish line for a started run. Any other exit: show its output and use the finish line for an open phase, or for no plan phase open.
 
 ## 7. Finish with exactly this
 
@@ -113,12 +115,12 @@ Merge   <the merge command>
 <finish line>
 ```
 
-The merge command is the one the user pastes in a terminal: `gh pr merge <N> --merge`. For a PR stacked on another PR, it is `gh pr edit <N> --base <that PR's base>` once that PR merges, then `gh pr merge <N> --merge`. Leave the Merge line out when no PR is open, or when `/yah:where` shows `auto-merge: on` for it.
+The merge command is the one the user pastes in a terminal: `gh pr merge <N> --merge`. For a PR stacked on another PR, it is `gh pr edit <N> --base <that PR's base>` once that PR merges, then `gh pr merge <N> --merge`. Leave the Merge line out when no PR is open, or when `auto_merge` is true and the PR has no `(you)` merge follow-up: the run merges it.
 
-The finish line, when step 6.5 started the run:
+The finish line, when step 6.5 started the run. With `auto_merge` true and a phase PR open that has no `(you)` merge follow-up, keep the middle sentence; otherwise drop it:
 
 ```
-The run has <phase label>; this session can close. `/yah:where` or `yah <project>` shows its RUN line.
+The run has <phase label>; this session can close. It merges PR #<N> when it is green. `/yah:where` or `yah <project>` shows its RUN line.
 ```
 
 Otherwise, when a plan phase is still open (the one wrapped, or the one step 6 claimed):

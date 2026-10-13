@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Setup
 
-Every step changes a file outside this repo, so each one needs the user's explicit yes. If they say no, skip that step and go on.
+Every step changes a file outside this repo, so each one needs the user's explicit yes. If they say no, skip that step and go on. Step 3d is the one opt-out: auto-merge is on by default, so there a no turns it off.
 
 Run setup with Bash as `PY "${CLAUDE_SKILL_DIR}/../../scripts/setup.py" <flags>`. `PY` is `python` on Windows and `python3` elsewhere; use `py -3` only if both fail.
 
@@ -34,9 +34,9 @@ Only when the tier is `max20`, offer: "Turn on the quality profile? Every sessio
 
 Offer: "Turn on auto-update for yah? Claude Code leaves it off for plugins from third-party marketplaces, so yah stays at the version you installed until you run `claude plugin update yah@you-are-here`. With it on, Claude Code fetches new versions in the background once a session starts, and the next session loads them." On yes, run `setup.py --auto-update` and show the output. It changes only that setting. `--uninstall` restores the previous value.
 
-## 3d. Auto-merge (optional)
+## 3d. Auto-merge (on by default)
 
-Offer: "Let `yah run` merge its own PRs? It is off by default, and you merge every PR. With it on, only the `yah run` driver merges, never the model, and only a green PR you authored for a plan phase: at least one check ran and all passed, GitHub says it is mergeable with a clean merge state, it is not a draft, and no change request is newer than its last commit. It makes a merge commit pinned to the commit it checked (never a squash), then retargets any PR stacked on it, then deletes the merged branch, never a protected one. A run that merges ends with exit 8; with `--plan` it goes on to the next phase." On yes, run `setup.py --auto-merge` and show the output. It sets only `auto_merge` in config.json. `--uninstall` restores the previous value.
+Ask: "`yah run` merges its own green PRs. It is on by default. Keep it on? Only the `yah run` driver merges, never the model, and only a green PR you authored for a plan phase: at least one check ran and all passed, or it has no checks and yah's judge passed its exact head commit. GitHub must say it is mergeable with a clean merge state, it is not a draft, and no change request is newer than its last commit. It makes a merge commit pinned to the commit it checked (never a squash), then retargets any PR stacked on it, then deletes the merged branch, never a protected one. A run that merges ends with exit 8; with `--plan` it goes on to the next phase. A `--plan` run first merges green phase PRs left open, bottom-up. When it skips a merge, it stops with exit 2 instead of stacking the next phase on that PR." On yes, run `setup.py --auto-merge` and show the output: it turns auto-merge back on if the user turned it off before. On no, run `setup.py --no-auto-merge` and show the output. Each sets only `auto_merge` in config.json. `--uninstall` restores the previous value. To turn it off for one repo only, set `"auto_merge": false` in that repo's entry under `projects` in config.json.
 
 ## 3e. GPT (optional)
 
