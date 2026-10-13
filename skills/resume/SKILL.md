@@ -42,6 +42,7 @@ If NEXT starts with `NEEDS-HUMAN:`, print `YAH-RESULT: needs-human` and stop. Ch
 
 The branch is the PR's `headRefName`, else the phase `branch`, else the current `git.branch` if it is not forbidden, not `base` and not another phase's `branch` (yah run leaves the finished phase's branch checked out). With none of these, write NEXT = `NEEDS-HUMAN: Which branch should <label> use?` via /yah:wrap and stop.
 - `git fetch origin`, then `git switch <branch>`. If it exists nowhere, `git switch -c <branch> origin/<base>` (no base: the remote's default branch).
+- BRIEF.md crosses the switch, since this tree holds its newest copy and the other branch may lack it: copy it outside the repo first; if it alone blocks the switch, `git restore BRIEF.md` (delete an untracked one), since the copy keeps it; switch; then copy it back.
 - Never work, commit or push on a forbidden branch. Never stash, reset or discard changes you did not make; if a dirty tree blocks the switch, end with `YAH-RESULT: blocked dirty tree`.
 
 **judge** (yah run, once when the phase's PR is open and green) ends here and changes nothing: no edit, commit, push or wrap. Read `gh pr diff <n>` (`<n>` as in step 3) and find the defects that should block the merge: wrong behavior, data loss, a security hole, or a broken or weakened test. Style, naming and nits are not defects. Prove each one by reading the code or running a test, and report only the proven ones, each with file:line, what goes wrong and the proof. End with `YAH-RESULT: judge pass` when none is proven, else `YAH-RESULT: judge block <count>`.
@@ -70,6 +71,7 @@ Run the tests that cover what you changed, with the project's usual command (REA
 Then follow /yah:wrap. It rewrites NEXT, writes at most one brain note, and commits WIP on the branch; when the phase is complete it pushes and opens or updates the PR into `base`. In fix-checks, address-review and fix-findings, the PR exists: after the commit, `git push -u origin <branch>` so it updates. After a fix-findings push, make the PR's map match the final code: `gh pr view <n> --json body -q .body` into a temp file outside the repo, `PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" <label> --into <file> --no-gh` (it replaces only the `<!-- yah:map -->` section), then `gh pr edit <n> --body-file <file>`.
 - Never force-push, never merge a PR, never push a forbidden branch, never delete a branch.
 - Never stage `.env*`, credentials or secrets.
+- A new or changed BRIEF.md in the tree is the project's brief: wrap stages it with this slice's commit (the phase branch is never protected).
 - Never start or stop a run (`run.py`), and skip wrap's step 6.5: yah run already drives this session.
 
 ## 5. Result

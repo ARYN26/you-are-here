@@ -40,7 +40,7 @@ Edit the file at `store.path`, or create it if it does not exist. In a linked wo
 - A new follow-up becomes a `- [ ] <title>` line under `## Follow-ups` (add the section if missing), never prose. Mark one being worked on `[~]`. Delete finished ones; the commit or PR is their record.
 - Delete a `## Plan:` section whose phases are all `[x]` once none of their PRs is open (`gh pr view <N> --json state`). The plan file and the PRs keep its history, and the file the model reads each session stays short.
 - A step only the user can do (a review, a console step, a merge while `auto_merge` is false or one that step 6 item 6 leaves to the user) ends with `(you)`, and names the command that does it when there is one, ready to paste in a terminal: `Merge PR #13: gh pr merge 13 --merge (you)`. `/yah:where` lists the open ones as waiting on the user. With `auto_merge` true, write no merge line, outside step 6 item 6: the run merges the PR.
-- Keep only the 5 newest dated entries; delete older ones. Leave anything else in the file alone, above all the `AIM:` line under the `#` title: never move, reword or delete it.
+- Keep only the 5 newest dated entries; delete older ones. Leave anything else in the file alone, above all the `AIM:` and `BRIEF: none` lines under the `#` title: never move, reword or delete them.
 
 ## 2b. Beads: rewrite the phase bead's notes
 
@@ -70,8 +70,8 @@ Stage what brain.py wrote (the note and INDEX.md, or `_pending.md`) with the WIP
 ## 4. Commit work in progress, then stamp NEXT
 
 Commit only if `git.dirty` > 0, step 3 wrote a note, or step 2a changed a STATE.md the repo tracks.
-- Never commit on a branch in `protected` (trunks, the PROD branch, and where open PRs land). If you are on one, stop and tell the user.
-- Run `git status`, then stage files by name. Never stage `.env*`, credentials, or large generated files the repo does not already track. Stage STATE.md only if the repo already tracks it.
+- Never commit on a branch in `protected` (trunks, the PROD branch, and where open PRs land). If you are on one, stop and tell the user. But a new or changed BRIEF.md alone is no reason to commit or to stop there: leave it in the tree, and it rides on the next phase's branch.
+- Run `git status`, then stage files by name. Never stage `.env*`, credentials, or large generated files the repo does not already track. Stage STATE.md only if the repo already tracks it. On a feature branch, stage a new or changed BRIEF.md with the rest, by name: it is the project's brief.
 - `git commit -m "wip(<phase label>): <what>"`. Do not push unless step 6 applies.
 
 Always stamp NEXT with the commit it was written at, so `/yah:where` flags it once later commits make it stale:
@@ -87,7 +87,7 @@ If this project's auto-memory index (`MEMORY.md` in its memory folder under `$CL
 ## 6. Only if the phase is complete
 
 The phase's done-when in the plan file (`state.plan.spec`: the path in `## Plan: <name> (<path>)`, or the epic's `spec_id`) is met and the tests pass.
-1. Review the branch diff: run `/code-review --fix`, then `/simplify`, if available. Re-run the tests.
+1. Review the branch diff: run `/code-review --fix`, then `/simplify`, if available. Re-run the tests. No phase left in this plan after this one, and the plan served a BRIEF.md Roadmap line (`[~]`, named in its `## Bet`): mark that line `[x]` in the BRIEF.md at `top` (in a linked worktree with none, copy `brief.path` there first) and commit it with this phase, so the push below carries it.
 2. Push the feature branch in a Bash call of its own, with nothing chained to it; open the PR in the next call. Never push a branch in `protected`.
 3. Open the PR into the phase's base (`base`, else the plan's target branch), following the project's title convention. If the base is another phase's branch, say so in the body. Move the phase's log lines into the body. Write the body to a temp file outside the repo, add the phase's map with `PY "${CLAUDE_SKILL_DIR}/../../scripts/phasemap.py" P<n> --into <file> --no-gh` (STATE.md or beads holds the PR numbers), and pass it with `--body-file <file>`, never `--body`: the run's deny rules can match words in an inline body. Updating an open PR, refresh its map the same way: `gh pr view <N> --json body -q .body` into the file, `--into`, then `gh pr edit <N> --body-file <file>`.
 4. Record it. STATE.md: mark the phase `[x]`, add `| PR #<N>` and delete its log lines. Beads: `bd update <phase-id> --external-ref gh-<N>`, then `bd close <phase-id> --reason "PR #<N> open"`. Then refresh the PR's map as in step 3, so it shows the phase done with its PR.
@@ -102,7 +102,7 @@ Skip this step under `/yah:resume`: a run's own session never starts or stops a 
 - A plan phase is open (the one wrapped, or the one step 6 claimed), and its line does not end with `(you)`. Or `auto_merge` is true and this wrap opened or updated a plan phase's PR, even with no phase left open: the run merges that PR, then goes on to any next phase.
 - NEXT does not start with `NEEDS-HUMAN:`.
 - No run is live: `run` is null or `run.alive` is not true.
-- The tree is clean: `git.dirty` is 0, not counting a STATE.md the repo does not track.
+- The tree is clean: `git.dirty` is 0, not counting a STATE.md the repo does not track or a new or changed BRIEF.md (it rides on the phase branch).
 
 Then run `PY "${CLAUDE_SKILL_DIR}/../../scripts/run.py" --plan --detach` in a Bash call of its own, `--detach` last. Exit 0: use the finish line for a started run. Any other exit: show its output and use the finish line for an open phase, or for no plan phase open.
 

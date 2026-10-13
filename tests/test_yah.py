@@ -899,6 +899,30 @@ class WhereTests(Base):
         self.assertEqual((sm["aim"], sm["followups"]), (None, []))  # a dated entry is a log, never the AIM
         (self.tmp / "STATE.md").write_text("# Shop\nAIM: Help devs ship when tired\n\nFix the login\n", encoding="utf-8")
         self.assertEqual(w.state_md(self.tmp)["next"], "Fix the login")  # the AIM is not a plan-less NEXT
+        self.assertFalse(w.state_md(self.tmp)["brief_declined"])
+
+    def test_brief_none_records_a_declined_brief_and_keeps_the_aim(self):
+        """`BRIEF: none` says the user turned down the brief interview without hiding an AIM they gave before;
+        the old `AIM: none` counts as a decline too. Neither is a plan-less NEXT, and a fenced one is an example."""
+        w = load_where()
+        for text, aim, declined in (
+                ("# Shop\nBRIEF: none\nAIM: Help devs ship when tired\n\nFix the login\n", "Help devs ship when tired",
+                 True),
+                ("# Shop\nbrief:  None \n\nFix the login\n", None, True),
+                ("# Shop\nAIM: none\n\nFix the login\n", "none", True),
+                ("# Shop\n```\nBRIEF: none\n```\nAIM: Help devs ship when tired\n\nFix the login\n",
+                 "Help devs ship when tired", False),
+                ("# Shop\nBRIEF: nonesuch\nFix the login\n", None, False)):
+            with self.subTest(text=text):
+                (self.tmp / "STATE.md").write_text(text, encoding="utf-8")
+                sm = w.state_md(self.tmp)
+                self.assertEqual((sm["aim"], sm["brief_declined"]), (aim, declined))
+                if declined:
+                    self.assertEqual(sm["next"], "Fix the login")
+        repo = self.state_repo(STATE_YOU.replace("# Shop\n\n", "# Shop\nBRIEF: none\nAIM: Help devs ship when tired\n"),
+                               name="kept")
+        self.assertIn("AIM Help devs ship when tired", self.where(repo, "--brief"))  # declining the brief hides no AIM
+        self.assertTrue(json.loads(self.where(repo, "--json"))["state_md"]["brief_declined"])
 
     def test_aim_line_in_the_views(self):
         aimed = STATE_YOU.replace("# Shop\n\n", "# Shop\nAIM: Help shoppers pay when they are on mobile\n")  # same ids
@@ -913,6 +937,70 @@ class WhereTests(Base):
             repo = self.tmp / name if name == "plain" else self.state_repo(text, name=name)
             self.assertNotIn("AIM", self.where(repo, "--brief") + self.where(repo))  # no AIM, or declined: nothing
         self.assertEqual(json.loads(self.where(self.tmp / "declined", "--json"))["state_md"]["aim"], "none")
+
+    def test_brief_md_aim_wins_and_shows_in_both_views(self):
+        """BRIEF.md's AIM wins over STATE.md's in both views; with no AIM line, or `AIM: none`, STATE.md's shows.
+        --json keeps each file's own."""
+        mine, theirs = "Help bakers take preorders when the shop is closed", "Help shoppers pay when they are on mobile"
+        repo = self.state_repo(STATE_YOU.replace("# Shop\n\n", f"# Shop\nAIM: {theirs}\n"))
+        self.assertIsNone(json.loads(self.where(repo, "--json"))["brief"])  # no BRIEF.md
+        (repo / "BRIEF.md").write_text(f"# Brief: shop\n\nAIM: {mine}\n\n## Roadmap\n- [ ] Ship the preorder form\n",
+                                       encoding="utf-8")
+        brief = self.where(repo, "--brief").splitlines()
+        self.assertLessEqual(len(brief), BRIEF_CAP + 1)  # + the AIM
+        self.assertEqual(brief[1], f"AIM {mine}")
+        self.assertEqual(self.where(repo).splitlines()[1], f"AIM     {mine}")
+        s = json.loads(self.where(repo, "--json"))
+        self.assertTrue(os.path.samefile(s["brief"]["path"], repo / "BRIEF.md"), s["brief"])
+        self.assertEqual((s["brief"]["aim"], s["state_md"]["aim"]), (mine, theirs))
+        for text, aim in (("# Brief: shop\n\n## Roadmap\n- [ ] Ship it\n", None),
+                          ("# Brief: shop\nAIM: none\n", "none")):
+            (repo / "BRIEF.md").write_text(text, encoding="utf-8")
+            self.assertEqual(self.where(repo, "--brief").splitlines()[1], f"AIM {theirs}")  # falls back
+            self.assertEqual(self.where(repo).splitlines()[1], f"AIM     {theirs}")
+            self.assertEqual(json.loads(self.where(repo, "--json"))["brief"]["aim"], aim)
+        alone = self.repo({"BRIEF.md": f"# Brief: shop\nAIM: {mine}\n"}, name="alone")  # no STATE.md
+        self.assertEqual(self.where(alone, "--brief").splitlines()[1], f"AIM {mine}")
+
+    def test_brief_md_roadmap(self):
+        """The roadmap is the open top-level lines under `## Roadmap` that do not wait on you, in file order, fences
+        skipped, shaped like followups: `title` is the bet, `text` the whole item. The first non-empty `AIM:` outside
+        fences is the aim. A BRIEF.md that cannot be read counts as missing."""
+        w = load_where()
+        text = ("# Brief: shop\n\n```\nAIM: Help a fenced example\n```\nAIM:\nAIM: Help bakers take preorders\n\n"
+                "## Scope\n- [ ] not a bet\n\n## Roadmap\n- [ ] Test the riskiest assumption: serves evidence (size S)"
+                "\n  - [ ] a sub-task\n```\n- [ ] fenced example\n```\n- [x] Shipped thing\n- [~] Half-done thing\n"
+                "- [ ] Pick the domain (you)\n* [ ] Ship the importer: serves 5 weekly users (size M)\n"
+                "- [ ] Bump the deps | effort S\n\n## Decisions\n- [ ] not a bet either\n")
+        (self.tmp / "BRIEF.md").write_text(text, encoding="utf-8")
+        b = w.brief_md(self.tmp)
+        self.assertEqual((b["path"], b["aim"]), (str(self.tmp / "BRIEF.md"), "Help bakers take preorders"))
+        self.assertEqual(b["roadmap"], [
+            {"id": "BRIEF.md:13", "title": "Test the riskiest assumption",
+             "text": "Test the riskiest assumption: serves evidence (size S)"},
+            {"id": "BRIEF.md:21", "title": "Ship the importer",
+             "text": "Ship the importer: serves 5 weekly users (size M)"},
+            {"id": "BRIEF.md:22", "title": "Bump the deps", "text": "Bump the deps | effort S"}])  # Q2's evidence
+        (self.tmp / "BRIEF.md").write_text("# Brief: shop\n\n## Roadmap\n", encoding="utf-8")
+        self.assertEqual((w.brief_md(self.tmp)["aim"], w.brief_md(self.tmp)["roadmap"]), (None, []))
+        with mock.patch.object(w.Path, "read_text", side_effect=OSError("denied")):
+            self.assertIsNone(w.brief_md(self.tmp))
+        self.assertIsNone(w.brief_md(self.home))
+
+    def test_a_worktree_reads_the_main_checkouts_brief_md(self):
+        """The interview leaves BRIEF.md uncommitted until the first phase's branch, so a worktree cut before that has
+        none: it reads the main checkout's, as for STATE.md. Its own wins."""
+        repo = self.repo(branch="checkout/cart")
+        (repo / "BRIEF.md").write_text("# Brief: shop\nAIM: Help bakers take preorders\n\n## Roadmap\n- [ ] Ship it\n",
+                                       encoding="utf-8")
+        wt = self.tmp / "shop-wt"
+        self.git(repo, "worktree", "add", "-q", "-b", "checkout/payment", str(wt))
+        s = json.loads(self.where(wt, "--json"))
+        self.assertTrue(os.path.samefile(s["brief"]["path"], repo / "BRIEF.md"), s["brief"])
+        self.assertEqual(s["brief"]["roadmap"], [{"id": "BRIEF.md:5", "title": "Ship it", "text": "Ship it"}])
+        self.assertIn("AIM Help bakers take preorders", self.where(wt, "--brief"))
+        (wt / "BRIEF.md").write_text("AIM: Help only here\n", encoding="utf-8")
+        self.assertEqual(json.loads(self.where(wt, "--json"))["brief"]["aim"], "Help only here")
 
     def test_state_md_plan_without_running_phase(self):
         text = "## Plan: Emails\n- [x] P1 Templates\n- [ ] P2 Sending\n\n## 2026-09-23\n- Next: Pick a mail provider.\n"

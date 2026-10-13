@@ -201,6 +201,47 @@ class StampTests(unittest.TestCase):
         self.assertIn("With `auto_merge` true and a phase PR open that has no `(you)` merge follow-up, keep the "
                       "middle sentence", finish)
 
+    def test_wrap_never_commits_a_lone_brief_on_a_protected_branch(self):
+        text = body("wrap")
+        step = text.split("## 4. Commit work in progress", 1)[1].split("## 5.", 1)[0]
+        stop = "Never commit on a branch in `protected` (trunks, the PROD branch, and where open PRs land). " \
+               "If you are on one, stop and tell the user."
+        self.assertIn(stop, step)  # the rule holds for everything but a lone BRIEF.md
+        lone = "But a new or changed BRIEF.md alone is no reason to commit or to stop there: leave it in the tree, " \
+               "and it rides on the next phase's branch."
+        self.assertIn(lone, step)
+        self.assertLess(step.index(stop), step.index(lone))
+        self.assertIn("On a feature branch, stage a new or changed BRIEF.md with the rest, by name", step)
+        hand = text.split("## 6.5 Hand the open phase to a run", 1)[1].split("## 7.", 1)[0]
+        self.assertIn("not counting a STATE.md the repo does not track or a new or changed BRIEF.md (it rides on the "
+                      "phase branch)", hand)
+        # the plan's last phase ticks its Roadmap line before the push, so the PR carries it
+        done = text.split("## 6. Only if the phase is complete", 1)[1].split("## 6.5", 1)[0]
+        tick = done.index("No phase left in this plan after this one, and the plan served a BRIEF.md Roadmap line")
+        self.assertLess(tick, done.index("Push the feature branch"))
+        self.assertIn("mark that line `[x]` in the BRIEF.md at `top` (in a linked worktree with none, copy "
+                      "`brief.path` there first) and commit it with this phase", done)
+        self.assertIn("named in its `## Bet`", done)
+        resume = body("resume").split("## 4. Test, then wrap", 1)[1].split("## 5.", 1)[0]
+        self.assertIn("A new or changed BRIEF.md in the tree is the project's brief: wrap stages it with this slice's "
+                      "commit (the phase branch is never protected).", resume)
+
+    def test_a_branch_switch_carries_brief_md(self):
+        """BRIEF.md is uncommitted, or on one phase branch only, until a phase PR lands it on the trunk: a switch to a
+        branch without it must neither stop on it (blocked dirty tree) nor drop it (the brief runs again)."""
+        get = body("resume").split("## 2. Get on the phase branch", 1)[1].split("**judge**", 1)[0]
+        carry = get.index("- BRIEF.md crosses the switch")
+        self.assertLess(get.index("`git switch -c <branch> origin/<base>`"), carry)
+        self.assertLess(carry, get.index("`YAH-RESULT: blocked dirty tree`"))
+        for s in ("copy it outside the repo first", "if it alone blocks the switch, `git restore BRIEF.md` (delete an "
+                  "untracked one), since the copy keeps it", "then copy it back"):
+            self.assertIn(s, get[carry:], s)
+        auto = body("auto")
+        row = next(ln for ln in auto.splitlines() if ln.startswith("| You are not on the phase's branch"))
+        self.assertIn("Switch to it if the tree is clean or only BRIEF.md changed, carrying BRIEF.md over: copy it "
+                      "outside the repo, `git restore` it (delete an untracked one) only if it blocks the switch, "
+                      "switch, then copy it back. Otherwise say so and ask.", row)
+
     def test_wrap_never_tells_the_session_to_merge(self):
         text = body("wrap")
         self.assertNotIn("Merging is always the user's", text)  # true only with auto_merge off
@@ -429,9 +470,11 @@ class AutoTests(unittest.TestCase):
         self.assertIn("**plan it** (section 3)", rows[self.row("A task was given")])
         self.assertIn("Route the answer as a given task", rows[self.row("No plan and no NEXT")])
         plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
-        steps = ("Enter plan mode", "`yah:deep`", "AskUserQuestion", "`## Decisions`", "Then ExitPlanMode",
-                 "`yah:phases`", "**start the run**")
-        at = [plan.index(s) for s in steps]
+        explore = plan.index("Explore only what the task touches")
+        self.assertLess(plan.index("Enter plan mode"), explore)
+        steps = ("`yah:deep`", "AskUserQuestion", "`## Decisions`", "Then ExitPlanMode", "`yah:phases`",
+                 "**start the run**")
+        at = [plan.index(s, explore) for s in steps]  # the task rounds before it ask and decide too
         self.assertEqual(at, sorted(at))  # deep-check, then ask everything, then exit, then track, then run
         self.assertIn("before ExitPlanMode", plan)
         self.assertIn("a `branch` and a `base`", plan)  # yah run --plan stops at a phase with no branch
@@ -537,27 +580,148 @@ class AutoTests(unittest.TestCase):
         self.assertIn("Only the run driver merges, with `auto_merge` on (the default).", self.body)
         self.assertNotIn("only when `auto_merge` is on", self.body)  # it is on unless config turns it off
 
-    def test_q1_asks_the_aim_once_right_before_the_pick(self):
-        rows, aim, empty = self.rows(), self.row("No AIM"), self.row("No plan and no NEXT")
-        self.assertEqual(aim + 1, empty)  # only where nothing says what to do: never before a task or a NEXT
-        self.assertLess(self.row("A task was given"), aim)
-        self.assertIn("`none` included", rows[aim])  # the block hides `AIM: none`, so --json decides
-        self.assertIn("read the table again", rows[aim])
-        q1 = self.body[self.body.index("**Q1, the aim**"):self.body.index("**Q2, the pick**")]
-        for s in ("`Help [primary user] [outcome] when [situation]`", "README's first 40 lines", "never explore further",
-                  "`AIM: <sentence>`", "file at `store.path`", "Never create a second STATE.md", "`AIM: none`"):
-            self.assertIn(s, q1)
+    def test_the_brief_interview_runs_once_outside_plan_mode(self):
+        rows, none, empty = self.rows(), self.row("No brief"), self.row("No plan and no NEXT")
+        task, brief = self.row("A task was given"), self.row("The task is `brief`")
+        self.assertEqual(none + 1, empty)  # only where nothing says what to do: never before a task or a NEXT
+        self.assertLess(task, none)
+        # it writes only BRIEF.md, which a live run's sessions commit, so a run does not block it
+        self.assertLess(self.row("No project"), brief)
+        self.assertLess(brief, self.row("A live run in this checkout"))
+        self.assertLess(brief, task)
+        self.assertIn("other than `here` or `brief`", rows[task])
+        for s in ("`${CLAUDE_SKILL_DIR}/brief.md`", "outside plan mode", "read the table again with no task",
+                  "even beside a live run, since it writes only BRIEF.md, which the run's sessions commit"):
+            self.assertIn(s, rows[brief], s)
+        # the block shows no decline and no brief field, so --json decides
+        for s in ("`where.py --json --no-gh`", "`brief` is null", "`state_md.brief_declined` is not true",
+                  "`BRIEF: none`, or the old `AIM: none`", "`${CLAUDE_SKILL_DIR}/brief.md`", "outside plan mode",
+                  "read the table again"):
+            self.assertIn(s, rows[none], s)
+        self.assertNotIn("`state_md.aim` is not `none`", self.body)  # declining the brief no longer hides the AIM
+        self.assertTrue((ROOT / "skills/auto/brief.md").is_file())
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        step0 = plan.index("\n0. No brief")
+        self.assertLess(step0, plan.index("Enter plan mode"))
+        self.assertIn("outside plan mode, then come back to step 1", plan[step0:plan.index("Enter plan mode")])
+        the_brief = self.body[self.body.index("**The brief**"):self.body.index("**Q2, the pick**")]
+        for s in ("BRIEF.md at the repo root", "`${CLAUDE_SKILL_DIR}/brief.md`", "outside plan mode", "`BRIEF: none`",
+                  "file at `store.path`", "never offered again unasked", "the task `brief`",
+                  # a worktree's edit rides on its own branch, never on the main checkout's file
+                  "Every BRIEF.md edit goes to the one at this checkout's root (`top`)",
+                  "copy the main checkout's (`brief.path`) there first"):
+            self.assertIn(s, the_brief, s)
+        self.assertNotIn("`AIM: none` in the file", the_brief)
+        # Q1 drafted a one-line aim from a peek at the README; the interview replaced it
+        for gone in ("README's first 40 lines", "never explore further", "**Q1, the aim**", "Q1 and Q2", "No AIM"):
+            self.assertNotIn(gone, self.body, gone)
 
-    def test_q2_offers_a_b_c_from_the_follow_ups_and_keeps_the_old_question_without_them(self):
+    def test_q2_offers_a_b_c_from_the_follow_ups_and_the_roadmap_and_keeps_the_old_question_without_them(self):
         row = self.rows()[self.row("No plan and no NEXT")]
         self.assertIn("`state_md.followups`", row)
+        self.assertIn("`brief.roadmap`", row)
         self.assertLess(row.index("**Q2**"), row.index("nothing to rank. Ask one question"))
+        self.assertIn("With neither, there is nothing to rank", row)
         q2 = self.body[self.body.index("**Q2, the pick**"):self.body.index("## 3. Plan it")]
         for s in ("own `text`", "impact H/M/L", "effort S/M/L", "words you quote", "`absent`", "never an estimate",
-                  "discovery task", "Never read code or docs to rank",
+                  "discovery task", "`brief.roadmap`", "BRIEF.md's AIM and `## Success` section",
+                  "the AIM alone with no brief", "a Roadmap line's `(size S/M/L)` is its effort",
+                  "Never read code or other docs to rank: BRIEF.md is the one document Q2 reads",
                   "`A/B/C | id title | outcome | impact/effort | evidence | done-when`",
-                  "I recommend A; 'auto' lets me choose", "Other for a new task", "Route the pick"):
-            self.assertIn(s, q2)
+                  "I recommend A; 'auto' lets me choose", "Other for a new task", "Route the pick",
+                  "A Roadmap line picked and done as a tiny task: mark it `[x]` before `yah:wrap`, which commits it"):
+            self.assertIn(s, q2, s)
+        self.assertNotIn("Never read code or docs to rank", q2)  # BRIEF.md is a doc it reads
+
+    def test_task_rounds_come_before_exploring(self):
+        plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
+        enter, explore = plan.index("Enter plan mode"), plan.index("Explore only what the task touches")
+        rounds = plan[enter:explore]
+        for s in ("1-2 AskUserQuestion rounds of at most 4 questions", "from BRIEF.md and the task", "never generic",
+                  "recommended one first with a one-line why", "why now", "which brief goal it serves",
+                  "whether it changes the brief", "done-when, as the user would see it", "what to leave out",
+                  "prototype first, or build it right", "already answers, and say so in one line",
+                  "`auto` takes the recommended option", "under `## Decisions` in the plan file"):
+            self.assertIn(s, rounds, s)
+        self.assertIn("after the rounds", plan[explore:])
+        # the Bet, deep's prompt and the decision rounds all lean on the brief
+        for s in ("tied to BRIEF.md's Success signal and the AIM when there is one", "naming the Roadmap line it serves",
+                  "BRIEF.md's AIM, Success and Won't lines (or the AIM alone with no brief)",
+                  "the trade-off each one commits to, and a recommendation tied to BRIEF.md (or the AIM)"):
+            self.assertIn(s, plan, s)
+        self.assertNotIn("with a brief that stands alone", plan)  # deep gets a prompt; the brief is BRIEF.md
+        # approved: the Roadmap line goes [~] and brief changes are written, but nothing is committed yet
+        approved = plan[plan.index("6. Approved"):]
+        for s in ("mark it `[~]`", "a new non-goal, a changed success signal", "dated line under its `## Decisions`",
+                  "Do not commit BRIEF.md here: it rides on the first phase's branch"):
+            self.assertIn(s, approved, s)
+        self.assertNotIn("the plan's `## Brief`", plan)  # written out before the plan, so a Q3 skip keeps it
+        self.assertLess(approved.index("mark it `[~]`"), approved.index("`yah:phases`"))
+        start = self.body.split("## 4. Start the run", 1)[1]
+        self.assertIn("A new or changed BRIEF.md alone does not count", start)  # the dirty-tree question
+        drop = self.rows()[self.row("The RUN line says the run `ended` with exit 9")]
+        self.assertIn("A `[~]` Roadmap line in BRIEF.md that the dropped plan served goes back to `[ ]`", drop)
+        # no phase left to wrap after the shrink, so nothing else would close the Roadmap line
+        shrink = drop[drop.index("Shrink:"):drop.index("Drop:")]
+        self.assertIn("A shrink that leaves no open phase first marks the plan's `[~]` Roadmap line `[x]` (`[ ]` if "
+                      "the user says its outcome was not reached)", shrink)
+
+    def test_brief_md_has_every_round_and_section(self):
+        text = (ROOT / "skills/auto/brief.md").read_text("utf-8")
+        self.assertFalse(text.startswith("---"))  # a supporting file the skill reads, not a skill
+        heads = ["**Round 1: person and problem**", "**Round 2: success and evidence**",
+                 "**Round 3: trade-offs and scope**", "**Round 4: constraints and taste**", "**Round 5: pre-mortem**",
+                 "**Round 6: the mirror**"]
+        at = [text.index(h) for h in heads]
+        self.assertEqual(at, sorted(at))
+        self.assertLess(text.index("## 1. Read first, ask second"), at[0])  # the scout read comes first
+        for s in ("Explore agent", "300 words or fewer", "`git log --oneline -20`", "any `AIM:` line",
+                  "at most 4 questions, at most 6 rounds", "outside plan mode", "Never offer generic options",
+                  "(Recommended)", "`(assumed)`", "`(not asked)`", "\"auto the rest\"", "\"skip\"",
+                  # the technique rules
+                  "Ask about past behavior, never opinions", "until it bottoms out", "A vague word",
+                  "names a feature instead of a problem", "never smoothed over", "every tension",
+                  # the decline path
+                  "\"no brief\", at any point: write `BRIEF: none`", "file at `store.path`",
+                  "never offered again unasked", "Never create a second STATE.md",
+                  "Leave any `AIM:` line as it is: it stays the project's aim",
+                  "\"no brief\" only ends the update: change nothing",
+                  # plan mode can write only the plan file: write the brief out before any plan, so a skip keeps it
+                  "under `## Brief` in the plan file (\"no brief\" puts `BRIEF: none` there)",
+                  "Then ExitPlanMode with the `## Brief` alone, and once it is approved, write it out as below at once",
+                  "a plan that is skipped or never approved must not lose it",
+                  "the table must not send you back here", "its step 1 then enters plan mode again",
+                  # an empty repo has nothing to draft from; a given task is a source
+                  "No product in the summary (no README, no code) and no task given: before Round 1, ask one open "
+                  "question", "what do they want to build, and for whom?",
+                  "the Explore summary, the task when there is one, and every earlier answer",
+                  # a probe has a slot; the why chain is one
+                  "Each takes the place of that round's least-needed question, which moves to a later round with room",
+                  "Then, as a probe, ask why of that answer",
+                  # an update keeps what it did not re-ask
+                  "Read BRIEF.md yourself first", "edit only the sections those rounds cover, in place",
+                  "keep every other section, each Roadmap line's mark and the `## Decisions` lines",
+                  "Platform and stack: web, mobile, desktop, CLI or API",
+                  "Write BRIEF.md at the root of this checkout (`top`)",
+                  "copies the main checkout's (`brief.path`) there first"):
+            self.assertIn(s, text, s)
+        for gone in ("by its step 6", "write `AIM: none`", "above any `AIM:` line already there"):
+            self.assertNotIn(gone, text, gone)
+        for n in range(1, 6):  # AskUserQuestion takes at most 4 questions a round
+            part = text[at[n - 1]:at[n]]
+            self.assertLessEqual(sum(1 for ln in part.splitlines() if ln.startswith("- ")), 4, f"round {n}")
+        template = text[text.index("```markdown"):]
+        template = template[:template.index("\n```", 3)]
+        lines = template.splitlines()
+        self.assertIn("AIM: Help <who> <outcome> when <situation>", lines)
+        self.assertIn("- [ ] <bet>: serves <success signal> (size S/M/L)", lines)  # where.py reads it as roadmap
+        sections = ["# Brief: <project>", "## Who and problem", "## Why it matters", "## Success", "## Scope",
+                    "## Constraints", "## Taste", "## Risks and assumptions", "## Decisions", "## Roadmap"]
+        at = [lines.index(s) for s in sections]
+        self.assertEqual(at, sorted(at))
+        self.assertLess(lines.index("AIM: Help <who> <outcome> when <situation>"), lines.index("## Who and problem"))
+        self.assertIn("Do not commit BRIEF.md here", text)
+        self.assertIn("BRIEF.md's AIM wins", text)
 
     def test_every_plan_gets_a_bet_and_ends_with_q3(self):
         plan = self.body.split("## 3. Plan it", 1)[1].split("## 4. Start the run", 1)[0]
@@ -576,8 +740,10 @@ class AutoTests(unittest.TestCase):
         self.assertIn("`NEEDS-HUMAN: stop-if hit: <which>, <evidence>`", text)
 
     def test_wrap_and_phases_keep_the_aim_line(self):
-        self.assertIn("never move, reword or delete it", body("wrap"))
-        self.assertIn("never move or rewrite it", body("phases"))
+        self.assertIn("above all the `AIM:` and `BRIEF: none` lines under the `#` title: never move, reword or delete "
+                      "them", body("wrap"))
+        self.assertIn("keep the `AIM:` and `BRIEF: none` lines under the `#` title as they are: never move or rewrite "
+                      "them", body("phases"))
 
 
 class BeadsTests(unittest.TestCase):
@@ -840,6 +1006,43 @@ class DocsTests(unittest.TestCase):
                               entry["description"])
         self.assertFalse(market["metadata"]["description"].lower().startswith("beads"))
         self.assertNotIn("never merges", market["metadata"]["description"].lower())
+
+    def test_the_brief_section_replaced_aim_and_bets(self):
+        self.assertNotIn("## Aim and bets", self.readme)
+        self.assertNotIn("#aim-and-bets", self.readme)
+        brief = self.section("## The brief, the questions and bets")
+        self.assertGreaterEqual(self.readme.count("(#the-brief-the-questions-and-bets)"), 4)
+        for want in ("once per project", "outside plan mode", "Explore agent", "the last 20 commits",
+                     "300 words or fewer", "up to 6 rounds", "**Person and problem:**", "**Success and evidence:**",
+                     "**Trade-offs and scope:**", "**Constraints and taste:**", "**Pre-mortem:**", "**The mirror:**",
+                     "never generic", "what you did, not what you would do", "A vague word",
+                     "what would you do with it?", "instead of being smoothed over",
+                     "`auto` takes the recommended answer", "`(assumed)`", '"auto the rest"', '"skip"',
+                     '"no brief"', "`BRIEF: none`", "an AIM already there stays",
+                     "An empty repo with no task first gets one open question",
+                     "the platform, stack and deploy target", "`AIM: Help <who> <outcome> when <situation>`",
+                     "`## Who and problem`", "`## Why it matters`", "`## Success`", "`## Scope`", "`## Constraints`",
+                     "`## Taste`", "`## Risks and assumptions`", "`## Decisions`", "`## Roadmap`",
+                     "`- [ ] <bet>: serves <success signal> (size S/M/L)`", "never on a protected branch",
+                     "Its AIM wins over STATE.md's in `/yah:where`", "`yah <project> brief`",
+                     "**The task rounds**", "before Claude explores", "Why now", "what to leave out",
+                     "prototype first, or build it right", "the brief's open `## Roadmap` lines",
+                     "BRIEF.md is the only document it reads", "tied to BRIEF.md's Success signal and the AIM"):
+            self.assertIn(want, brief, want)
+        for gone in ("README's first 40 lines", "in at most three questions", "1. **The aim**"):
+            self.assertNotIn(gone, self.readme, gone)
+        self.assertIn("`yah shop brief`", self.readme)  # the task word next to `here`
+        self.assertIn("`/yah:auto brief`", self.readme)
+        writes = self.section("## What it reads, writes and never does")
+        self.assertIn("`BRIEF.md` at the repo root", writes)
+        self.assertIn("BRIEF.md is committed on the first plan phase's branch with that phase's work, never on a "
+                      "protected branch.", writes)
+        self.assertIn("| `skills/auto/brief.md` |", writes)
+        state = self.section("## Plan state")
+        self.assertIn("BRIEF.md's AIM, when it has one other than `none`, wins over it", state)
+        self.assertIn("A `BRIEF: none` line here means you declined the [brief]", state)
+        self.assertIn("A switch of branch carries the newest copy over", writes)
+        self.assertIn("`yah shop brief` still runs the interview, since it writes only BRIEF.md", self.readme)
 
     def test_auto_merge_section_is_on_by_default(self):
         runs = self.section("## Hands-free runs")
